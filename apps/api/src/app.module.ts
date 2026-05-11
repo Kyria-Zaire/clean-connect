@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common'
 import { ConfigModule } from '@nestjs/config'
 import { APP_GUARD, APP_PIPE } from '@nestjs/core'
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler'
+import { ThrottlerModule } from '@nestjs/throttler'
 import { LoggerModule } from 'nestjs-pino'
 import { ZodValidationPipe } from 'nestjs-zod'
 
 import { loadEnv } from './common/config/env'
+import { ConditionalThrottlerGuard } from './common/guards/conditional-throttler.guard'
 import { PrismaModule } from './common/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
@@ -69,7 +70,7 @@ import { UsersModule } from './modules/users/users.module'
     UsersModule,
   ],
   providers: [
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: ConditionalThrottlerGuard },
     { provide: APP_PIPE, useClass: ZodValidationPipe },
   ],
 })

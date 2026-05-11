@@ -14,7 +14,7 @@
 
 import { Test } from '@nestjs/testing'
 import type { INestApplication } from '@nestjs/common'
-import { ValidationPipe, VersioningType } from '@nestjs/common'
+import { VersioningType } from '@nestjs/common'
 import { Logger as PinoLogger } from 'nestjs-pino'
 import request from 'supertest'
 
@@ -34,6 +34,16 @@ jest.setTimeout(120_000)
 
 const BASE = '/api/v1/auth'
 
+/**
+ * Désactive le rate-limit pendant cette suite via la variable d'env
+ * `DISABLE_THROTTLE=true` (consommée par `ConditionalThrottlerGuard`).
+ * Les décorateurs `@Throttle` per-route (5/min signup, 10/min login,
+ * 30/min refresh) restent en place et sont vérifiés indépendamment par
+ * `auth-rate-limit.integration.spec.ts`. Sans ce bypass, la 6e requête
+ * signup retourne 429 et masque les vraies erreurs métier.
+ * Garde-fou prod : `env.ts` rejette `DISABLE_THROTTLE=true` en
+ * `NODE_ENV=production` (crash boot).
+ */
 async function buildApp(): Promise<INestApplication> {
   process.env['JWT_ACCESS_SECRET'] =
     process.env['JWT_ACCESS_SECRET'] ??
@@ -43,12 +53,12 @@ async function buildApp(): Promise<INestApplication> {
     'ci_refresh_secret_min_48_chars___________________________________________'
   process.env['THROTTLE_LIMIT'] = '10000'
   process.env['THROTTLE_TTL_SECONDS'] = '60'
+  process.env['DISABLE_THROTTLE'] = 'true'
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
   const app = moduleRef.createNestApplication()
   app.setGlobalPrefix('api', { exclude: ['healthz', 'readyz'] })
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' })
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }))
   app.useGlobalFilters(new AllExceptionsFilter(app.get(PinoLogger)))
   await app.init()
   return app

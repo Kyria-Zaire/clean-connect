@@ -1,4 +1,4 @@
-import { ValidationPipe, VersioningType } from '@nestjs/common'
+import { VersioningType } from '@nestjs/common'
 import { NestFactory } from '@nestjs/core'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger'
@@ -39,13 +39,11 @@ async function bootstrap() {
   app.setGlobalPrefix('api', { exclude: ['healthz', 'readyz'] })
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' })
 
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-    }),
-  )
+  // NB : pas de `ValidationPipe` (class-validator) global — toutes les routes
+  // utilisent des DTOs `createZodDto`, validés par `ZodValidationPipe` enregistré
+  // en `APP_PIPE` (cf. app.module.ts). Cumuler les deux faisait rejeter par
+  // `forbidNonWhitelisted` un body déjà validé par Zod (bug détecté en Verify
+  // PRD-001 Ticket 1.6).
 
   app.useGlobalFilters(new AllExceptionsFilter(app.get(PinoLogger)))
 

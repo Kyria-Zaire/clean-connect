@@ -41,6 +41,16 @@ const envSchema = z
 
     THROTTLE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(120),
+
+    /**
+     * Bypass total du Throttler — réservé aux tests d'intégration (cf.
+     * `ConditionalThrottlerGuard`). CRASH BOOT si activé en production
+     * (`superRefine` plus bas). Jamais lu dans le code métier hors guard.
+     */
+    DISABLE_THROTTLE: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('false')
+      .transform((v) => v === 'true'),
   })
   .superRefine((data, ctx) => {
     // Garde-fou Stripe ↔ environnement (cf. rule securite + stripe)
@@ -61,6 +71,14 @@ const envSchema = z
         message:
           'JWT_ACCESS_SECRET et JWT_REFRESH_SECRET doivent être différents (ADR-004).',
         path: ['JWT_REFRESH_SECRET'],
+      })
+    }
+    // Garde-fou sécurité : impossible de désactiver le throttler en prod.
+    if (data.DISABLE_THROTTLE && data.NODE_ENV === 'production') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'DISABLE_THROTTLE=true interdit en NODE_ENV=production.',
+        path: ['DISABLE_THROTTLE'],
       })
     }
   })
