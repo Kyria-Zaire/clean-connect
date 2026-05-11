@@ -1,11 +1,6 @@
 import { Controller, Get } from '@nestjs/common'
-import {
-  HealthCheck,
-  type HealthCheckResult,
-  HealthCheckService,
-  PrismaHealthIndicator,
-} from '@nestjs/terminus'
 import { ApiTags } from '@nestjs/swagger'
+import { HealthCheck, type HealthCheckResult, HealthCheckService } from '@nestjs/terminus'
 
 import { PrismaService } from '../../common/prisma/prisma.service'
 
@@ -14,7 +9,6 @@ import { PrismaService } from '../../common/prisma/prisma.service'
 export class HealthController {
   constructor(
     private readonly health: HealthCheckService,
-    private readonly prismaHealth: PrismaHealthIndicator,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -27,6 +21,20 @@ export class HealthController {
   @Get('readyz')
   @HealthCheck()
   readiness(): Promise<HealthCheckResult> {
-    return this.health.check([() => this.prismaHealth.pingCheck('database', this.prisma)])
+    return this.health.check([
+      async () => {
+        // Health check Prisma manuel (terminus.PrismaHealthIndicator a un mismatch
+        // de types avec @prisma/client, cf. Nest issue connue). $queryRaw SELECT 1
+        // est l'équivalent fonctionnel et stable.
+        const start = Date.now()
+        try {
+          await this.prisma.$queryRaw`SELECT 1`
+          return { database: { status: 'up', responseTimeMs: Date.now() - start } }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'unknown'
+          return { database: { status: 'down', message } }
+        }
+      },
+    ])
   }
 }

@@ -6,9 +6,9 @@ export default function NotFoundScreen(): JSX.Element {
     <>
       <Stack.Screen options={{ title: 'Oops' }} />
       <View className="flex-1 items-center justify-center bg-white p-5">
-        <Text className="mb-4 text-xl font-bold">Cette page n'existe pas.</Text>
+        <Text className="mb-4 text-xl font-bold">{"Cette page n'existe pas."}</Text>
         <Link href="/" className="text-base text-brand">
-          Retour à l'accueil
+          {"Retour à l'accueil"}
         </Link>
       </View>
     </>

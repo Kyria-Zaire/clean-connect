@@ -1,5 +1,5 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { formatEUR } from '@cc/shared-types'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -20,7 +20,7 @@ export function App(): JSX.Element {
           Démo commission : {formatEUR(19900)} → commission {formatEUR(3582)}
         </div>
         <p className="mt-6 text-sm text-neutral-500">
-          shadcn/ui sera scaffoldé au premier PRD touchant l'admin.
+          {'shadcn/ui sera scaffoldé au premier PRD touchant l\'admin.'}
         </p>
       </main>
     </QueryClientProvider>

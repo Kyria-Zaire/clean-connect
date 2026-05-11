@@ -4,8 +4,8 @@
  * Stockage : AsyncStorage en Phase Dev (ADR-001), basculera sur MMKV en Phase Pré-MVP.
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage'
 import type { Role } from '@cc/shared-types'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 
 const ACTIVE_ROLE_KEY = 'cc.activeRole'
 
