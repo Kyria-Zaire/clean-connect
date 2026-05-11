@@ -1,0 +1,30 @@
+/**
+ * Chargé via `setupFiles` dans `jest.integration.config.ts` — AVANT tout import
+ * de `AppModule` (qui valide `loadEnv()` au chargement du module).
+ *
+ * Les jobs CI injectent déjà ces variables ; ce fichier garantit des valeurs
+ * déterministes en local (`pnpm --filter @cc/api run test:integration`).
+ */
+
+const access = 'ci_jwt_access_secret_min_48_chars_______________________________________'
+const refresh = 'ci_refresh_secret_min_48_chars___________________________________________'
+
+process.env['NODE_ENV'] = process.env['NODE_ENV'] ?? 'recette'
+process.env['APP_ENV'] = process.env['APP_ENV'] ?? 'recette'
+process.env['JWT_ACCESS_SECRET'] = process.env['JWT_ACCESS_SECRET'] ?? access
+process.env['JWT_REFRESH_SECRET'] = process.env['JWT_REFRESH_SECRET'] ?? refresh
+process.env['JWT_ACCESS_EXPIRES_IN'] = process.env['JWT_ACCESS_EXPIRES_IN'] ?? '15m'
+process.env['JWT_REFRESH_EXPIRES_IN'] = process.env['JWT_REFRESH_EXPIRES_IN'] ?? '30d'
+
+process.env['DATABASE_URL'] =
+  process.env['DATABASE_URL'] ??
+  process.env['DATABASE_URL_TEST'] ??
+  'postgresql://test:test@localhost:5433/cleanconnect_test'
+process.env['REDIS_URL'] = process.env['REDIS_URL'] ?? process.env['REDIS_URL_TEST'] ?? 'redis://localhost:6380'
+
+process.env['CORS_ORIGINS'] = process.env['CORS_ORIGINS'] ?? 'http://localhost:5173'
+process.env['STRIPE_SECRET_KEY'] = process.env['STRIPE_SECRET_KEY'] ?? 'sk_test_ci_placeholder'
+process.env['STRIPE_WEBHOOK_SECRET'] = process.env['STRIPE_WEBHOOK_SECRET'] ?? 'whsec_ci_placeholder'
+
+process.env['THROTTLE_LIMIT'] = process.env['THROTTLE_LIMIT'] ?? '10000'
+process.env['THROTTLE_TTL_SECONDS'] = process.env['THROTTLE_TTL_SECONDS'] ?? '60'

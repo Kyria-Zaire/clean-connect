@@ -1,7 +1,7 @@
 /**
  * Global setup pour Jest integration tests.
- * Démarre le container Postgres+PostGIS éphémère (docker-compose.test.yml)
- * et applique la migration init.
+ * Complété par `jest-env.setup.ts` (setupFiles) : secrets JWT, Stripe placeholder, etc.
+ * Ici on force surtout `DATABASE_URL` depuis `DATABASE_URL_TEST` si besoin.
  */
 
 // eslint-disable-next-line @typescript-eslint/require-await
