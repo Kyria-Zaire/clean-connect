@@ -17,7 +17,11 @@ FROM node:${NODE_VERSION}-alpine AS deps
 RUN apk add --no-cache libc6-compat openssl
 WORKDIR /repo
 
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+# corepack embarqué dans node:20.18-alpine a des clés pnpm obsolètes
+# (Cannot find matching keyid) — on upgrade corepack avant activation.
+RUN npm install -g corepack@latest \
+ && corepack enable \
+ && corepack prepare pnpm@${PNPM_VERSION} --activate
 
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml turbo.json ./
 COPY apps/api/package.json ./apps/api/
@@ -46,7 +50,9 @@ ENV NODE_ENV=production
 ENV PORT=3000
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+RUN npm install -g corepack@latest \
+ && corepack enable \
+ && corepack prepare pnpm@${PNPM_VERSION} --activate
 
 COPY --from=builder /repo/apps/api/dist ./dist
 COPY --from=builder /repo/apps/api/package.json ./package.json
