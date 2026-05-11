@@ -13,8 +13,8 @@
 | **ID** | `PRD-001` |
 | **Slug** | `auth-jwt` |
 | **Titre** | Authentification JWT — signup / login / refresh / logout / me |
-| **Version PRD** | `0.5` (Build API + Mobile Bootstrap + Tests + Verify) |
-| **Statut** | `VERIFY_DONE_PENDING_MERGE` |
+| **Version PRD** | `1.0` (Discover + Design + Build + Verify livrés, mergé sur `main`) |
+| **Statut** | `DONE` — mergé en squash dans `01b796f`, tag `v0.1.0-auth-foundation` |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` + `architecte-api` + `mobile` |
 | **Persona pilote** | `senior-dev` (Discover), `architecte-api` (Design + Build BE), `mobile` (Build FE) |
@@ -588,7 +588,8 @@ N/A — pas de paiement dans ce PRD.
 - [x] Vérification Swagger statique §6.4 — DTOs, BearerAuth, Throttle alignés ; **Swagger UI à confirmer en recette** (non bloquant)
 - [x] Faux-verts §6.8 corrigés + couverts par tests
 - [x] Vérifications locales §6.9 toutes vertes
-- [ ] **Validation humaine CTO finale** ← attendue pour autoriser le merge
+- [x] **Validation humaine CTO finale** — *« PR #1 approuvée pour merge. Sprint 1 validé. »* (2026-05-12, CTO)
+- [x] **PR mergée** sur `main` — squash `01b796f`, tag `v0.1.0-auth-foundation` poussé, branche `feat/prd-001-auth-jwt` supprimée.
 
 ---
 
