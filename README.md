@@ -169,6 +169,24 @@ Attendu : `cc-postgres` et `cc-redis` en **healthy**, PostGIS `3.4`, Redis `PONG
 
 **Port Postgres sur l'hôte : `5434`** (et non `5432`) : sur Windows, un PostgreSQL installé en local occupe souvent `127.0.0.1:5432`. Le compose mappe donc le conteneur vers **`localhost:5434`** pour éviter les connexions Prisma vers le mauvais serveur. La variable `DATABASE_URL` dans `.env.example` utilise ce port.
 
+### Prisma, PostGIS et readiness (`/readyz`)
+
+Après `pnpm db:up`, avec `DATABASE_URL` alignée sur le port **5434** (fichier `.env.local` ou variable d'environnement) :
+
+```bash
+pnpm --filter @cc/api run db:generate       # Prisma Client + zod-prisma-types → packages/shared-types/src/zod/generated
+pnpm --filter @cc/api run db:migrate:deploy # applique migrations (dont CREATE EXTENSION postgis)
+docker exec cc-postgres psql -U cc -d cleanconnect_dev -c "\dx"   # doit lister postgis
+```
+
+Démarrer l’API (variables JWT / Stripe / Redis obligatoires — voir `.env.example`), puis :
+
+```bash
+curl -s http://localhost:3000/v1/readyz
+```
+
+Réponse attendue : JSON avec `status: "ok"` et l’indicateur `database` en **up** (ping SQL via Prisma). Le préfixe `/v1` provient du versioning URI de NestJS (`enableVersioning`) configuré dans `apps/api/src/main.ts`.
+
 ### Dev (tout en parallèle via Turborepo)
 
 ```bash

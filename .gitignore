@@ -59,6 +59,9 @@ apps/api/prisma/migrations/dev.db*
 *.db
 *.db-journal
 
+# Schémas Zod générés depuis schema.prisma (régénérés via `pnpm --filter @cc/api run db:generate`)
+packages/shared-types/src/zod/generated/
+
 # ---- Tests / coverage ------------------------------------------------------
 coverage/
 *.lcov
