@@ -1,0 +1,12 @@
+node_modules
+dist
+build
+.turbo
+.next
+coverage
+.expo
+android
+ios
+*.lock
+pnpm-lock.yaml
+docs/CAHIER-DES-CHARGES-v1.3.md

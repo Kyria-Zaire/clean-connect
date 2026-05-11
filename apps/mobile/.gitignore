@@ -1,0 +1,22 @@
+# Expo / RN spécifique app
+node_modules/
+.expo/
+.expo-shared/
+dist/
+web-build/
+
+# Native
+ios/
+android/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Métro
+.metro-health-check*
+
+# Tests
+coverage/

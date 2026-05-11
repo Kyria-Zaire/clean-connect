@@ -1,0 +1,28 @@
+{
+  "name": "@cc/shared-types",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Types et schémas Zod partagés (générés via zod-prisma-types + DTOs métier). Source de vérité des contrats API.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./money": "./src/money.ts",
+    "./zod": "./src/zod/index.ts"
+  },
+  "scripts": {
+    "lint": "echo 'lint: shared-types (TS only)'",
+    "typecheck": "tsc --noEmit",
+    "build": "echo 'build: shared-types published as TS source'",
+    "test": "echo 'test: shared-types (no tests yet)'",
+    "clean": "rimraf dist .turbo"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.0",
+    "typescript": "^5.5.0"
+  }
+}

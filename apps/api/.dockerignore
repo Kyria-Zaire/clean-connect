@@ -1,0 +1,17 @@
+node_modules
+dist
+build
+.turbo
+coverage
+.env
+.env.*
+!.env.example
+*.log
+.git
+.github
+.cursor
+.claude
+.vscode
+.idea
+README.md
+docs

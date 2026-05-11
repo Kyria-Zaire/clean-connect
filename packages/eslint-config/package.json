@@ -1,0 +1,23 @@
+{
+  "name": "@cc/eslint-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Configurations ESLint partagées Clean Connect.",
+  "main": "./base.cjs",
+  "exports": {
+    "./base": "./base.cjs",
+    "./node": "./node.cjs",
+    "./react": "./react.cjs"
+  },
+  "scripts": {
+    "lint": "echo 'lint: eslint-config (no source code to lint)'",
+    "typecheck": "echo 'typecheck: eslint-config (no source code)'",
+    "build": "echo 'build: eslint-config (config files)'",
+    "test": "echo 'test: eslint-config (no tests)'",
+    "clean": "echo 'clean: eslint-config (nothing to clean)'"
+  },
+  "peerDependencies": {
+    "eslint": "^8.57.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,44 @@
+# =============================================================================
+# Clean Connect — Docker Compose (tests d'intégration éphémères)
+# -----------------------------------------------------------------------------
+# Postgres+PostGIS et Redis JETABLES (tmpfs en RAM, pas de persistance).
+# Ports décalés (5433 / 6380) pour ne pas entrer en conflit avec le dev local.
+#
+# Usage :
+#   pnpm db:test:up    # démarre
+#   pnpm db:test:down  # arrête + supprime les volumes
+#
+# Référence : cahier v1.4 §4.3 et rule createur-workflow.
+# =============================================================================
+
+services:
+  postgres-test:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: cc-postgres-test
+    environment:
+      POSTGRES_DB: cleanconnect_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    # RAM uniquement → drop à l'arrêt, perf maximale
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - '5433:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U test -d cleanconnect_test']
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis-test:
+    image: redis:7-alpine
+    container_name: cc-redis-test
+    # Pas de persistance en tests
+    command: redis-server --save "" --appendonly no
+    ports:
+      - '6380:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 2s
+      retries: 5

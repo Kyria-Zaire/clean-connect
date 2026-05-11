@@ -1,0 +1,190 @@
+// =============================================================================
+// Clean Connect — Schéma Prisma
+// -----------------------------------------------------------------------------
+// Sprint 0.2 : "Big Four" — User, Mission, Address, Photo
+//
+// Conventions (rules `architecte-api` + `backend`) :
+//   - Tous les montants sont en centimes (Int) — cf. ADR-002
+//   - PostGIS via Unsupported("geography(Point, 4326)") — cf. ADR-003
+//   - snake_case en DB, camelCase en TS (via @map / @@map)
+//   - Tout select métier doit utiliser take: ou limit() (rule backend)
+// =============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+// Génération automatique des schémas Zod depuis Prisma (à câbler après pnpm install).
+// Référence : ADR-002, rule backend.
+// Sortie : @cc/shared-types/zod/generated (à reconfigurer si on déplace le package).
+generator zod {
+  provider                  = "zod-prisma-types"
+  output                    = "../../../packages/shared-types/src/zod/generated"
+  createInputTypes          = false
+  createModelTypes          = true
+  addInputTypeValidation    = false
+  useMultipleFiles          = true
+  writeBarrelFiles          = true
+  createOptionalDefaultValuesTypes = false
+  prismaClientPath          = "@prisma/client"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis(version: "3.4.0"), pg_trgm]
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+enum Role {
+  CLIENT
+  PRESTATAIRE
+  ADMIN
+}
+
+enum MissionStatus {
+  DRAFT
+  REQUESTED
+  ACCEPTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PhotoType {
+  BEFORE
+  AFTER
+}
+
+// -----------------------------------------------------------------------------
+// User
+// -----------------------------------------------------------------------------
+
+model User {
+  id                String   @id @default(uuid()) @db.Uuid
+  email             String   @unique @db.VarChar(320)
+  passwordHash      String   @map("password_hash")
+  role              Role
+
+  // Stripe — `stripeCustomerId` pour CLIENT, `stripeAccountId` (Connect Express) pour PRESTATAIRE
+  stripeCustomerId  String?  @unique @map("stripe_customer_id")
+  stripeAccountId   String?  @unique @map("stripe_account_id")
+
+  // Adresse de l'utilisateur (résidence client OU base prestataire pour matching)
+  addressId         String?  @unique @map("address_id") @db.Uuid
+  address           Address? @relation(fields: [addressId], references: [id], onDelete: SetNull)
+
+  // Soft delete RGPD — 30j puis purge (sauf obligations légales paiement = 10 ans, cf. cahier v1.4 §3.3)
+  deletedAt         DateTime? @map("deleted_at")
+
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt      @map("updated_at")
+
+  // Relations missions
+  missionsAsClient      Mission[] @relation("MissionClient")
+  missionsAsPrestataire Mission[] @relation("MissionPrestataire")
+
+  @@index([role])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// -----------------------------------------------------------------------------
+// Address
+// -----------------------------------------------------------------------------
+// La colonne `location` n'est pas représentable nativement en Prisma → Unsupported.
+// Insertion / lecture via $queryRaw uniquement (cf. ADR-003 + rule backend).
+
+model Address {
+  id        String   @id @default(uuid()) @db.Uuid
+  street    String   @db.VarChar(255)
+  city      String   @db.VarChar(120)
+  zipCode   String   @map("zip_code") @db.VarChar(10)
+  country   String   @default("FR") @db.Char(2)
+
+  /// geography(Point, 4326) — coordonnées GPS WGS-84 (PostGIS) — cf. ADR-003
+  location  Unsupported("geography(Point, 4326)")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+
+  user      User?
+  missions  Mission[]
+
+  @@index([city])
+  @@index([zipCode])
+  // L'index GIST sur location est créé manuellement dans la migration init.
+  @@map("addresses")
+}
+
+// -----------------------------------------------------------------------------
+// Mission
+// -----------------------------------------------------------------------------
+
+model Mission {
+  id              String        @id @default(uuid()) @db.Uuid
+  status          MissionStatus @default(DRAFT)
+
+  // Acteurs
+  clientId        String        @map("client_id") @db.Uuid
+  client          User          @relation("MissionClient", fields: [clientId], references: [id], onDelete: Restrict)
+
+  prestataireId   String?       @map("prestataire_id") @db.Uuid
+  prestataire     User?         @relation("MissionPrestataire", fields: [prestataireId], references: [id], onDelete: Restrict)
+
+  // Lieu de la mission
+  addressId       String        @map("address_id") @db.Uuid
+  address         Address       @relation(fields: [addressId], references: [id], onDelete: Restrict)
+
+  // Montants — TOUS en centimes (Int) — cf. ADR-002
+  amountCents     Int           @map("amount_cents")
+  commissionCents Int           @map("commission_cents")
+  payoutCents     Int           @map("payout_cents")
+
+  // Planification
+  scheduledAt     DateTime      @map("scheduled_at")
+  durationMinutes Int           @map("duration_minutes")
+
+  // Stripe (séquestre)
+  stripePaymentIntentId String? @unique @map("stripe_payment_intent_id")
+
+  // Photos
+  photos          Photo[]
+
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt      @map("updated_at")
+
+  @@index([status])
+  @@index([clientId])
+  @@index([prestataireId])
+  @@index([scheduledAt])
+  @@map("missions")
+}
+
+// -----------------------------------------------------------------------------
+// Photo
+// -----------------------------------------------------------------------------
+
+model Photo {
+  // L'ID est généré CÔTÉ CLIENT (UUID v4) pour assurer l'idempotence des uploads offline.
+  // Référence : cahier v1.4 §6 (mode offline) + rule mobile.
+  id         String    @id @db.Uuid
+  missionId  String    @map("mission_id") @db.Uuid
+  mission    Mission   @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  type       PhotoType
+  url        String    @db.VarChar(2048)
+
+  /// Cloudinary metadata (cloudId, width, height, bytes, format, exif)
+  metadata   Json      @default("{}")
+
+  // Rétention RGPD : purge automatique 12 mois après fin de mission (rule photos-rgpd)
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([missionId, type])
+  @@map("photos")
+}

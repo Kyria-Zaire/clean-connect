@@ -11,8 +11,9 @@ Clean Connect met en relation des **clients** (particuliers ayant besoin d'un ne
 
 | Phase | Statut |
 |---|---|
-| Phase 0 — Cadrage produit + méthode | ✅ **Terminée** |
-| Phase 1 — Bootstrap monorepo + premier PRD | 🟡 **En cours** |
+| Phase 0 — Cadrage produit + méthode | ✅ Terminée |
+| Phase 1 — Bootstrap monorepo (Sprint 0.2) | ✅ **Terminé** — usine logicielle prête |
+| Phase 1 bis — Premier PRD (PRD-001 Auth JWT) | 🟡 À démarrer |
 | Phase 2 — MVP fonctionnel | ⏳ À venir |
 | Phase 3 — Mise en production Soissons | ⏳ À venir |
 
@@ -86,7 +87,7 @@ clean-connect/
 └── CLAUDE.md                   Config Claude Code projet
 ```
 
-Les éléments en italique ci-dessus sont **à instancier en Phase 1**.
+**Sprint 0.2** : tous les éléments ci-dessus sont **désormais en place** (squelettes prêts à recevoir le code feature au fil des PRDs).
 
 ---
 
@@ -126,26 +127,51 @@ chore(monorepo): bootstrap apps/api
 
 ---
 
-## Démarrage (Phase 1 — bientôt)
+## Démarrage
 
-> ⚠️ Le monorepo n'est pas encore bootstrapé. Les commandes ci-dessous seront fonctionnelles à la fin du **Sprint 0.2**.
+### Prérequis
+- Node `>=20.11` (`.nvmrc` fixé à `20.18.0` — utiliser `nvm use`)
+- pnpm `>=9` (`corepack enable && corepack prepare pnpm@9.12.3 --activate`)
+- Docker Desktop (Postgres+PostGIS + Redis)
+- Expo Go installé sur ton iPhone/Android (pour le mobile) — cf. ADR-001
+
+### Installation
 
 ```bash
-# Cloner et installer
 git clone <repo>
 cd clean-connect
-cp .env.example .env.local        # remplir les secrets
+cp .env.example .env.local        # remplir les secrets locaux
 pnpm install
-
-# Lancer les services Docker (Postgres+PostGIS, Redis)
-docker compose up -d
-
-# Appliquer le schéma DB
-pnpm --filter @cleanconnect/api run db:migrate:dev
-
-# Lancer tout en dev (API + Mobile + Admin)
-pnpm dev
 ```
+
+### Services Docker (Postgres+PostGIS AOF + Redis AOF)
+
+```bash
+pnpm db:up                         # démarre postgres + redis (dev)
+pnpm --filter @cc/api run db:migrate:dev   # applique la migration init (PostGIS inclus)
+pnpm --filter @cc/api run db:seed          # seed (vide pour l'instant)
+```
+
+### Dev (tout en parallèle via Turborepo)
+
+```bash
+pnpm dev
+# Lance : @cc/api (http://localhost:3000) + @cc/mobile (Expo) + @cc/admin (http://localhost:5173)
+```
+
+### Commandes utiles
+
+| Commande | Effet |
+|---|---|
+| `pnpm typecheck` | TypeScript strict sur tout le monorepo |
+| `pnpm lint` | ESLint sur tout le monorepo |
+| `pnpm test` | Tests unitaires |
+| `pnpm test:integration` | Tests d'intégration (containers test éphémères requis : `pnpm db:test:up`) |
+| `pnpm db:test:up` / `pnpm db:test:down` | Démarre/arrête Postgres+Redis éphémères pour tests |
+| `pnpm --filter @cc/api db:studio` | Prisma Studio |
+| `pnpm --filter @cc/api dev` | API seule en mode watch |
+| `pnpm --filter @cc/mobile dev` | Expo Go (QR code) |
+| `pnpm --filter @cc/admin dev` | Admin Vite |
 
 ---
 

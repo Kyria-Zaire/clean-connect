@@ -1,0 +1,24 @@
+{
+  "name": "@cc/design-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Source de vérité unique des tokens visuels Clean Connect (couleurs, radius, typo). Consommé par Tailwind (admin web) et NativeWind (mobile).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tailwind-preset": "./src/tailwind-preset.ts"
+  },
+  "scripts": {
+    "lint": "echo 'lint: design-tokens (no source code to lint yet)'",
+    "typecheck": "tsc --noEmit",
+    "build": "echo 'build: design-tokens published as TS source'",
+    "test": "echo 'test: design-tokens (no tests yet)'",
+    "clean": "rimraf dist .turbo"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.0",
+    "typescript": "^5.5.0"
+  }
+}
