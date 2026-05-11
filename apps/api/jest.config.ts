@@ -5,6 +5,9 @@ const config: Config = {
   testEnvironment: 'node',
   rootDir: '.',
   testRegex: '\\.spec\\.ts$',
+  // Les tests d'intégration ont leur propre runner (jest.integration.config.ts)
+  // qui exige une DB + Redis up — on les exclut du run unitaire par défaut.
+  testPathIgnorePatterns: ['/node_modules/', '\\.integration\\.spec\\.ts$', '/dist/'],
   moduleFileExtensions: ['ts', 'js', 'json'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',

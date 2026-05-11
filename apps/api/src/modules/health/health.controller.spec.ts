@@ -5,7 +5,7 @@
  */
 
 describe('HealthController (smoke)', () => {
-  it("placeholder — sera remplacé par un test d'intégration au PRD-001", () => {
+  it('canari de configuration TS/Jest (test d\'intégration health en PRD ultérieur)', () => {
     expect(true).toBe(true)
   })
 })

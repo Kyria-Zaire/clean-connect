@@ -54,6 +54,15 @@ const envSchema = z
         path: ['STRIPE_SECRET_KEY'],
       })
     }
+    // Garde-fou PRD-001 / ADR-004 : les deux secrets JWT NE DOIVENT JAMAIS être identiques.
+    if (data.JWT_ACCESS_SECRET === data.JWT_REFRESH_SECRET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'JWT_ACCESS_SECRET et JWT_REFRESH_SECRET doivent être différents (ADR-004).',
+        path: ['JWT_REFRESH_SECRET'],
+      })
+    }
   })
 
 export type Env = z.infer<typeof envSchema>

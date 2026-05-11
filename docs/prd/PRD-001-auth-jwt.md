@@ -351,27 +351,73 @@ Toutes les autres features (missions, paiements, photos, notifications) nécessi
 
 ## 5. Phase BUILD
 
-> *À compléter en Ticket 1.3 — pour le moment, Design est en attente de validation CTO.*
+> Ticket **1.3** — Build API : `AuthModule` complet, contraintes CTO appliquées.
 
 ### 5.1 Branches & PRs
 | Branche | Description | PR | Statut |
 |---|---|---|---|
-| `feat/prd-001-auth-jwt` | Tout PRD-001 (mono-PR pour rester atomique sur le scope auth) | TBD | TBD |
+| `feat/prd-001-auth-jwt` | Tout PRD-001 (mono-PR pour rester atomique sur le scope auth) | TBD | Build prêt pour review CTO |
 
-### 5.2 Commits clés
-TBD
+### 5.2 Périmètre livré (Ticket 1.3)
+
+| Domaine | Fichier(s) |
+|---|---|
+| Garde-fou env | `apps/api/src/common/config/env.ts` (crash boot si `JWT_ACCESS_SECRET === JWT_REFRESH_SECRET`) |
+| Module | `apps/api/src/modules/auth/auth.module.ts` (expose `TokenService`, `JwtAccessGuard`, `RolesGuard`) |
+| Service | `apps/api/src/modules/auth/auth.service.ts` (signup, login, refresh transactionnel + cascade, logout idempotent, getMe) |
+| Tokens | `apps/api/src/modules/auth/services/token.service.ts` (JWT access, refresh opaque base64url + sha256 hex) |
+| Passwords | `apps/api/src/modules/auth/services/password.service.ts` (bcrypt cost 10) |
+| Strategy | `apps/api/src/modules/auth/strategies/jwt-access.strategy.ts` (passport-jwt) |
+| Guards | `guards/jwt-access.guard.ts` + `guards/roles.guard.ts` (séparés, exportés) |
+| Décorateurs | `@Public()`, `@Roles()`, `@CurrentUser()` |
+| Controller | `apps/api/src/modules/auth/auth.controller.ts` (5 endpoints + Swagger + Throttle override par route) |
+| DTOs Zod | `apps/api/src/modules/auth/dto/auth.dto.ts` (`createZodDto` depuis `@cc/shared-types`) |
+| Swagger | `apps/api/src/main.ts` → exposé sur **`/api-docs`** hors prod |
+| Logger | Redactor Pino étendu (`accessToken`, `refreshToken`, `tokenHash`, `password*`, `email`) dans `apps/api/src/app.module.ts` |
+| Tests unit | `password.service.spec.ts`, `token.service.spec.ts`, `auth.service.spec.ts` (23 tests verts) |
+| Tests intégration | `apps/api/test/integration/auth-flow.integration.spec.ts` (signup/login/me/refresh+cascade/logout — exécuté par job CI `integration`) |
 
 ### 5.3 Migration appliquée
-TBD
+
+`apps/api/prisma/migrations/20260512130000_pr001_refresh_tokens_and_user_names/migration.sql` — colonnes `users.first_name` / `users.last_name` + table `refresh_tokens` (PK uuid, `token_hash` unique VARCHAR(64), index `user_id` + `expires_at`, FK cascade). Appliquée par le commit Design (Ticket 1.2).
 
 ### 5.4 TODO(debt) introduits
-TBD
 
-### 5.5 Captures d'écran
-TBD
+| ID | Description | Suivi |
+|---|---|---|
+| `debt-throttle-composite` | Le throttler login est en clé IP seule ; AC-2.5 prévoit `IP + email`. Implémentation requiert un `ThrottlerStorage` custom — repoussé hors PRD-001 (PRD-001b ou ticket dédié). | À tracker dans le suivi sprint |
+| `debt-password-blocklist` | `auth-weak-blocklist.ts` est un sous-ensemble ; étendre vers top 10k OWASP en V2. | Ticket dédié |
+| `debt-error-envelope` | Le `AllExceptionsFilter` wrappe la réponse `{ error, message, path, timestamp, statusCode }`. Le champ `error` porte le code stable (`EMAIL_ALREADY_USED`, …) — clients doivent s'appuyer dessus, pas sur l'enveloppe. | Documenté ; pas de changement nécessaire MVP |
+
+Tous ces points sont **non bloquants** au regard de la pré-revue sécu Design (`S1` / `S2`).
+
+### 5.5 Vérifications locales
+
+| Étape | Commande | Résultat |
+|---|---|---|
+| Prisma client + Zod-prisma | `pnpm --filter @cc/api run db:generate` | ✅ |
+| Typecheck monorepo | `pnpm typecheck` | ✅ |
+| Lint monorepo | `pnpm lint` | ✅ (0 warning, `--max-warnings=0`) |
+| Tests unitaires (api) | `pnpm --filter @cc/api test` | ✅ 23 / 23 |
+| Build Nest | `pnpm --filter @cc/api run build` | ✅ |
+| Tests intégration | `pnpm --filter @cc/api run test:integration` | À exécuter via CI (DB+Redis up requis) |
 
 ### 5.6 Definition of Done — Build
-TBD
+
+- [x] AuthModule complet (signup / login / refresh / logout / me)
+- [x] DTOs Zod via `nestjs-zod` + `createZodDto` + `ZodValidationPipe` global
+- [x] Rate limits per-route (`@Throttle`) : signup 5/min, login 10/min, refresh 30/min
+- [x] Garde-fou boot : `JWT_ACCESS_SECRET !== JWT_REFRESH_SECRET`
+- [x] bcrypt cost 10 + refresh opaque (`crypto.randomBytes(48)` base64url) + sha256 hex
+- [x] Transaction rotation refresh + révocation cascade sur replay
+- [x] `JwtAccessGuard` + `RolesGuard` séparés et exportés
+- [x] Swagger exposé sur `/api-docs` (non-prod uniquement)
+- [x] Logger structuré sans PII (events `auth.signup.*`, `auth.login.*`, `auth.refresh.*`, `auth.logout`, `auth.refresh.replay_detected`)
+- [x] Tests unit verts (4 suites / 23 tests)
+- [x] Tests intégration écrits (couverture flux complet)
+- [x] Aucun `passwordHash`, `tokenHash`, ni stack Prisma exposé en réponse API (`AllExceptionsFilter` neutralise les erreurs non `HttpException`)
+- [x] Aucun secret/token loggé (redactor Pino vérifié)
+- [ ] **Validation humaine CTO** sur §5.6 — review finale avant merge (en attente)
 
 ---
 

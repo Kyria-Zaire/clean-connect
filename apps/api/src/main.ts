@@ -52,12 +52,12 @@ async function bootstrap() {
   if (env.NODE_ENV !== 'production') {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('Clean Connect API')
-      .setDescription('API backend — NestJS + Prisma + Zod')
+      .setDescription('API backend — NestJS + Prisma + Zod (PRD-001 Auth JWT)')
       .setVersion('0.1.0')
-      .addBearerAuth()
+      .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, 'access-jwt')
       .build()
     const document = SwaggerModule.createDocument(app, swaggerConfig)
-    SwaggerModule.setup('docs', app, document)
+    SwaggerModule.setup('api-docs', app, document)
   }
 
   app.enableShutdownHooks()

@@ -27,17 +27,24 @@ import { UsersModule } from './modules/users/users.module'
               env.NODE_ENV === 'development'
                 ? { target: 'pino-pretty', options: { singleLine: true, translateTime: 'HH:MM:ss' } }
                 : undefined,
-            // Redactor PII (rule securite + rule photos-rgpd)
+            // Redactor PII (rules securite + photos-rgpd + PRD-001 §4.3 contrainte logs)
             redact: {
               paths: [
                 'req.headers.authorization',
                 'req.headers.cookie',
                 'req.body.password',
                 'req.body.passwordHash',
+                'req.body.refreshToken',
+                'req.body.accessToken',
                 'req.body.cardNumber',
                 'req.body.cvv',
-                '*.email',
+                'res.headers["set-cookie"]',
+                '*.password',
                 '*.passwordHash',
+                '*.accessToken',
+                '*.refreshToken',
+                '*.tokenHash',
+                '*.email',
               ],
               censor: '[REDACTED]',
             },
