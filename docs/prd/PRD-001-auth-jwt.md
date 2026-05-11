@@ -13,10 +13,10 @@
 | **ID** | `PRD-001` |
 | **Slug** | `auth-jwt` |
 | **Titre** | Authentification JWT — signup / login / refresh / logout / me |
-| **Version PRD** | `0.2` (Design) |
-| **Statut** | `DESIGN_REVIEW` |
+| **Version PRD** | `0.4` (Build API + Mobile Bootstrap) |
+| **Statut** | `BUILD_DONE_PENDING_VERIFY` |
 | **Owner produit** | CTO Clean Connect |
-| **Owner technique** | `senior-dev` + `architecte-api` |
+| **Owner technique** | `senior-dev` + `architecte-api` + `mobile` |
 | **Persona pilote** | `senior-dev` (Discover), `architecte-api` (Design + Build BE), `mobile` (Build FE) |
 | **Créé le** | 2026-05-11 |
 | **Mis à jour le** | 2026-05-12 |
@@ -351,7 +351,7 @@ Toutes les autres features (missions, paiements, photos, notifications) nécessi
 
 ## 5. Phase BUILD
 
-> Ticket **1.3** — Build API : `AuthModule` complet, contraintes CTO appliquées.
+> Tickets **1.3** (Build API) et **1.4** (Mobile Auth Bootstrap) — contraintes CTO appliquées sur les deux scopes.
 
 ### 5.1 Branches & PRs
 | Branche | Description | PR | Statut |
@@ -388,10 +388,81 @@ Toutes les autres features (missions, paiements, photos, notifications) nécessi
 | `debt-throttle-composite` | Le throttler login est en clé IP seule ; AC-2.5 prévoit `IP + email`. Implémentation requiert un `ThrottlerStorage` custom — repoussé hors PRD-001 (PRD-001b ou ticket dédié). | À tracker dans le suivi sprint |
 | `debt-password-blocklist` | `auth-weak-blocklist.ts` est un sous-ensemble ; étendre vers top 10k OWASP en V2. | Ticket dédié |
 | `debt-error-envelope` | Le `AllExceptionsFilter` wrappe la réponse `{ error, message, path, timestamp, statusCode }`. Le champ `error` porte le code stable (`EMAIL_ALREADY_USED`, …) — clients doivent s'appuyer dessus, pas sur l'enveloppe. | Documenté ; pas de changement nécessaire MVP |
+| `debt-mobile-ui-polish` | Les écrans `LoginScreen` / `SignupScreen` posent les flows + états de chargement, sans direction artistique finale (cf. PRD design à venir). | Ticket UI dédié |
+| `debt-mobile-active-role` | `src/lib/auth/role.ts` continue d'utiliser `AsyncStorage` pour stocker la **préférence** de rôle actif (non sensible). Migration vers MMKV planifiée Pré-MVP (cf. ADR-001). | Suivi infra mobile |
+| `debt-mobile-component-tests` | Les composants RN (`LoginScreen`, `SignupScreen`, `home`) ne sont pas couverts par des tests unitaires (jest-expo runtime trop lourd à mettre en place sur ce ticket). Detox / Maestro en PRD ultérieur. | Ticket QA mobile |
 
 Tous ces points sont **non bloquants** au regard de la pré-revue sécu Design (`S1` / `S2`).
 
-### 5.5 Vérifications locales
+### 5.5 Périmètre livré mobile (Ticket 1.4)
+
+> Architecture extensible imposée par la contrainte CTO #5.
+
+```
+apps/mobile/src/features/auth/
+├── api/
+│   ├── auth-api.ts          # signup / login / refresh / logout / me + base URL (EXPO_PUBLIC_API_URL)
+│   ├── auth-errors.ts       # AuthApiError + mapHttpFailure (429/500/401/400/code structuré)
+│   └── auth-errors.spec.ts  # 7 tests
+├── storage/
+│   └── secure-token-storage.ts  # expo-secure-store UNIQUEMENT (jamais AsyncStorage)
+├── store/
+│   ├── auth.store.ts        # Zustand : status, user, pending, lastError, login, signup, logout, bootstrap, runWithAuth
+│   └── auth.store.spec.ts   # 11 tests (login OK/KO, signup OK/KO, bootstrap, refresh, replay, logout)
+├── hooks/
+│   ├── use-auth.ts          # sélecteurs granulaires (useAuthStatus, useAuthUser, …)
+│   ├── use-auth-bootstrap.ts# monté une fois au root layout
+│   └── index.ts
+├── screens/
+│   ├── login.schema.ts      # Zod local UI (login = mot de passe non-empty ; signup = ≥12)
+│   ├── AuthFormField.tsx    # input réutilisable Controller + erreur
+│   ├── LoginScreen.tsx
+│   └── SignupScreen.tsx
+├── types/auth.types.ts      # ré-export @cc/shared-types + AuthUiError / AuthStatus
+└── index.ts
+```
+
+Intégration Expo Router :
+- `app/_layout.tsx` — appelle `useAuthBootstrap()` au boot + overlay « Restauration de la session… ».
+- `app/index.tsx` — redirection conditionnelle (status `restoring` / `authenticated` → `/(app)/home` / `unauthenticated` → `/(auth)/login`).
+- `app/(auth)/_layout.tsx` — garde inverse : redirige vers `/(app)/home` si déjà connecté.
+- `app/(auth)/login.tsx` + `app/(auth)/signup.tsx` — délèguent aux écrans.
+- `app/(app)/_layout.tsx` — protège tout segment authentifié (redirige sur login si pas auth).
+- `app/(app)/home.tsx` — écran post-auth minimal (affiche profil `/auth/me` + logout). UI finale arrivera dans les PRDs missions.
+
+Contraintes CTO Ticket 1.4 — preuves d'implémentation :
+1. **Jamais de JWT decode côté mobile** → `auth.store.ts` `login()` recharge `authApi.me(accessToken)` avant de poser `state.user`.
+2. **Refresh token absent des logs** → aucun `console.*` dans `auth-api.ts` ni `auth.store.ts` ; les `AuthApiError` ne portent que le code et un message UI générique (`auth-errors.ts`).
+3. **Erreurs réseau exploitables** → `AuthUiErrorCode` discrimine `INVALID_CREDENTIALS`, `NETWORK_ERROR`, `SESSION_EXPIRED`, `RATE_LIMITED`, `VALIDATION_ERROR`, `EMAIL_ALREADY_USED`, `WEAK_PASSWORD`, `ADMIN_SIGNUP_FORBIDDEN`, `INVALID_REFRESH_TOKEN`, `UNKNOWN`.
+4. **SecureStore obligatoire** → `storage/secure-token-storage.ts` n'importe que `expo-secure-store` ; aucun fallback `AsyncStorage`.
+5. **Architecture extensible** → arborescence ci-dessus, point d'entrée `features/auth/index.ts`.
+6. **AuthBootstrap** → `use-auth-bootstrap.ts` + `auth.store.bootstrap()` : restore tokens → `/auth/me` → si 401, single-flight refresh → si refresh KO, `silentSignOut()` + status `unauthenticated`.
+7. **Loading states** → `pending: { login, signup, logout }` + status `restoring` ; consommés par les écrans (`ActivityIndicator` + boutons disabled).
+
+Dépendances ajoutées : `zustand@^5.0.x` (runtime) + `@types/jest` (dev).
+
+### 5.6 Vérifications locales (mobile)
+
+| Étape | Commande | Résultat |
+|---|---|---|
+| Typecheck mobile | `pnpm --filter @cc/mobile typecheck` | ✅ |
+| Lint mobile (`--max-warnings=0`) | `pnpm --filter @cc/mobile lint` | ✅ |
+| Tests unit mobile | `pnpm --filter @cc/mobile test` | ✅ 18 / 18 (2 suites) |
+| Typecheck monorepo | `pnpm typecheck` | ✅ |
+| Lint monorepo | `pnpm lint` | ✅ |
+
+**Validation manuelle** (à exécuter dès qu'une API joignable est disponible via `EXPO_PUBLIC_API_URL`) :
+
+```
+1. expo start → app boot → overlay "Restauration de la session…" ≈ 100ms → écran /auth/login (Cold start sans tokens).
+2. Signup CLIENT (email/mdp ≥12) → bouton avec ActivityIndicator → home → "Bonjour {firstName}".
+3. Kill app → relance → overlay restoring → home direct (tokens SecureStore + /auth/me OK).
+4. Couper le wifi → tenter login → bandeau "Connexion impossible — vérifiez votre réseau".
+5. Logout → écran login + tokens SecureStore vidés.
+6. Invalider serveur-side le refresh token (DB) → relancer app → silent logout → /auth/login.
+```
+
+### 5.7 Vérifications locales (API — rappel Ticket 1.3)
 
 | Étape | Commande | Résultat |
 |---|---|---|
@@ -402,8 +473,9 @@ Tous ces points sont **non bloquants** au regard de la pré-revue sécu Design (
 | Build Nest | `pnpm --filter @cc/api run build` | ✅ |
 | Tests intégration | `pnpm --filter @cc/api run test:integration` | À exécuter via CI (DB+Redis up requis) |
 
-### 5.6 Definition of Done — Build
+### 5.8 Definition of Done — Build
 
+API (Ticket 1.3) :
 - [x] AuthModule complet (signup / login / refresh / logout / me)
 - [x] DTOs Zod via `nestjs-zod` + `createZodDto` + `ZodValidationPipe` global
 - [x] Rate limits per-route (`@Throttle`) : signup 5/min, login 10/min, refresh 30/min
@@ -413,11 +485,22 @@ Tous ces points sont **non bloquants** au regard de la pré-revue sécu Design (
 - [x] `JwtAccessGuard` + `RolesGuard` séparés et exportés
 - [x] Swagger exposé sur `/api-docs` (non-prod uniquement)
 - [x] Logger structuré sans PII (events `auth.signup.*`, `auth.login.*`, `auth.refresh.*`, `auth.logout`, `auth.refresh.replay_detected`)
-- [x] Tests unit verts (4 suites / 23 tests)
-- [x] Tests intégration écrits (couverture flux complet)
-- [x] Aucun `passwordHash`, `tokenHash`, ni stack Prisma exposé en réponse API (`AllExceptionsFilter` neutralise les erreurs non `HttpException`)
+- [x] Tests unit verts (4 suites / 23 tests) — tests intégration écrits
+- [x] Aucun `passwordHash`, `tokenHash`, ni stack Prisma exposé en réponse API
 - [x] Aucun secret/token loggé (redactor Pino vérifié)
-- [ ] **Validation humaine CTO** sur §5.6 — review finale avant merge (en attente)
+
+Mobile (Ticket 1.4) :
+- [x] `features/auth/{api,hooks,store,screens,storage,types}` structurés
+- [x] `useAuthStore` Zustand (status `restoring`/`authenticated`/`unauthenticated`, `pending`, `lastError`)
+- [x] Persistance `expo-secure-store` uniquement (aucun `AsyncStorage` pour les tokens)
+- [x] Login / Signup `react-hook-form` + `zodResolver` + états chargement
+- [x] `AuthBootstrap` (`useAuthBootstrap`) au root layout : restore → `/auth/me` → silent refresh → silent signout
+- [x] Hydratation user via `/auth/me` (jamais via JWT decode)
+- [x] Refresh token absent de tout log / message d'erreur (revu sur `auth-api.ts` + `auth.store.ts`)
+- [x] Erreurs typées (`AuthUiErrorCode` discriminé) → UI exploitable
+- [x] Routing Expo `(auth)/login | signup` + `(app)/home` + redirections selon `status`
+- [x] Lint `--max-warnings=0` + Typecheck strict + Tests unit verts (18 / 18, 2 suites)
+- [ ] **Validation humaine CTO** sur §5.8 — review finale avant merge (en attente)
 
 ---
 
