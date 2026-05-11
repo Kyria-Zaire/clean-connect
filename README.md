@@ -146,11 +146,28 @@ pnpm install
 
 ### Services Docker (Postgres+PostGIS AOF + Redis AOF)
 
+**Prérequis** : Docker Desktop démarré (daemon actif).
+
 ```bash
 pnpm db:up                         # démarre postgres + redis (dev)
-pnpm --filter @cc/api run db:migrate:dev   # applique la migration init (PostGIS inclus)
-pnpm --filter @cc/api run db:seed          # seed (vide pour l'instant)
+# DATABASE_URL doit pointer sur localhost:5434 (voir .env.example)
+pnpm --filter @cc/api run db:migrate:deploy   # applique les migrations existantes (ne régénère rien)
+pnpm --filter @cc/api run db:seed             # seed (vide pour l'instant)
 ```
+
+Pour **créer** une nouvelle migration après modification de `schema.prisma` : `pnpm --filter @cc/api run db:migrate:dev` (uniquement en dev, jamais sur la migration manuelle PostGIS sans relecture).
+
+#### Vérifier que les services tournent (Sprint 0 — sanity check)
+
+```bash
+docker compose ps
+docker exec cc-postgres psql -U cc -d cleanconnect_dev -c "SELECT PostGIS_Version();"
+docker exec cc-redis redis-cli ping
+```
+
+Attendu : `cc-postgres` et `cc-redis` en **healthy**, PostGIS `3.4`, Redis `PONG`.
+
+**Port Postgres sur l'hôte : `5434`** (et non `5432`) : sur Windows, un PostgreSQL installé en local occupe souvent `127.0.0.1:5432`. Le compose mappe donc le conteneur vers **`localhost:5434`** pour éviter les connexions Prisma vers le mauvais serveur. La variable `DATABASE_URL` dans `.env.example` utilise ce port.
 
 ### Dev (tout en parallèle via Turborepo)
 

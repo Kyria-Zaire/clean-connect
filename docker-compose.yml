@@ -22,8 +22,9 @@ services:
       POSTGRES_PASSWORD: cc
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Port hôte 5434 : évite le conflit avec un PostgreSQL Windows déjà sur 5432
     ports:
-      - '5432:5432'
+      - '5434:5432'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U cc -d cleanconnect_dev']
       interval: 5s
