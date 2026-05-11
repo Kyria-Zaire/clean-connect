@@ -1,16 +1,15 @@
 /**
- * Tests d'intégration du flux auth complet — PRD-001.
+ * Tests d'intégration du flux auth complet — PRD-001 Ticket 1.5.
  *
- * Prérequis : Postgres + Redis éphémères démarrés (cf. `pnpm db:test:up` ou job CI `integration`).
- * Le `global-setup.ts` configure DATABASE_URL_TEST. Les migrations Prisma sont
- * appliquées par la pipeline CI avant ce test (job CI step `db:migrate:deploy`).
+ * Prérequis : Postgres + Redis (CI job `integration` ou `pnpm db:test:up` local).
+ * `global-setup.ts` force `DATABASE_URL` depuis `DATABASE_URL_TEST`.
  *
- * On vérifie ici les ACs critiques du PRD :
- *   AC-1.1, AC-1.2, AC-1.5         (signup OK / conflict / refus ADMIN)
- *   AC-2.1, AC-2.2, AC-2.3         (login OK / wrong / soft-deleted)
- *   AC-4.1, AC-4.3, AC-4.5         (refresh rotation + cascade replay + atomicité)
- *   AC-5.1, AC-5.2                 (logout 204 + idempotent)
- *   AC-6.1, AC-6.4                 (me 401/200 selon Bearer)
+ * Couverture alignée sur les 16 cas critiques CTO (signup/login/refresh/logout/me)
+ * + anti-régression hashes sensibles. Chaque `it` est autonome (email unique).
+ * Aucun `sleep` ; pas d'ordre d'exécution imposé entre les `it`.
+ *
+ * Sécurité tests : ne jamais `console.log` les tokens — utiliser uniquement des
+ * assertions structurelles (`expect(res.body.error)`, `typeof …`).
  */
 
 import { Test } from '@nestjs/testing'
@@ -23,6 +22,16 @@ import { AppModule } from '../../src/app.module'
 import { AllExceptionsFilter } from '../../src/common/filters/all-exceptions.filter'
 import { PrismaService } from '../../src/common/prisma/prisma.service'
 
+import {
+  assertNoLeakedSecrets,
+  randomTestEmail,
+  STRONG_PASSWORD,
+  WEAK_BLOCKLIST_PASSWORD,
+} from './auth-integration-helpers'
+
+/** Connexion Prisma au boot Nest peut dépasser 5s si Postgres est lent (CI / Docker). */
+jest.setTimeout(120_000)
+
 const BASE = '/api/v1/auth'
 
 async function buildApp(): Promise<INestApplication> {
@@ -32,7 +41,7 @@ async function buildApp(): Promise<INestApplication> {
   process.env['JWT_REFRESH_SECRET'] =
     process.env['JWT_REFRESH_SECRET'] ??
     'ci_refresh_secret_min_48_chars___________________________________________'
-  process.env['THROTTLE_LIMIT'] = '10000' // évite tout 429 dans la séquence de tests
+  process.env['THROTTLE_LIMIT'] = '10000'
   process.env['THROTTLE_TTL_SECONDS'] = '60'
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
@@ -45,38 +54,49 @@ async function buildApp(): Promise<INestApplication> {
   return app
 }
 
-const randomEmail = () => `it-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@cc-test.fr`
-
-const PWD = 'Sup3rSecret_passw0rd_2026!'
-
-describe('Auth integration flow', () => {
-  let app: INestApplication
-  let prisma: PrismaService
+describe('Auth integration flow (PRD-001)', () => {
+  let app: INestApplication | undefined
+  let prisma: PrismaService | undefined
 
   beforeAll(async () => {
     app = await buildApp()
     prisma = app.get(PrismaService)
   })
 
+  function getHttpServer() {
+    if (!app) throw new Error('Integration app non démarrée (beforeAll)')
+    return app.getHttpServer()
+  }
+
+  function getDb(): PrismaService {
+    if (!prisma) throw new Error('Prisma non initialisé (beforeAll)')
+    return prisma
+  }
+
   afterAll(async () => {
-    await prisma.refreshToken.deleteMany({ where: { user: { email: { contains: '@cc-test.fr' } } } })
-    await prisma.user.deleteMany({ where: { email: { contains: '@cc-test.fr' } } })
-    await app.close()
+    if (prisma) {
+      await prisma.refreshToken.deleteMany({ where: { user: { email: { contains: '@cc-test.fr' } } } })
+      await prisma.user.deleteMany({ where: { email: { contains: '@cc-test.fr' } } })
+    }
+    if (app) {
+      await app.close()
+    }
   })
 
-  it('signup CLIENT 201 + tokens présents', async () => {
-    const email = randomEmail()
-    const res = await request(app.getHttpServer())
+  it('1 — signup CLIENT 201 + tokens + user public sans secrets', async () => {
+    const email = randomTestEmail()
+    const res = await request(getHttpServer())
       .post(`${BASE}/signup`)
       .send({
         email,
-        password: PWD,
+        password: STRONG_PASSWORD,
         role: 'CLIENT',
         firstName: 'Alice',
         lastName: 'Dupont',
       })
       .expect(201)
 
+    assertNoLeakedSecrets(res.body)
     expect(res.body.user.email).toBe(email)
     expect(res.body.user.role).toBe('CLIENT')
     expect(res.body.user).not.toHaveProperty('passwordHash')
@@ -84,131 +104,325 @@ describe('Auth integration flow', () => {
     expect(typeof res.body.refreshToken).toBe('string')
   })
 
-  it('signup ADMIN refusé (400)', async () => {
-    await request(app.getHttpServer())
+  it('2 — signup ADMIN public refusé (400 validation)', async () => {
+    const res = await request(getHttpServer())
       .post(`${BASE}/signup`)
       .send({
-        email: randomEmail(),
-        password: PWD,
+        email: randomTestEmail(),
+        password: STRONG_PASSWORD,
         role: 'ADMIN',
         firstName: 'A',
         lastName: 'B',
       })
       .expect(400)
+
+    assertNoLeakedSecrets(res.body)
+    expect(res.body.error).toBe('ValidationError')
   })
 
-  it('signup duplicate => 409 EMAIL_ALREADY_USED', async () => {
-    const email = randomEmail()
-    await request(app.getHttpServer())
+  it('3 — signup email déjà utilisé => 409 EMAIL_ALREADY_USED', async () => {
+    const email = randomTestEmail()
+    await request(getHttpServer())
       .post(`${BASE}/signup`)
-      .send({ email, password: PWD, role: 'CLIENT', firstName: 'A', lastName: 'B' })
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'A', lastName: 'B' })
       .expect(201)
 
-    const res = await request(app.getHttpServer())
+    const res = await request(getHttpServer())
       .post(`${BASE}/signup`)
-      .send({ email, password: PWD, role: 'CLIENT', firstName: 'A', lastName: 'B' })
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'A', lastName: 'B' })
       .expect(409)
 
+    assertNoLeakedSecrets(res.body)
     expect(res.body.error).toBe('EMAIL_ALREADY_USED')
   })
 
-  it('login OK puis /me protégé', async () => {
-    const email = randomEmail()
-    await request(app.getHttpServer())
+  it('4 — signup mot de passe blocklist => 400 WEAK_PASSWORD (message Zod)', async () => {
+    const res = await request(getHttpServer())
       .post(`${BASE}/signup`)
-      .send({ email, password: PWD, role: 'PRESTATAIRE', firstName: 'Bob', lastName: 'Martin' })
-      .expect(201)
+      .send({
+        email: randomTestEmail(),
+        password: WEAK_BLOCKLIST_PASSWORD,
+        role: 'CLIENT',
+        firstName: 'A',
+        lastName: 'B',
+      })
+      .expect(400)
 
-    const login = await request(app.getHttpServer())
-      .post(`${BASE}/login`)
-      .send({ email, password: PWD })
-      .expect(200)
-
-    const access = login.body.accessToken as string
-
-    await request(app.getHttpServer()).get(`${BASE}/me`).expect(401)
-
-    const me = await request(app.getHttpServer())
-      .get(`${BASE}/me`)
-      .set('Authorization', `Bearer ${access}`)
-      .expect(200)
-
-    expect(me.body.email).toBe(email)
-    expect(me.body.role).toBe('PRESTATAIRE')
+    assertNoLeakedSecrets(res.body)
+    expect(res.body.error).toBe('ValidationError')
+    const messages = Array.isArray(res.body.message) ? res.body.message : [String(res.body.message)]
+    expect(messages.some((m: string) => m.includes('WEAK_PASSWORD'))).toBe(true)
   })
 
-  it('login mauvais password => 401 INVALID_CREDENTIALS', async () => {
-    const email = randomEmail()
-    await request(app.getHttpServer())
+  it('5 — login OK + session sans secrets', async () => {
+    const email = randomTestEmail()
+    await request(getHttpServer())
       .post(`${BASE}/signup`)
-      .send({ email, password: PWD, role: 'CLIENT', firstName: 'X', lastName: 'Y' })
+      .send({ email, password: STRONG_PASSWORD, role: 'PRESTATAIRE', firstName: 'Bob', lastName: 'Martin' })
       .expect(201)
 
-    const res = await request(app.getHttpServer())
+    const login = await request(getHttpServer())
       .post(`${BASE}/login`)
-      .send({ email, password: 'wrong-password' })
+      .send({ email, password: STRONG_PASSWORD })
+      .expect(200)
+
+    assertNoLeakedSecrets(login.body)
+    expect(login.body.user.email).toBe(email)
+    expect(typeof login.body.accessToken).toBe('string')
+  })
+
+  it('6 — login mauvais mot de passe => 401 INVALID_CREDENTIALS', async () => {
+    const email = randomTestEmail()
+    await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'X', lastName: 'Y' })
+      .expect(201)
+
+    const res = await request(getHttpServer())
+      .post(`${BASE}/login`)
+      .send({ email, password: 'wrong-password-xxxxxxxx' })
       .expect(401)
 
+    assertNoLeakedSecrets(res.body)
     expect(res.body.error).toBe('INVALID_CREDENTIALS')
   })
 
-  it('refresh : rotation + 401 sur replay + cascade', async () => {
-    const email = randomEmail()
-    const signup = await request(app.getHttpServer())
+  it('7 — login user soft-deleted => 401 INVALID_CREDENTIALS', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
       .post(`${BASE}/signup`)
-      .send({ email, password: PWD, role: 'CLIENT', firstName: 'C', lastName: 'D' })
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'S', lastName: 'D' })
       .expect(201)
 
-    // Ouvre une 2e session (multi-device autorisé) pour vérifier la cascade
-    const login2 = await request(app.getHttpServer())
+    await getDb().user.update({
+      where: { id: signup.body.user.id as string },
+      data: { deletedAt: new Date() },
+    })
+
+    const res = await request(getHttpServer())
       .post(`${BASE}/login`)
-      .send({ email, password: PWD })
+      .send({ email, password: STRONG_PASSWORD })
+      .expect(401)
+
+    assertNoLeakedSecrets(res.body)
+    expect(res.body.error).toBe('INVALID_CREDENTIALS')
+  })
+
+  it('8 — refresh OK : ancien refresh révoqué en DB + nouveau actif', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'C', lastName: 'D' })
+      .expect(201)
+
+    const userId = signup.body.user.id as string
+    const r1 = signup.body.refreshToken as string
+
+    const rotated = await request(getHttpServer())
+      .post(`${BASE}/refresh`)
+      .send({ refreshToken: r1 })
+      .expect(200)
+
+    assertNoLeakedSecrets(rotated.body)
+    const r2 = rotated.body.refreshToken as string
+    expect(r2).not.toEqual(r1)
+
+    const rows = await getDb().refreshToken.findMany({ where: { userId }, orderBy: { createdAt: 'asc' } })
+    expect(rows.length).toBe(2)
+    expect(rows[0].revokedAt).not.toBeNull()
+    expect(rows[1].revokedAt).toBeNull()
+  })
+
+  it('9 — refresh token révoqué rejoué => cascade + autres refresh invalides', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'C', lastName: 'D' })
+      .expect(201)
+
+    const login2 = await request(getHttpServer())
+      .post(`${BASE}/login`)
+      .send({ email, password: STRONG_PASSWORD })
       .expect(200)
 
     const r1 = signup.body.refreshToken as string
     const r2 = login2.body.refreshToken as string
 
-    const rotated = await request(app.getHttpServer())
+    await request(getHttpServer())
       .post(`${BASE}/refresh`)
       .send({ refreshToken: r1 })
       .expect(200)
 
-    expect(rotated.body.refreshToken).not.toEqual(r1)
-
-    // Replay du r1 (déjà révoqué) → 401 + cascade : r2 doit aussi être inutilisable
-    await request(app.getHttpServer())
+    await request(getHttpServer())
       .post(`${BASE}/refresh`)
       .send({ refreshToken: r1 })
       .expect(401)
 
-    await request(app.getHttpServer())
+    await request(getHttpServer())
       .post(`${BASE}/refresh`)
       .send({ refreshToken: r2 })
       .expect(401)
   })
 
-  it('logout 204 idempotent', async () => {
-    const email = randomEmail()
-    const signup = await request(app.getHttpServer())
+  it('10 — refresh token expiré => 401 INVALID_REFRESH_TOKEN', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
       .post(`${BASE}/signup`)
-      .send({ email, password: PWD, role: 'CLIENT', firstName: 'E', lastName: 'F' })
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'E', lastName: 'F' })
+      .expect(201)
+
+    const userId = signup.body.user.id as string
+    const rt = signup.body.refreshToken as string
+
+    await getDb().refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { expiresAt: new Date('2020-01-01T00:00:00.000Z') },
+    })
+
+    const res = await request(getHttpServer())
+      .post(`${BASE}/refresh`)
+      .send({ refreshToken: rt })
+      .expect(401)
+
+    assertNoLeakedSecrets(res.body)
+    expect(res.body.error).toBe('INVALID_REFRESH_TOKEN')
+  })
+
+  it('11 — logout 204 idempotent + refresh impossible après', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'E', lastName: 'F' })
       .expect(201)
 
     const rt = signup.body.refreshToken as string
 
-    await request(app.getHttpServer())
-      .post(`${BASE}/logout`)
-      .send({ refreshToken: rt })
-      .expect(204)
+    await request(getHttpServer()).post(`${BASE}/logout`).send({ refreshToken: rt }).expect(204)
+    await request(getHttpServer()).post(`${BASE}/logout`).send({ refreshToken: rt }).expect(204)
 
-    await request(app.getHttpServer())
-      .post(`${BASE}/logout`)
-      .send({ refreshToken: rt })
-      .expect(204)
+    await request(getHttpServer()).post(`${BASE}/refresh`).send({ refreshToken: rt }).expect(401)
+  })
 
-    await request(app.getHttpServer())
-      .post(`${BASE}/refresh`)
-      .send({ refreshToken: rt })
+  it('12 — GET /me sans Authorization => 401', async () => {
+    const res = await request(getHttpServer()).get(`${BASE}/me`).expect(401)
+    assertNoLeakedSecrets(res.body)
+  })
+
+  it('13 — GET /me Bearer valide => profil public sans secrets', async () => {
+    const email = randomTestEmail()
+    await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'G', lastName: 'H' })
+      .expect(201)
+
+    const login = await request(getHttpServer())
+      .post(`${BASE}/login`)
+      .send({ email, password: STRONG_PASSWORD })
+      .expect(200)
+
+    const access = login.body.accessToken as string
+    const me = await request(getHttpServer())
+      .get(`${BASE}/me`)
+      .set('Authorization', `Bearer ${access}`)
+      .expect(200)
+
+    assertNoLeakedSecrets(me.body)
+    expect(me.body.email).toBe(email)
+    expect(me.body.role).toBe('CLIENT')
+  })
+
+  it('14 — GET /me user soft-deleted => 401 (JWT encore valide mais getMe bloque)', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'I', lastName: 'J' })
+      .expect(201)
+
+    const login = await request(getHttpServer())
+      .post(`${BASE}/login`)
+      .send({ email, password: STRONG_PASSWORD })
+      .expect(200)
+
+    const access = login.body.accessToken as string
+
+    await getDb().user.update({
+      where: { id: signup.body.user.id as string },
+      data: { deletedAt: new Date() },
+    })
+
+    const res = await request(getHttpServer())
+      .get(`${BASE}/me`)
+      .set('Authorization', `Bearer ${access}`)
       .expect(401)
+
+    assertNoLeakedSecrets(res.body)
+    expect(res.body.error).toBe('INVALID_CREDENTIALS')
+  })
+
+  it('15 — aucune réponse auth ne contient passwordHash ni tokenHash (scan récursif)', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'K', lastName: 'L' })
+      .expect(201)
+    assertNoLeakedSecrets(signup.body)
+
+    const login = await request(getHttpServer())
+      .post(`${BASE}/login`)
+      .send({ email, password: STRONG_PASSWORD })
+      .expect(200)
+    assertNoLeakedSecrets(login.body)
+
+    const rotated = await request(getHttpServer())
+      .post(`${BASE}/refresh`)
+      .send({ refreshToken: signup.body.refreshToken as string })
+      .expect(200)
+    assertNoLeakedSecrets(rotated.body)
+
+    const me = await request(getHttpServer())
+      .get(`${BASE}/me`)
+      .set('Authorization', `Bearer ${login.body.accessToken as string}`)
+      .expect(200)
+    assertNoLeakedSecrets(me.body)
+  })
+
+  it('16 — refresh avec user soft-deleted => 401 INVALID_REFRESH_TOKEN', async () => {
+    const email = randomTestEmail()
+    const signup = await request(getHttpServer())
+      .post(`${BASE}/signup`)
+      .send({ email, password: STRONG_PASSWORD, role: 'CLIENT', firstName: 'M', lastName: 'N' })
+      .expect(201)
+
+    const rt = signup.body.refreshToken as string
+
+    await getDb().user.update({
+      where: { id: signup.body.user.id as string },
+      data: { deletedAt: new Date() },
+    })
+
+    const res = await request(getHttpServer()).post(`${BASE}/refresh`).send({ refreshToken: rt }).expect(401)
+
+    assertNoLeakedSecrets(res.body)
+    expect(res.body.error).toBe('INVALID_REFRESH_TOKEN')
+  })
+})
+
+describe('auth-integration-helpers', () => {
+  it('assertNoLeakedSecrets détecte passwordHash', () => {
+    expect(() => assertNoLeakedSecrets({ passwordHash: 'leak' })).toThrow(/passwordHash/)
+  })
+
+  it('assertNoLeakedSecrets détecte tokenHash imbriqué', () => {
+    expect(() => assertNoLeakedSecrets({ data: { tokenHash: 'x' } })).toThrow(/tokenHash/)
+  })
+
+  it('assertNoLeakedSecrets accepte un payload session typique', () => {
+    expect(() =>
+      assertNoLeakedSecrets({
+        user: { id: 'u', email: 'a@b.fr', role: 'CLIENT', firstName: 'A', lastName: 'B', createdAt: '2026-01-01T00:00:00.000Z' },
+        accessToken: 'jwt',
+        refreshToken: 'opaque',
+      }),
+    ).not.toThrow()
   })
 })

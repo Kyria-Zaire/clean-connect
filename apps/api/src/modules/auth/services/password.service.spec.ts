@@ -3,10 +3,10 @@ import { PasswordService } from './password.service'
 describe('PasswordService', () => {
   const service = new PasswordService()
 
-  it('hashe un mot de passe sans le retourner en clair', async () => {
+  it('hashe un mot de passe sans le retourner en clair (bcrypt cost 10)', async () => {
     const hash = await service.hash('Sup3rSecret_passw0rd!')
     expect(hash).not.toEqual('Sup3rSecret_passw0rd!')
-    expect(hash.startsWith('$2')).toBe(true)
+    expect(hash.startsWith('$2b$10$')).toBe(true)
   })
 
   it('verifie un mot de passe valide', async () => {

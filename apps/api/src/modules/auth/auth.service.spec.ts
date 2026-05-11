@@ -244,6 +244,26 @@ describe('AuthService.refresh', () => {
       response: { error: AUTH_ERROR_CODES.INVALID_REFRESH_TOKEN },
     })
   })
+
+  it('renvoie 401 si le user lié au refresh est soft-deleted', async () => {
+    const { prisma, tokens, service } = build()
+    const stored: RefreshToken & { user: User } = {
+      id: 'rt-del',
+      userId: 'user-1',
+      tokenHash: 'h',
+      expiresAt: new Date(Date.now() + 60_000),
+      revokedAt: null,
+      createdAt: new Date(),
+      user: { ...baseUser(), deletedAt: new Date() },
+    }
+    prisma.refreshToken.findUnique.mockResolvedValue(stored)
+    jest.spyOn(tokens, 'hashRefreshToken').mockReturnValue('h')
+
+    await expect(service.refresh('opaque')).rejects.toMatchObject({
+      response: { error: AUTH_ERROR_CODES.INVALID_REFRESH_TOKEN },
+    })
+    expect(prisma.$transaction).not.toHaveBeenCalled()
+  })
 })
 
 describe('AuthService.logout', () => {

@@ -469,9 +469,9 @@ Dépendances ajoutées : `zustand@^5.0.x` (runtime) + `@types/jest` (dev).
 | Prisma client + Zod-prisma | `pnpm --filter @cc/api run db:generate` | ✅ |
 | Typecheck monorepo | `pnpm typecheck` | ✅ |
 | Lint monorepo | `pnpm lint` | ✅ (0 warning, `--max-warnings=0`) |
-| Tests unitaires (api) | `pnpm --filter @cc/api test` | ✅ 23 / 23 |
+| Tests unitaires (api) | `pnpm --filter @cc/api test` | ✅ 24 / 24 (4 suites) |
 | Build Nest | `pnpm --filter @cc/api run build` | ✅ |
-| Tests intégration | `pnpm --filter @cc/api run test:integration` | À exécuter via CI (DB+Redis up requis) |
+| Tests intégration | `pnpm --filter @cc/api run test:integration` | ✅ job CI `integration` (`auth-flow.integration.spec.ts` + helpers) |
 
 ### 5.8 Definition of Done — Build
 
@@ -485,7 +485,7 @@ API (Ticket 1.3) :
 - [x] `JwtAccessGuard` + `RolesGuard` séparés et exportés
 - [x] Swagger exposé sur `/api-docs` (non-prod uniquement)
 - [x] Logger structuré sans PII (events `auth.signup.*`, `auth.login.*`, `auth.refresh.*`, `auth.logout`, `auth.refresh.replay_detected`)
-- [x] Tests unit verts (4 suites / 23 tests) — tests intégration écrits
+- [x] Tests unit verts (4 suites / **24** tests) — intégration auth-flow couvrant les 16 cas critiques CTO (cf. §5.9)
 - [x] Aucun `passwordHash`, `tokenHash`, ni stack Prisma exposé en réponse API
 - [x] Aucun secret/token loggé (redactor Pino vérifié)
 
@@ -500,7 +500,22 @@ Mobile (Ticket 1.4) :
 - [x] Erreurs typées (`AuthUiErrorCode` discriminé) → UI exploitable
 - [x] Routing Expo `(auth)/login | signup` + `(app)/home` + redirections selon `status`
 - [x] Lint `--max-warnings=0` + Typecheck strict + Tests unit verts (18 / 18, 2 suites)
-- [ ] **Validation humaine CTO** sur §5.8 — review finale avant merge (en attente)
+- [ ] **Validation humaine CTO** sur §5.8–§5.9 — review finale avant merge (en attente)
+
+### 5.9 Ticket 1.5 — Tests consolidés (API + outillage Jest)
+
+**Objectif** : couverture Auth déterministe, sans nouvelle feature, prête pour Verify (Ticket 1.6).
+
+| Livrable | Détail |
+|---|---|
+| Intégration `auth-flow.integration.spec.ts` | 16 scénarios numérotés alignés sur la checklist CTO (signup CLIENT/ADMIN/409/WEAK, login OK/KO/soft-delete, refresh rotation+DB, replay cascade, refresh expiré, logout, `/me` x4 cas, scan `passwordHash`/`tokenHash`, refresh user supprimé) + 3 tests utilitaire `assertNoLeakedSecrets`. |
+| Helper | `test/integration/auth-integration-helpers.ts` — `randomTestEmail`, mots de passe forts/faibles, `assertNoLeakedSecrets()`. |
+| Jest integration | Fix **critique** : `testPathIgnorePatterns` n'exclut plus les `*.integration.spec.ts` (héritage du `jest.config` unitaire les masquait → CI exécutait 0 test). `setupFiles: jest-env.setup.ts` injecte JWT/Stripe/DB/Redis **avant** l'import de `AppModule` (`loadEnv()` au parse-time). `testTimeout: 120s` + `jest.setTimeout` dans la spec. `NODE_ENV`/`APP_ENV` défaut `recette` en intégration pour éviter le transport `pino-pretty` (handles ouverts). |
+| Unit API | `auth.service.spec.ts` : cas **refresh + user soft-deleted** (401, pas de transaction). `password.service.spec.ts` : vérif explicite préfixe bcrypt **`$2b$10$`**. |
+| Stripe | Non mocké : Auth n'appelle pas Stripe ; clés `sk_test_*` / `whsec_*` placeholder suffisent (`jest-env.setup.ts` + CI). |
+| Règle tests | Aucun `console.log` des tokens ; assertions sur `res.body.error` / types uniquement. |
+
+**Dette** : `debt-integration-coverage-report` — pas de gate `pnpm --filter @cc/api test:cov` sur `test/integration` dans Turbo (hors scope Ticket 1.5).
 
 ---
 

@@ -119,7 +119,7 @@ jobs:
         working-directory: apps/api
         run: pnpm db:migrate:deploy
 
-      - name: Run integration tests
+      - name: Run integration tests (incl. auth-flow.integration.spec.ts)
         run: pnpm --filter @cc/api run test:integration
 
   # ---------------------------------------------------------------------------
