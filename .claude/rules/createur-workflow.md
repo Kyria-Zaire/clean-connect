@@ -1,0 +1,271 @@
+# Workflows — Clean Connect (Turborepo + Docker)
+
+> Activé sur CI/CD, Dockerfiles, docker-compose, scripts, Makefile, turbo.json.
+
+---
+
+## Turborepo — pipeline minimum
+
+```json
+// turbo.json
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "build/**"]
+    },
+    "typecheck": { "dependsOn": ["^build"] },
+    "lint": {},
+    "test": { "dependsOn": ["^build"] },
+    "dev": { "cache": false, "persistent": true }
+  }
+}
+```
+
+---
+
+## CI GitHub Actions
+
+```yaml
+name: CI
+on:
+  pull_request: { branches: [main, develop] }
+  push: { branches: [main, develop] }
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4-alpine
+        env: { POSTGRES_PASSWORD: test, POSTGRES_DB: cleanconnect_test }
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo lint typecheck test
+      - run: pnpm audit --audit-level=critical
+
+  build:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f apps/api/Dockerfile --target production .
+      - run: docker build -f apps/admin/Dockerfile --target production .
+```
+
+**Règle** : aucun job de déploiement ne s'exécute si `quality` échoue.
+
+---
+
+## Docker — multi-stage NestJS
+
+```dockerfile
+# apps/api/Dockerfile
+FROM node:20-alpine AS base
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /app
+
+FROM base AS deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY apps/api/package.json apps/api/
+COPY packages/ packages/
+RUN pnpm install --frozen-lockfile
+
+FROM deps AS builder
+COPY . .
+RUN pnpm --filter @cleanconnect/api build
+RUN pnpm --filter @cleanconnect/api prisma generate
+
+FROM node:20-alpine AS production
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=builder /app/apps/api/dist ./dist
+COPY --from=builder /app/apps/api/prisma ./prisma
+COPY --from=builder /app/node_modules ./node_modules
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://localhost:3000/api/health || exit 1
+CMD ["node", "dist/main.js"]
+```
+
+**Règles** :
+- Tag versionné en prod, **jamais** `latest`
+- Healthcheck sur tous les services critiques
+- Secrets via variables d'env (jamais en clair dans le compose)
+
+---
+
+## docker-compose.yml — dev local
+
+```yaml
+version: '3.9'
+services:
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    environment:
+      POSTGRES_DB: cleanconnect_dev
+      POSTGRES_USER: cleanconnect
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ['5432:5432']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cleanconnect']
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    # AOF activé pour persister les delayed jobs BullMQ (v1.4)
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+    volumes: [redis_data:/data]
+    ports: ['6379:6379']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+
+  api:
+    build: { context: ., dockerfile: apps/api/Dockerfile, target: deps }
+    environment:
+      DATABASE_URL: postgres://cleanconnect:${POSTGRES_PASSWORD}@postgres:5432/cleanconnect_dev
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    volumes: ['.:/app', '/app/node_modules']
+    ports: ['3000:3000']
+
+volumes:
+  pgdata:
+  redis_data:
+```
+
+---
+
+## docker-compose.test.yml — containers éphémères pour Jest
+
+```yaml
+# Tests d'intégration : Postgres+PostGIS et Redis JETABLES (tmpfs, pas de persistance).
+# Lancés en CI ou en local : `docker-compose -f docker-compose.test.yml up -d`
+version: '3.9'
+services:
+  postgres-test:
+    image: postgis/postgis:16-3.4-alpine
+    environment:
+      POSTGRES_DB: cleanconnect_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    tmpfs: /var/lib/postgresql/data    # RAM uniquement → drop à l'arrêt
+    ports: ['5433:5432']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U test']
+      interval: 2s
+
+  redis-test:
+    image: redis:7-alpine
+    command: redis-server --save '' --appendonly no   # pas de persistance en tests
+    ports: ['6380:6379']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+```
+
+**Règles tests d'intégration** :
+- Container **PostGIS** (pas Postgres standard) — extension activée par les migrations Prisma
+- **tmpfs** pour la DB de test (rapide + isolation totale entre runs)
+- Ports décalés (`5433`, `6380`) pour cohabiter avec le compose dev
+- `prisma migrate deploy` lancé avant la première suite de tests
+- Truncate des tables entre chaque test (helper `cleanDb()` dans `tests/utils/`)
+
+---
+
+## Scripts d'ops — squelette robuste
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+ENV="${1:-}"
+if [[ -z "$ENV" ]]; then
+  echo "Usage: $0 <recette|preprod|prod>" >&2
+  exit 1
+fi
+
+if [[ "$ENV" == "prod" ]]; then
+  read -rp "⚠️  Déploiement PRODUCTION. Confirmer (yes/no) ? " confirm
+  [[ "$confirm" == "yes" ]] || { echo "Annulé."; exit 0; }
+fi
+```
+
+---
+
+## Sync DB entre environnements
+
+```
+✅ Autorisé  : prod → preprod → recette  (anonymisation PII obligatoire depuis prod)
+❌ INTERDIT  : dev/recette → prod        (jamais)
+```
+
+### Anonymisation PII (depuis prod)
+
+| Champ | Transformation |
+|---|---|
+| email | `<hash(id)>@anon.cleanconnect.fr` |
+| téléphone | `+33000000000` |
+| nom / prénom | `Utilisateur <hash(id)>` |
+| adresse | conserver code postal, masquer rue/numéro |
+| photos | URLs remplacées par placeholders (les blobs ne sont pas dumpés) |
+| Stripe customer IDs | conservés (sandbox, mais isolés) |
+
+---
+
+## Migrations Prisma
+
+```bash
+# Dev : générer + appliquer
+pnpm --filter @cleanconnect/api prisma migrate dev --name add_escrow_history
+
+# Prod : appliquer les migrations existantes (jamais "migrate dev" en prod)
+pnpm --filter @cleanconnect/api prisma migrate deploy
+```
+
+**Règles** :
+- `prisma migrate dev` **uniquement** en local
+- `prisma migrate deploy` en recette / preprod / prod
+- Backup DB **avant** toute migration en preprod / prod
+- Migrations destructives (DROP, ALTER TYPE, RENAME) : review humaine obligatoire
+
+---
+
+## Health check post-déploiement
+
+```bash
+# Après déploiement, vérifier /api/health
+curl -fsS "https://${ENV}.cleanconnect.fr/api/health" || { echo "❌ Health KO"; exit 1; }
+```
+
+Si `status !== 'ok'` → rollback immédiat.
+
+---
+
+## Interdictions
+
+- Tag Docker `latest` en prod
+- Credentials dans `Dockerfile` ou `docker-compose.yml`
+- `prisma migrate dev` en prod
+- Dump prod → dev sans anonymisation
+- `force push` sur `main`
+- Déploiement prod sans validation préalable en preprod
+- Déploiement le vendredi après 17h

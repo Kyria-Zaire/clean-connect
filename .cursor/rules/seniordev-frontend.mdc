@@ -1,0 +1,278 @@
+---
+description: Senior Dev Frontend — persona transverse mobile (Expo) + admin web (Vite), conventions TanStack Query, react-hook-form, design tokens, accessibilité, performance
+globs: ["apps/mobile/**/*.{ts,tsx}", "apps/admin/**/*.{ts,tsx}"]
+alwaysApply: false
+---
+
+# Senior Dev Frontend — Clean Connect
+
+> Activé sur `apps/mobile/**` et `apps/admin/**`.
+> Cette règle couvre les conventions **partagées** entre mobile (React Native) et web (React + Vite).
+> Les spécificités RN (MMKV, expo-background-fetch, etc.) sont dans `mobile.mdc`.
+
+---
+
+## Identité
+
+Tu es **Senior Frontend Engineer**. Tu écris une UI :
+- **Accessible** (a11y) — VoiceOver / TalkBack / lecteur d'écran web
+- **Performante** — pas de re-render inutile, pas d'image non optimisée
+- **Cohérente** — même token, mêmes interactions partout
+- **Typée** — pas de `any`, pas de cast forcé sur des props ou hooks
+
+---
+
+## State serveur — TanStack Query (universel)
+
+```typescript
+// ❌ useEffect + fetch
+useEffect(() => {
+  fetch('/api/missions').then(setMissions)
+}, [])
+
+// ✅ TanStack Query
+const { data, isPending, error } = useQuery({
+  queryKey: ['missions', { status: 'PENDING' }],
+  queryFn: () => api.missions.list({ status: 'PENDING' }),
+  staleTime: 30_000,
+})
+```
+
+### Conventions queryKey
+
+```typescript
+// Hiérarchie stable : [resource, scope, filters]
+['missions']                                    // toutes missions
+['missions', 'list', { status: 'PENDING' }]     // liste filtrée
+['missions', 'detail', missionId]               // une mission
+['users', 'me']                                 // current user
+['users', userId, 'photos']                     // photos d'un user
+```
+
+### Invalidation après mutation
+
+```typescript
+const acceptMission = useMutation({
+  mutationFn: (id: string) => api.missions.accept(id),
+  onSuccess: (_, id) => {
+    queryClient.invalidateQueries({ queryKey: ['missions'] })           // listes
+    queryClient.invalidateQueries({ queryKey: ['missions', 'detail', id] })
+  },
+})
+```
+
+**Règle** : pas d'`useState` qui duplique des données serveur. Le serveur = source de vérité.
+
+---
+
+## Formulaires — react-hook-form + zod
+
+```typescript
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+
+const schema = z.object({
+  scheduledAt: z.coerce.date(),
+  durationMinutes: z.number().int().min(30).max(480),
+  notes: z.string().max(500).optional(),
+})
+
+type Values = z.infer<typeof schema>
+
+const { control, handleSubmit, formState } = useForm<Values>({
+  resolver: zodResolver(schema),
+  defaultValues: { durationMinutes: 120 },
+  mode: 'onBlur',
+})
+```
+
+**Règles** :
+- Schéma Zod **réutilisé** depuis `packages/shared-types/zod/` quand possible (cohérence client ↔ serveur)
+- `mode: 'onBlur'` (pas `onChange` — pollue de validation pendant la frappe)
+- `defaultValues` toujours fournis (évite les warnings React "uncontrolled to controlled")
+- `formState.isSubmitting` pour désactiver le bouton submit
+
+---
+
+## Client API — généré, jamais à la main
+
+```typescript
+// ❌ fetch manuel
+const res = await fetch('/api/missions', { method: 'POST', body: JSON.stringify(...) })
+
+// ✅ client typé généré (Orval, tRPC-like, ou OpenAPI-Codegen depuis nestjs-zod)
+import { apiClient } from '@cleanconnect/api-client'
+const mission = await apiClient.missions.create({ ...payload })
+```
+
+Toute route NestJS est exposée typée via le client. Pas de duplication des types DTO côté front.
+
+---
+
+## Design tokens — source unique
+
+```typescript
+// packages/shared-config/theme.ts (partagé mobile + web)
+export const colors = {
+  bg: '#FFFFFF',
+  text: '#0F172A',
+  textMuted: '#64748B',
+  border: '#E2E8F0',
+  primary: '#22c55e',           // vert Clean Connect (mode prestataire)
+  primaryHover: '#16a34a',
+  neutral: '#0F172A',            // mode client (sobre)
+  success: '#22c55e',
+  warning: '#f59e0b',
+  danger: '#ef4444',
+}
+
+export const radius = { sm: 8, md: 12, lg: 16, xl: 20 } as const
+export const spacing = { 1: 4, 2: 8, 3: 12, 4: 16, 6: 24, 8: 32, 10: 40 } as const
+```
+
+**Règles** :
+- **Aucun hex code en dur** dans un composant — toujours via tokens
+- Cards : `borderRadius: 16-20`, fond `#FFFFFF`, border subtile, **pas de dégradés**
+- Typographie Inter (mobile : police chargée via expo-font ; web : `@fontsource/inter`)
+
+---
+
+## Accessibilité (a11y)
+
+### Règles communes
+
+- Tout `Pressable` / `TouchableOpacity` / `<button>` a un label accessible :
+  - Mobile : `accessibilityLabel`
+  - Web : `aria-label` (ou contenu texte explicite)
+- Contraste texte / fond ≥ **4.5:1** (WCAG AA) — outil : ColorContrast.com
+- Aucune information transmise **uniquement** par la couleur (état d'erreur → icône + texte aussi)
+- Tailles tactiles ≥ **44×44 pt** (iOS HIG) / **48×48 dp** (Material)
+
+### Mobile spécifique
+
+```typescript
+<Pressable
+  accessibilityRole="button"
+  accessibilityLabel="Démarrer la mission"
+  accessibilityHint="Démarre le chronomètre et active la prise de photos AVANT"
+  onPress={start}
+>
+```
+
+### Web spécifique
+
+- Tous les inputs ont un `<label htmlFor>` explicite
+- Modales : focus trap + `aria-modal="true"` + `Esc` ferme
+- Navigation clavier complète (`Tab`, `Shift+Tab`, `Enter`, `Esc`)
+
+---
+
+## Performance
+
+### Mémoïsation ciblée (pas systématique)
+
+```typescript
+// ❌ memo partout (overhead inutile sur petits composants)
+const Card = React.memo(({ title }: { title: string }) => <View>...</View>)
+
+// ✅ memo seulement sur composants de liste / lourds
+const MissionListItem = React.memo(({ mission }: Props) => { /* ... */ })
+```
+
+### Listes longues
+
+- Mobile : `FlashList` (`@shopify/flash-list`), **pas** `FlatList` pour > 50 items
+- Web : virtualisation via `@tanstack/react-virtual` pour les tableaux admin
+
+### Images
+
+- Mobile : `expo-image` (cache intégré, formats modernes)
+- Web : `<img loading="lazy">` + `srcSet` pour le responsive
+
+### Sélecteurs spécifiques (éviter re-renders)
+
+```typescript
+// ❌ tout le data retourné par useQuery, re-render à chaque update
+const { data: user } = useQuery({ queryKey: ['users', 'me'], queryFn: ... })
+return <div>{user?.profile.displayName}</div>
+
+// ✅ select pour ne dépendre que du displayName
+const { data: displayName } = useQuery({
+  queryKey: ['users', 'me'],
+  queryFn: ...,
+  select: u => u.profile.displayName,
+})
+```
+
+---
+
+## Gestion d'erreur — patterns
+
+```typescript
+// Toast cohérent partout
+const { mutate, error } = useMutation({
+  mutationFn: api.missions.accept,
+  onSuccess: () => toast.success('Mission acceptée'),
+  onError: (err) => {
+    Sentry.captureException(err)
+    toast.error(
+      isApiError(err) && err.code === 'MISSION_ALREADY_TAKEN'
+        ? 'Cette mission a été prise par un autre prestataire'
+        : 'Erreur inattendue. Réessayer ?'
+    )
+  },
+})
+```
+
+**Règles** :
+- **Toujours** un fallback UI ou un toast — jamais d'`alert()` brut
+- Messages utilisateur en français, non techniques (« Erreur inattendue. Réessayer ? »)
+- Stack trace dans Sentry, jamais à l'écran de l'utilisateur
+
+---
+
+## Structure d'un écran / page
+
+```
+features/missions/
+├── pages/
+│   └── MissionsList.tsx           # composant écran (route)
+├── components/
+│   ├── MissionCard.tsx
+│   └── MissionEmptyState.tsx
+├── hooks/
+│   ├── useMissionsList.ts         # wrapper TanStack Query + filtres locaux
+│   └── useAcceptMission.ts
+└── lib/
+    └── format-mission.ts          # pure functions (testables)
+```
+
+**Règle** : un composant page ne fait **pas** d'appel API direct, il utilise des hooks dédiés.
+
+---
+
+## Tests
+
+### Unitaires (Jest + RTL pour web, Jest pour mobile)
+
+- Logique pure (format, calculs) → tests purs
+- Hooks custom (avec mocks TanStack Query via `QueryClientProvider`)
+
+### E2E
+
+- **Mobile** : Detox sur le happy path (cf cahier v1.4 §4)
+- **Web admin** : Playwright sur les flux critiques (login admin, vue litige, retry DLQ)
+
+---
+
+## Interdictions transverses
+
+- `any` ou `as unknown as X` non justifié
+- `console.log` en production (Sentry breadcrumbs en dev OK)
+- Hex code en dur dans un composant (toujours via tokens)
+- Dégradés (cf identité visuelle Clean Connect : flat design)
+- `useEffect + fetch` (toujours TanStack Query)
+- `fetch` manuel vers l'API (toujours via le client typé généré)
+- Inline styles complexes (extraire dans un fichier `.styles.ts` ou tokens)
+- Modale sans focus trap ni `Esc`
+- Bouton sans label accessible

@@ -1,0 +1,280 @@
+---
+description: Photos & RGPD — upload Cloudinary signé, idempotence UUID, rétention 12 mois, droit à l'effacement
+globs: apps/api/src/modules/photos/**/*.ts
+alwaysApply: false
+---
+
+# Photos & RGPD — Clean Connect
+
+> Activé sur `apps/api/src/modules/photos/**`.
+> Cahier des charges : §6.4 (sécurité) et §6.5 (RGPD).
+
+---
+
+## Upload — Signed URL Cloudinary
+
+**Principe** : le mobile upload **directement** à Cloudinary, le backend ne transite jamais le binaire.
+
+### Étape 1 — Le mobile demande une signature
+
+```typescript
+// POST /api/photos/sign
+@Post('sign')
+@UseGuards(JwtAuthGuard)
+async sign(@Body() dto: SignPhotoDto, @CurrentUser() user: AuthUser) {
+  // dto : { uuid (client-generated), missionId, phase: 'BEFORE' | 'AFTER' }
+
+  // Vérifier ownership : prestataire de cette mission ?
+  await this.assertCanUploadPhoto(dto.missionId, user)
+
+  // Idempotence : UUID déjà connu ?
+  const existing = await this.prisma.photo.findUnique({ where: { uuid: dto.uuid } })
+  if (existing) {
+    return { idempotent: true, photoId: existing.id }
+  }
+
+  // Dossier privé par mission + phase
+  const folder = `${env.NODE_ENV}/missions/${dto.missionId}/${dto.phase.toLowerCase()}`
+  const publicId = `${folder}/${dto.uuid}`
+  const timestamp = Math.floor(Date.now() / 1000)
+
+  const signature = cloudinary.utils.api_sign_request(
+    { public_id: publicId, timestamp, folder, type: 'private' },
+    env.CLOUDINARY_API_SECRET,
+  )
+
+  // Pré-enregistrer la photo en DB avec status PENDING
+  await this.prisma.photo.create({
+    data: {
+      uuid: dto.uuid,
+      missionId: dto.missionId,
+      phase: dto.phase,
+      uploadedBy: user.id,
+      cloudinaryPublicId: publicId,
+      status: 'PENDING_UPLOAD',
+    },
+  })
+
+  return { signature, timestamp, publicId, apiKey: env.CLOUDINARY_API_KEY, cloudName: env.CLOUDINARY_CLOUD_NAME }
+}
+```
+
+### Étape 2 — Le mobile upload à Cloudinary
+
+(Côté mobile, voir `mobile.mdc`. Le serveur n'intervient pas dans le transit.)
+
+### Étape 3 — Cloudinary notifie (webhook)
+
+```typescript
+@Post('cloudinary/webhook')
+@HttpCode(HttpStatus.OK)
+async cloudinaryWebhook(@Body() body: any, @Headers('x-cld-signature') sig: string) {
+  if (!verifyCloudinarySignature(body, sig, env.CLOUDINARY_API_SECRET)) {
+    throw new BadRequestException('Invalid signature')
+  }
+
+  if (body.notification_type === 'upload') {
+    await this.prisma.photo.update({
+      where: { cloudinaryPublicId: body.public_id },
+      data: {
+        status: 'UPLOADED',
+        syncedAt: new Date(),
+        width: body.width,
+        height: body.height,
+        bytes: body.bytes,
+      },
+    })
+  }
+}
+```
+
+---
+
+## Idempotence — UUID client
+
+**Règle dure** : le mobile génère un UUID v4 **avant** capture, le backend stocke avec contrainte UNIQUE.
+
+```prisma
+model Photo {
+  id                  String   @id @default(uuid())
+  uuid                String   @unique   // UUID v4 généré côté client
+  missionId           String
+  phase               PhotoPhase
+  uploadedBy          String
+  cloudinaryPublicId  String   @unique
+  status              PhotoStatus
+  syncedAt            DateTime?
+  width               Int?
+  height              Int?
+  bytes               Int?
+  createdAt           DateTime @default(now())
+
+  mission             Mission  @relation(fields: [missionId], references: [id])
+
+  @@index([missionId, phase])
+}
+```
+
+Si le mobile retry par erreur, le serveur renvoie `{ idempotent: true, photoId: existing.id }` sans rien dupliquer.
+
+---
+
+## Lecture — Signed URL à courte expiration
+
+```typescript
+async getSignedReadUrl(photoId: string, user: AuthUser): Promise<string> {
+  const photo = await this.prisma.photo.findUnique({
+    where: { id: photoId },
+    include: { mission: true },
+  })
+  if (!photo) throw new NotFoundException()
+
+  await this.assertCanViewPhoto(photo, user)   // RBAC + ownership
+
+  return cloudinary.url(photo.cloudinaryPublicId, {
+    type: 'private',
+    sign_url: true,
+    secure: true,
+    expires_at: Math.floor(Date.now() / 1000) + 300,   // 5 min
+  })
+}
+```
+
+**Règle dure** : pas d'URL publique permanente. Toujours signées, expiration ≤ 5 min.
+
+---
+
+## RGPD — Rétention 12 mois
+
+### Suppression automatique des photos
+
+Cron quotidien :
+
+```typescript
+@Cron('0 3 * * *')   // 3 h du matin
+async purgeOldPhotos() {
+  const cutoff = subMonths(new Date(), 12)
+
+  const photos = await this.prisma.photo.findMany({
+    where: {
+      mission: { completedAt: { lt: cutoff } },
+      deletedAt: null,
+    },
+    take: 500,
+  })
+
+  for (const photo of photos) {
+    await cloudinary.uploader.destroy(photo.cloudinaryPublicId, { type: 'private' })
+    await this.prisma.photo.update({
+      where: { id: photo.id },
+      data: { deletedAt: new Date(), cloudinaryPublicId: '__deleted__' },
+    })
+  }
+
+  this.logger.info({ count: photos.length }, 'Photos purged (RGPD retention)')
+}
+```
+
+**On garde** la ligne en DB (pour l'historique de mission), on supprime juste le blob Cloudinary.
+
+---
+
+## RGPD — Droit à l'effacement utilisateur
+
+Quand `DELETE /api/users/me` :
+
+```typescript
+async deleteUserAccount(userId: string) {
+  await this.prisma.user.update({
+    where: { id: userId },
+    data: {
+      deletedAt: new Date(),
+      email: `deleted-${userId}@anon.local`,
+      firstName: 'Anon',
+      lastName: 'User',
+      phone: null,
+      avatarUrl: null,
+    },
+  })
+
+  // Schedule purge à T+30j
+  await this.queue.add(
+    'user.purge',
+    { userId },
+    { delay: 30 * 24 * 3600 * 1000 },
+  )
+}
+
+@Process('user.purge')
+async purgeUser(job: Job<{ userId: string }>) {
+  const userId = job.data.userId
+
+  // Supprimer les photos uploadées par cet utilisateur (uniquement les photos hors missions clôturées)
+  const photos = await this.prisma.photo.findMany({
+    where: {
+      uploadedBy: userId,
+      mission: { completedAt: null },   // missions en cours : on garde pour litige
+    },
+  })
+  for (const p of photos) {
+    await cloudinary.uploader.destroy(p.cloudinaryPublicId, { type: 'private' })
+  }
+
+  await this.prisma.photo.deleteMany({
+    where: { uploadedBy: userId, mission: { completedAt: null } },
+  })
+
+  // Hard delete user (sauf transactions Stripe : conservées 10 ans)
+  await this.prisma.user.delete({ where: { id: userId } })
+}
+```
+
+---
+
+## RGPD — Export utilisateur (droit à la portabilité)
+
+```typescript
+@Get('me/export')
+@UseGuards(JwtAuthGuard)
+async exportMyData(@CurrentUser() user: AuthUser) {
+  const data = await this.users.exportAllDataFor(user.id)
+  return {
+    user: data.user,
+    missions: data.missions,
+    photos: data.photos.map(p => ({
+      ...p,
+      signedUrl: this.photos.getSignedReadUrl(p.id, user),
+    })),
+    payments: data.payments,
+    exportedAt: new Date().toISOString(),
+  }
+}
+```
+
+---
+
+## Sécurité — checklist photos
+
+```
+☐ DTO Zod sur Sign + Webhook
+☐ Ownership check (prestataire de la mission ?)
+☐ Idempotence UUID UNIQUE
+☐ Dossier privé Cloudinary `type: 'private'`
+☐ Signed URL expirations ≤ 5 min
+☐ Webhook Cloudinary signature vérifiée
+☐ Pas d'URL publique permanente
+☐ Photos non-utiles purgées à T+12 mois
+☐ Photos utilisateur supprimé : nettoyage à T+30 j (sauf litige en cours)
+☐ EXIF stripping côté Cloudinary (paramètre upload preset)
+```
+
+---
+
+## Interdictions
+
+- URL Cloudinary publique (`type: 'upload'`) sur des photos privées
+- Signed URL à expiration > 1 h
+- Upload du binaire via le backend NestJS (toujours direct mobile → Cloudinary)
+- Stocker des photos en base de données (toujours dans Cloudinary)
+- Supprimer une photo de mission **non clôturée** (besoin pour litige)
+- Conserver des photos > 12 mois après clôture mission (RGPD)

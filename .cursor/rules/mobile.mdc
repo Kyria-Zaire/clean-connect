@@ -1,0 +1,351 @@
+---
+description: Mobile React Native / Expo — application unique Client + Prestataire, RoleGuard, TanStack Query, offline sync, MMKV, photos, performance
+globs: apps/mobile/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Mobile — React Native + Expo (Application unique)
+
+> Activé sur `apps/mobile/**/*.{ts,tsx}`.
+> Stack : Expo SDK 51+, TypeScript strict, TanStack Query, react-hook-form + zod, MMKV.
+> **Stratégie v1.4** : un **seul binaire** pour Client + Prestataire. Bascule de rôle via RoleGuard + MMKV.
+
+---
+
+## Application unique — RoleGuard
+
+Le binaire mobile gère **les deux rôles**. Un utilisateur peut être `CLIENT`, `PRESTATAIRE`, ou `BOTH`.
+
+### Modèle de rôle côté mobile
+
+```typescript
+// apps/mobile/src/lib/auth/role.ts
+import { MMKV } from 'react-native-mmkv'
+
+export type Role = 'CLIENT' | 'PRESTATAIRE'
+export type AccountRoles = { client: boolean; prestataire: boolean }
+
+const prefs = new MMKV({ id: 'user-prefs' })
+const ACTIVE_ROLE_KEY = 'active-role'
+
+export function getActiveRole(roles: AccountRoles): Role {
+  const stored = prefs.getString(ACTIVE_ROLE_KEY) as Role | undefined
+  if (stored && roles[stored.toLowerCase() as 'client' | 'prestataire']) return stored
+  return roles.prestataire ? 'PRESTATAIRE' : 'CLIENT'   // défaut
+}
+
+export function setActiveRole(role: Role) {
+  prefs.set(ACTIVE_ROLE_KEY, role)
+}
+```
+
+### Switch UI
+
+```typescript
+// apps/mobile/app/(app)/_layout.tsx
+export default function AppLayout() {
+  const { user } = useAuth()
+  const activeRole = useActiveRole()   // hook qui lit MMKV + souscrit aux changements
+
+  if (activeRole === 'PRESTATAIRE') return <PrestataireTabs />
+  return <ClientTabs />
+}
+```
+
+### Bascule de rôle (utilisateur dual)
+
+```typescript
+function ToggleRoleButton({ user }: { user: User }) {
+  const queryClient = useQueryClient()
+  const activeRole = useActiveRole()
+  const otherRole: Role = activeRole === 'CLIENT' ? 'PRESTATAIRE' : 'CLIENT'
+
+  if (!user.roles.client || !user.roles.prestataire) return null
+
+  const handleSwitch = () => {
+    setActiveRole(otherRole)
+    queryClient.clear()                  // évite que les caches client/presta se mélangent
+    router.replace('/(app)')             // remount du layout racine
+  }
+
+  return <Button onPress={handleSwitch}>{`Passer en mode ${otherRole}`}</Button>
+}
+```
+
+**Règle dure** : à chaque bascule, **`queryClient.clear()`** pour éviter qu'un cache Mission CLIENT ne s'affiche en mode PRESTATAIRE.
+
+### Tokens de design par rôle
+
+```typescript
+// apps/mobile/src/theme/index.ts
+export const themeForRole = (role: Role) => ({
+  ...baseTheme,
+  colors: {
+    ...baseTheme.colors,
+    primary: role === 'PRESTATAIRE' ? '#22c55e' : '#0F172A',
+    primaryFg: '#FFFFFF',
+  },
+})
+```
+
+Provider du thème dans `_layout.tsx`, recalculé sur changement de rôle.
+
+### Permissions natives — demandes contextuelles
+
+| Permission | Demandée à l'usage |
+|---|---|
+| Caméra + galerie | Première capture de photo (mode prestataire) |
+| Géolocalisation | Première recherche / acceptation mission |
+| Notifications push | Après le 1ʳᵉ login |
+| Background fetch | Mode prestataire uniquement (sync photos) |
+
+**Règle** : pas de demande de permissions au login. Demande **au moment** où le user va l'utiliser, avec un écran d'explication custom **avant** le prompt système.
+
+### Notifications push différenciées
+
+```typescript
+// Topics FCM souscrits selon les rôles activés
+async function subscribeTopics(user: User) {
+  if (user.roles.client) await messaging().subscribeToTopic(`client.${user.id}`)
+  if (user.roles.prestataire) await messaging().subscribeToTopic(`prestataire.${user.id}`)
+  await messaging().subscribeToTopic(`both.${user.id}`)
+}
+```
+
+---
+
+## State serveur — TanStack Query uniquement
+
+```typescript
+// ❌ useEffect + fetch
+useEffect(() => {
+  fetch('/api/missions').then(...)
+}, [])
+
+// ✅ TanStack Query
+const { data, isLoading, error } = useQuery({
+  queryKey: ['missions'],
+  queryFn: () => api.missions.list(),
+  staleTime: 30_000,
+})
+
+// ✅ Mutation avec invalidation
+const acceptMission = useMutation({
+  mutationFn: (id: string) => api.missions.accept(id),
+  onSuccess: () => queryClient.invalidateQueries({ queryKey: ['missions'] }),
+})
+```
+
+---
+
+## Formulaires — react-hook-form + zod
+
+```typescript
+const schema = z.object({
+  scheduledAt: z.date(),
+  durationMinutes: z.number().int().min(30).max(480),
+  notes: z.string().max(500).optional(),
+})
+
+type FormValues = z.infer<typeof schema>
+
+const { control, handleSubmit, formState } = useForm<FormValues>({
+  resolver: zodResolver(schema),
+  defaultValues: { durationMinutes: 120 },
+})
+```
+
+---
+
+## Photos — compression + UUID + queue offline
+
+### Pattern obligatoire
+
+```typescript
+import * as FileSystem from 'expo-file-system'
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator'
+import { MMKV } from 'react-native-mmkv'
+import * as Crypto from 'expo-crypto'
+
+const queueStorage = new MMKV({ id: 'photo-sync-queue' })
+
+async function capturePhoto(missionId: string, phase: 'BEFORE' | 'AFTER') {
+  const uri = await openCamera()
+
+  // 1. Compression (1600px max, JPEG 75)
+  const compressed = await manipulateAsync(
+    uri,
+    [{ resize: { width: 1600 } }],
+    { compress: 0.75, format: SaveFormat.JPEG },
+  )
+
+  // 2. UUID client (clé d'idempotence backend)
+  const uuid = Crypto.randomUUID()
+
+  // 3. Stockage local
+  const localPath = `${FileSystem.documentDirectory}photos/${uuid}.jpg`
+  await FileSystem.moveAsync({ from: compressed.uri, to: localPath })
+
+  // 4. Enqueue pour sync background
+  enqueueSync({ uuid, missionId, phase, localPath, attempts: 0 })
+}
+
+function enqueueSync(item: SyncQueueItem) {
+  const existing = JSON.parse(queueStorage.getString('queue') ?? '[]') as SyncQueueItem[]
+  existing.push(item)
+  queueStorage.set('queue', JSON.stringify(existing))
+}
+```
+
+**Règles** :
+- **Compression obligatoire** avant stockage : 1600 px max, JPEG 75 (~150-300 KB/photo)
+- **UUID v4 côté client** : clé d'idempotence backend
+- File MMKV (rapide, persistante) plutôt que SQLite pour ce volume
+- Photo locale conservée jusqu'à confirmation de l'upload serveur
+
+---
+
+## Sync background
+
+```typescript
+// app/_layout.tsx ou similaire
+import * as BackgroundFetch from 'expo-background-fetch'
+import * as TaskManager from 'expo-task-manager'
+
+const SYNC_TASK = 'photo-sync-task'
+
+TaskManager.defineTask(SYNC_TASK, async () => {
+  try {
+    const success = await processSyncQueue()
+    return success
+      ? BackgroundFetch.BackgroundFetchResult.NewData
+      : BackgroundFetch.BackgroundFetchResult.NoData
+  } catch {
+    return BackgroundFetch.BackgroundFetchResult.Failed
+  }
+})
+
+await BackgroundFetch.registerTaskAsync(SYNC_TASK, {
+  minimumInterval: 60,           // 1 min minimum entre exécutions
+  stopOnTerminate: false,
+  startOnBoot: true,
+})
+```
+
+### Retry exponentiel
+
+```typescript
+const BACKOFF_MS = [5_000, 30_000, 120_000, 600_000, 3_600_000]  // 5s, 30s, 2m, 10m, 1h
+
+async function processSyncQueue() {
+  const queue = readQueue()
+  for (const item of queue) {
+    if (Date.now() - item.lastAttemptAt < BACKOFF_MS[item.attempts]) continue
+    try {
+      await uploadPhoto(item)
+      removeFromQueue(item.uuid)
+    } catch (err) {
+      item.attempts += 1
+      item.lastAttemptAt = Date.now()
+      if (item.attempts >= 5) markAsManualRetry(item)
+      updateQueueItem(item)
+    }
+  }
+}
+```
+
+---
+
+## Démarrage mission avec photos non sync
+
+Règle métier (cahier §4.2) :
+
+```typescript
+// Le prestataire PEUT démarrer la mission même si photos AVANT non synchronisées
+const canStart = photosBefore.length >= 3
+const photosSynced = photosBefore.every(p => p.status === 'SYNCED')
+
+if (canStart && !photosSynced) {
+  showWarning('Photos AVANT en attente de synchronisation. Démarrage autorisé. Le séquestre ne se libérera qu\'après synchronisation.')
+}
+```
+
+Indicateurs visuels :
+- Badge "En attente de synchronisation" sur chaque photo non synchronisée
+- Compteur global "X photos en attente" sur l'écran principal
+- Couleur de statut : `#22c55e` synced, `#f59e0b` pending, `#ef4444` failed
+
+---
+
+## Auth — secure storage
+
+```typescript
+// ❌ AsyncStorage pour les tokens (non chiffré)
+await AsyncStorage.setItem('accessToken', token)
+
+// ✅ expo-secure-store (chiffré)
+import * as SecureStore from 'expo-secure-store'
+await SecureStore.setItemAsync('accessToken', token)
+```
+
+---
+
+## Navigation — Expo Router
+
+```typescript
+// app/_layout.tsx — root layout
+// app/(auth)/login.tsx
+// app/(tabs)/missions.tsx
+// app/missions/[id].tsx
+```
+
+Routes protégées via un guard dans `_layout.tsx` qui redirect vers `/login` si pas d'access token valide.
+
+---
+
+## Identité visuelle — Tokens
+
+```typescript
+export const theme = {
+  colors: {
+    bg: '#FFFFFF',
+    text: '#0F172A',
+    primary: '#22c55e',
+    primaryHover: '#16a34a',
+    border: '#E2E8F0',
+    muted: '#64748B',
+    success: '#22c55e',
+    warning: '#f59e0b',
+    danger: '#ef4444',
+  },
+  radius: { sm: 8, md: 12, lg: 16, xl: 20 },
+  spacing: { 1: 4, 2: 8, 3: 12, 4: 16, 6: 24, 8: 32 },
+  font: { family: 'Inter' },
+}
+```
+
+Cards : `borderRadius: 16-20`, `backgroundColor: #FFFFFF`, `borderWidth: 1`, `borderColor: #E2E8F0`, **pas de dégradés**.
+
+---
+
+## Performance
+
+- Listes longues → `FlashList` (`@shopify/flash-list`) plutôt que `FlatList`
+- Images distantes → `expo-image` (cache intégré, formats modernes)
+- Mémoïsation : `React.memo`, `useCallback`, `useMemo` sur les composants de liste
+- Évite les ré-renders inutiles : sélecteurs spécifiques sur les hooks Query (`select: data => data.summary`)
+
+---
+
+## Interdictions
+
+- `useEffect + fetch` (toujours TanStack Query)
+- `AsyncStorage` pour les tokens (toujours `expo-secure-store`)
+- Photos sans compression (5 MB en mémoire mobile = crash assuré)
+- Upload de photo sans UUID client
+- `JSON.parse` sur une réponse réseau sans validation Zod
+- `any` ou cast forcé pour contourner les types Expo
+- Styles inline complexes (extraire dans un `StyleSheet.create` ou tokens)
+- Bascule de rôle **sans** `queryClient.clear()` (fuites de données entre rôles)
+- Demander la permission notifications **avant** le 1ᵉʳ login (taux de refus très élevé)
+- Construire deux apps séparées (Client + Prestataire) — décision v1.4 : **app unique**

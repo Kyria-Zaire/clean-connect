@@ -1,0 +1,188 @@
+
+# Architecte API — Conventions NestJS
+
+> Activé sur `apps/api/**/*.ts`.
+> Pensée : DTO Zod → Controller (HTTP only) → Service (métier) → Repository (Prisma) → DB. Jamais l'inverse.
+
+---
+
+## Structure d'un module NestJS
+
+```
+modules/missions/
+├── dto/
+│   ├── create-mission.dto.ts          # schéma Zod + class via createZodDto
+│   ├── update-mission.dto.ts
+│   └── mission-response.dto.ts
+├── missions.controller.ts             # HTTP I/O uniquement
+├── missions.service.ts                # logique métier
+├── missions.repository.ts             # Prisma (typé, sans logique)
+├── missions.module.ts                 # boundary du module
+└── tests/
+    ├── missions.controller.spec.ts
+    └── missions.service.spec.ts
+```
+
+---
+
+## DTO avec nestjs-zod
+
+```typescript
+// dto/create-mission.dto.ts
+import { z } from 'zod'
+import { createZodDto } from 'nestjs-zod'
+
+export const createMissionSchema = z.object({
+  clientId: z.string().uuid(),
+  scheduledAt: z.coerce.date(),
+  durationMinutes: z.number().int().min(30).max(480),
+  address: z.object({
+    street: z.string().min(1).max(255),
+    city: z.string().min(1).max(100),
+    postalCode: z.string().regex(/^\d{5}$/),
+    lat: z.number().min(-90).max(90),
+    lng: z.number().min(-180).max(180),
+  }),
+  serviceType: z.enum(['STANDARD', 'DEEP', 'POST_RENOVATION']),
+}).strict()
+
+export class CreateMissionDto extends createZodDto(createMissionSchema) {}
+```
+
+**Règle** : `.strict()` sur tout body pour rejeter les champs inattendus.
+
+---
+
+## Controller (HTTP I/O uniquement)
+
+```typescript
+@Controller('missions')
+@UseGuards(JwtAuthGuard)
+export class MissionsController {
+  constructor(private readonly missionsService: MissionsService) {}
+
+  @Post()
+  @Roles('CLIENT')
+  @UseGuards(RoleGuard)
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Body() dto: CreateMissionDto,
+    @CurrentUser() user: AuthUser,
+  ): Promise<MissionResponseDto> {
+    return this.missionsService.create(dto, user.id)
+  }
+
+  @Get(':id')
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+  ): Promise<MissionResponseDto> {
+    return this.missionsService.findOneAuthorized(id, user)
+  }
+}
+```
+
+**Règles controller** :
+- Aucune logique métier
+- Aucun appel direct à Prisma
+- Toujours typer le retour
+- `@HttpCode` explicite pour les codes non-200
+- `ParseUUIDPipe` sur tout `:id` qui est un UUID
+
+---
+
+## Service (logique métier)
+
+```typescript
+@Injectable()
+export class MissionsService {
+  constructor(
+    private readonly repo: MissionsRepository,
+    private readonly matchingService: MatchingService,
+    @InjectQueue('missions') private readonly queue: Queue,
+    private readonly logger: PinoLogger,
+  ) {}
+
+  async create(dto: CreateMissionDto, clientId: string): Promise<MissionResponseDto> {
+    this.logger.info({ clientId, serviceType: dto.serviceType }, 'Creating mission')
+
+    return this.repo.transaction(async (tx) => {
+      const mission = await this.repo.create(tx, { ...dto, clientId })
+      await this.matchingService.notifyEligiblePrestataires(tx, mission)
+      await this.queue.add('mission.created', { missionId: mission.id })
+      return this.toResponse(mission)
+    })
+  }
+}
+```
+
+**Règles service** :
+- Logique métier centralisée ici
+- Transactions Prisma pour toute opération multi-tables
+- BullMQ pour les actions asynchrones (notifications, sync)
+- Jamais d'accès direct au `req`/`res`
+
+---
+
+## Repository (Prisma uniquement)
+
+```typescript
+@Injectable()
+export class MissionsRepository {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async create(tx: Prisma.TransactionClient, data: CreateMissionInput) {
+    return tx.mission.create({
+      data,
+      include: { address: true, client: { select: { id: true, email: true } } },
+    })
+  }
+
+  async findById(id: string) {
+    return this.prisma.mission.findUnique({ where: { id } })
+  }
+}
+```
+
+**Règles repository** :
+- Aucune logique métier (jamais de `if (status === ...)` ici)
+- Méthodes typées par Prisma
+- `tx?: TransactionClient` optionnel pour permettre l'usage dans une transaction parente
+
+---
+
+## Pipes & Guards globaux
+
+```typescript
+// main.ts
+app.useGlobalPipes(new ZodValidationPipe())       // validation automatique des DTOs Zod
+app.useGlobalFilters(new AllExceptionsFilter())   // exception filter centralisé
+app.useGlobalInterceptors(new LoggingInterceptor())
+```
+
+---
+
+## Exception handling
+
+```typescript
+// Jamais throw new Error('...') dans un service
+// Toujours une exception NestJS typée :
+throw new NotFoundException('Mission not found')
+throw new ForbiddenException('Not authorized to view this mission')
+throw new BadRequestException('Invalid status transition')
+throw new ConflictException('Mission already accepted by another prestataire')
+```
+
+L'`AllExceptionsFilter` centralise la transformation en JSON et le logging structuré.
+
+---
+
+## Interdictions
+
+- Logique métier dans un controller
+- `prisma.X.findMany()` direct dans un service (passer par le repository)
+- `try { ... } catch (e) { console.log(e) }` → toujours Pino + relancer typé
+- `prisma.$queryRaw` sans commentaire justificatif
+- Réponse sans typage (`Promise<any>`, `Promise<unknown>`)
+- `findMany()` sans `take:` explicite (sauf justifié en commentaire)
+- Validation manuelle au lieu de Zod

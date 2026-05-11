@@ -1,0 +1,117 @@
+# ============================================================================
+# Clean Connect — .gitignore
+# Couverture : Node, pnpm, Turborepo, NestJS, Expo / React Native,
+#              Vite, Prisma, Docker, Sentry, secrets locaux.
+# ============================================================================
+
+# ---- Node / pnpm -----------------------------------------------------------
+node_modules/
+.pnpm-store/
+.pnp.*
+.yarn/cache
+.yarn/install-state.gz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.npmrc.local
+
+# ---- TypeScript / build ----------------------------------------------------
+*.tsbuildinfo
+dist/
+build/
+out/
+.tmp/
+.cache/
+
+# ---- Turborepo -------------------------------------------------------------
+.turbo/
+.turbo-cache/
+
+# ---- NestJS (apps/api) -----------------------------------------------------
+apps/api/dist/
+apps/api/coverage/
+
+# ---- Vite (apps/admin) -----------------------------------------------------
+apps/admin/dist/
+apps/admin/.vite/
+
+# ---- Expo / React Native (apps/mobile) -------------------------------------
+apps/mobile/.expo/
+apps/mobile/.expo-shared/
+apps/mobile/web-build/
+apps/mobile/dist/
+apps/mobile/ios/Pods/
+apps/mobile/ios/build/
+apps/mobile/ios/.xcode.env.local
+apps/mobile/android/.gradle/
+apps/mobile/android/build/
+apps/mobile/android/app/build/
+apps/mobile/android/app/release/
+apps/mobile/android/local.properties
+*.jks
+*.keystore
+*.mobileprovision
+
+# ---- Prisma ----------------------------------------------------------------
+apps/api/prisma/migrations/dev.db*
+*.db
+*.db-journal
+
+# ---- Tests / coverage ------------------------------------------------------
+coverage/
+*.lcov
+.nyc_output/
+junit.xml
+test-results/
+playwright-report/
+detox-artifacts/
+
+# ---- Secrets & environnement ----------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.development
+.env.recette
+.env.preprod
+.env.production
+!.env.example
+secrets/
+*.pem
+*.key
+!docs/**/*.key.example
+
+# ---- Docker / volumes locaux -----------------------------------------------
+.docker/
+postgres_data/
+redis_data/
+
+# ---- Logs ------------------------------------------------------------------
+*.log
+logs/
+
+# ---- Sentry / sourcemaps ---------------------------------------------------
+.sentryclirc
+**/*.js.map
+!apps/admin/dist/**/*.js.map
+
+# ---- Editor / OS -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+.history/
+
+# ---- Divers ---------------------------------------------------------------
+*.tgz
+*.zip
+*.tar.gz
+*.bak
+.fleet/
