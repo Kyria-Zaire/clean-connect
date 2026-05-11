@@ -15,7 +15,7 @@ const envSchema = z
     DATABASE_URL: z.string().url().startsWith('postgresql://'),
     REDIS_URL: z.string().url().startsWith('redis://'),
 
-    JWT_SECRET: z.string().min(48, 'JWT_SECRET doit faire au moins 48 caractères.'),
+    JWT_ACCESS_SECRET: z.string().min(48, 'JWT_ACCESS_SECRET doit faire au moins 48 caractères.'),
     JWT_REFRESH_SECRET: z.string().min(48, 'JWT_REFRESH_SECRET doit faire au moins 48 caractères.'),
     JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
     JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),

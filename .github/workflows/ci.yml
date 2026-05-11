@@ -91,7 +91,7 @@ jobs:
       REDIS_URL_TEST: redis://localhost:6380
       APP_ENV: development
       NODE_ENV: development
-      JWT_SECRET: ci_jwt_secret_minimum_48_chars_____________________________________________
+      JWT_ACCESS_SECRET: ci_jwt_access_secret_min_48_chars_______________________________________
       JWT_REFRESH_SECRET: ci_refresh_secret_min_48_chars___________________________________________
       CORS_ORIGINS: http://localhost:5173
       STRIPE_SECRET_KEY: sk_test_ci_placeholder
