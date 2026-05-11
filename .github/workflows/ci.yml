@@ -37,6 +37,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Le typecheck dépend des types générés par Prisma + zod-prisma-types.
+      - name: Generate Prisma client
+        run: pnpm --filter @cc/api run db:generate
+
       # TODO(debt): réactiver `pnpm format:check` une fois la dette de formatage
       # antérieure au Sprint 0 traitée dans un ticket dédié (102 fichiers existants
       # non conformes). Ne pas exécuter en CI tant que le baseline n'est pas vert.
@@ -107,6 +111,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @cc/api run db:generate
 
       - name: Apply Prisma migrations
         working-directory: apps/api
