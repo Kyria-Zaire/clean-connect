@@ -13,6 +13,7 @@ import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
 import { MissionsModule } from './modules/missions/missions.module'
 import { MissionsCompletionModule } from './modules/missions-completion/missions-completion.module'
+import { ObservabilityModule } from './modules/observability/observability.module'
 import { PaymentsModule } from './modules/payments/payments.module'
 import { PhotosModule } from './modules/photos/photos.module'
 import { UsersModule } from './modules/users/users.module'
@@ -127,6 +128,12 @@ import { UsersModule } from './modules/users/users.module'
         }
       },
     }),
+    /**
+     * PRD-004 Ticket 4.1 (A1) — Observability foundation : Sentry + middleware
+     * `requestId`. Importé en premier (avant les domain modules) pour que le
+     * middleware soit appliqué globalement, y compris sur `/healthz`.
+     */
+    ObservabilityModule,
     PrismaModule,
     HealthModule,
     AuthModule,

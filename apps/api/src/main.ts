@@ -9,11 +9,17 @@ import { patchNestJsSwagger } from 'nestjs-zod'
 import { AppModule } from './app.module'
 import { loadEnv } from './common/config/env'
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter'
+// PRD-004 Ticket 4.1 (A1) — Sentry doit être initialisé AVANT toute
+// instanciation Nest pour que les auto-instrumentations Node attachent
+// `http`, `fetch`, `pg`, etc. Idempotent.
+import { initSentry } from './modules/observability/sentry/sentry.config'
 
 patchNestJsSwagger()
 
 async function bootstrap() {
   const env = loadEnv()
+
+  initSentry(env)
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,

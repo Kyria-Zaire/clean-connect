@@ -119,8 +119,33 @@ const envSchema = z
     MAIL_API_KEY: z.string().optional(),
     MAIL_FROM: z.string().email().optional(),
 
-    SENTRY_DSN: z.string().optional(),
-    SENTRY_ENVIRONMENT: z.string().optional(),
+    /**
+     * PRD-004 Ticket 4.1 (A1) — observabilité Sentry.
+     *
+     * `SENTRY_DSN` est **optionnel** : laissé vide → SDK initialisé en no-op
+     * (utile en dev local + tests). En recette/preprod/prod le DSN est injecté
+     * par la CI via secret. Aucun fallback `latest` ou cluster public.
+     *
+     * `SENTRY_ENVIRONMENT` permet de tagger les events. Par défaut on retombe
+     * sur `APP_ENV` côté `sentry.config.ts` si absent.
+     *
+     * `SENTRY_RELEASE` est utilisé pour le release tracking ; format conseillé
+     * `clean-connect@<APP_VERSION>+<git_sha>` (ADR-014 §2.4). Défaut applicatif
+     * = `clean-connect@${APP_VERSION}`.
+     *
+     * `SENTRY_TRACES_SAMPLE_RATE` borné `[0, 1]` (ADR-014 §2.5). Recettes
+     * recommandées : `1.0` dev, `0.5` recette, `0.1` prod. Override 100 %
+     * sur les routes finance/webhook géré côté `sentry.config.ts` via
+     * `tracesSampler` callback (pas via la variable d'env).
+     */
+    SENTRY_DSN: z
+      .string()
+      .url('SENTRY_DSN doit être une URL valide (https://<key>@sentry.io/<project>) ou vide.')
+      .optional()
+      .or(z.literal('').transform(() => undefined)),
+    SENTRY_ENVIRONMENT: z.string().min(1).max(32).optional(),
+    SENTRY_RELEASE: z.string().min(1).max(128).optional(),
+    SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0.1),
 
     THROTTLE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(120),

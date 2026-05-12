@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common'
+import * as Sentry from '@sentry/node'
 import type { Request, Response } from 'express'
 import { Logger as PinoLogger } from 'nestjs-pino'
 import { ZodValidationException } from 'nestjs-zod'
@@ -73,6 +74,18 @@ export class AllExceptionsFilter implements ExceptionFilter {
       }
     } else if (exception instanceof Error) {
       this.logger.error({ err: exception }, 'Unhandled exception')
+    }
+
+    // PRD-004 Ticket 4.1 (A1) — capture Sentry pour 5xx + non-HTTP exceptions.
+    // 4xx restent journalisés Pino mais pas envoyés à Sentry (volume + faux
+    // positifs : `400 ValidationError` du quotidien, `404`, `403`, etc.).
+    // Tag `requestId` déjà posé par `RequestIdMiddleware` sur le scope isolé.
+    const shouldReport =
+      status >= 500 || (!(exception instanceof HttpException) && !(exception instanceof ZodValidationException))
+    if (shouldReport) {
+      Sentry.captureException(exception, {
+        tags: { path: req.url, method: req.method },
+      })
     }
 
     const responseBody: ErrorResponseBody = {
