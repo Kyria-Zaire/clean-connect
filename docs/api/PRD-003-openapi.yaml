@@ -24,7 +24,7 @@ openapi: 3.1.0
 
 info:
   title: Clean Connect API
-  version: '1.0.1-prd003-design-cto-openapi-rev1'
+  version: '1.0.2-prd003-design-cto-state-machines-rev2'
   description: |
     API publique Clean Connect — bloc **Photos & Paiements** (PRD-003).
 
@@ -296,11 +296,24 @@ components:
 
     PaymentStatus:
       type: string
-      enum: [AUTHORIZED, CAPTURED, FAILED, REFUNDED]
+      enum: [AUTHORIZED, CAPTURED, REFUND_PENDING, REFUNDED, FAILED, CANCELLED]
+      description: |
+        Cycle paiement carte (PaymentIntent manual capture). `CANCELLED` = capture abandonnée
+        ou `authorization_expired` Visa/MC (~7j) — revue CTO state machines rev2.
 
     TransferStatus:
       type: string
-      enum: [PENDING, SENT, FAILED, REVERSED]
+      enum: [PENDING, SENT, FAILED, RETRY_SCHEDULED, REVERSED]
+      description: |
+        Cycle transfert Connect Express. `RETRY_SCHEDULED` = retry idempotent post-`FAILED`
+        (DLQ admin ou BullMQ exponentiel ≤ 5 tentatives, même `idempotencyKey`).
+
+    RefundStatus:
+      type: string
+      enum: [PENDING, REFUNDED, FAILED]
+      description: |
+        Cycle refund dédié (table `Refund`). MVP : refund **intégral uniquement**
+        (`amountCents == Payment.amountCapturedCents`). Pas de refund partiel.
 
     PhotoType:
       type: string
@@ -319,7 +332,10 @@ components:
 
     AutoReleaseJobStatus:
       type: string
-      enum: [SCHEDULED, RUNNING, SUCCEEDED, CANCELLED, FAILED]
+      enum: [SCHEDULED, RUNNING, COMPLETED, CANCELLED, FAILED]
+      description: |
+        États terminaux : `COMPLETED`, `FAILED`, `CANCELLED` (revue CTO 2026-05-12
+        — renommage `SUCCEEDED → COMPLETED` pour homogénéité naming).
 
     StripeWebhookProcessingStatus:
       type: string
@@ -342,9 +358,13 @@ components:
         - PAYMENT_AUTHORIZATION_EXPIRED
         - PAYMENT_STRIPE_ERROR
         - PAYMENT_REFUND_NOT_ALLOWED
+        - PAYMENT_ALREADY_REFUNDED
+        - PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED
         - TRANSFER_NOT_FOUND
         - TRANSFER_FORBIDDEN
         - TRANSFER_PROVIDER_NOT_READY
+        - TRANSFER_RETRY_NOT_ALLOWED
+        - DISPUTE_WINDOW_EXPIRED
 
     PhotoErrorCode:
       type: string
@@ -579,6 +599,13 @@ components:
         vatRateSnapshot:
           oneOf:
             - { type: number, minimum: 0, maximum: 1 }
+            - { type: 'null' }
+        latestRefundStatus:
+          description: |
+            Statut du dernier `Refund` lié à ce paiement (admin-only). `null` si aucun refund émis.
+            MVP : refund intégral uniquement — voir state machine refund (PRD §3.5).
+          oneOf:
+            - { $ref: '#/components/schemas/RefundStatus' }
             - { type: 'null' }
         createdAt: { $ref: '#/components/schemas/IsoDateTime' }
         updatedAt: { $ref: '#/components/schemas/IsoDateTime' }
@@ -1269,14 +1296,20 @@ paths:
     post:
       tags: [Payments]
       operationId: refundPayment
-      summary: '[ADMIN] Rembourser un paiement (total ou partiel)'
+      summary: '[ADMIN] Rembourser un paiement (intégral uniquement — MVP)'
       description: |
         Rembourse un Payment dont le statut est `CAPTURED`.
 
-        - `amountCents` absent → remboursement total.
-        - `amountCents` présent → remboursement partiel (ne peut pas dépasser
-          `amountCapturedCents`).
+        **Refund intégral uniquement (MVP, revue CTO state machines rev2)** :
+        - `amountCents` obligatoire et **strictement égal** à `Payment.amountCapturedCents`.
+        - `amountCents` < `amountCapturedCents` → **422 `PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED`**.
+        - Refund déjà émis (status ∈ `{ PENDING, REFUNDED }`) → **409 `PAYMENT_ALREADY_REFUNDED`**.
         - Si la mission est en `DISPUTE_OPEN`, le refund est autorisé (cas standard).
+
+        **Lifecycle refund dédié** (cf. mermaid PRD §3.5) :
+        `Refund.status: PENDING → REFUNDED | FAILED`. Le `Payment.status` passe à
+        `REFUND_PENDING` à la création, puis à `REFUNDED` (ou retour `CAPTURED` si `FAILED`)
+        sur webhook `charge.refunded` / `charge.refund.updated`.
 
         **Idempotence remboursement (CTO)** :
         - Header `Idempotency-Key` **obligatoire**. Même clé + même corps rejoués dans
@@ -1306,11 +1339,20 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: '409 — `PAYMENT_IDEMPOTENCY_CONFLICT` ou état incompatible remboursement.'
+          description: |
+            409 — `PAYMENT_IDEMPOTENCY_CONFLICT` (clé rejouée avec corps différent),
+            `PAYMENT_ALREADY_REFUNDED` (refund déjà émis ou settled), ou état incompatible
+            remboursement (Payment hors `CAPTURED`).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PaymentErrorBody' }
-        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '422':
+          description: |
+            422 — `PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED` (`amountCents < amountCapturedCents`).
+            MVP : refund **intégral uniquement** (revue CTO state machines rev2).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentErrorBody' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   '/v1/payments/mine':
@@ -1577,6 +1619,53 @@ paths:
               schema: { $ref: '#/components/schemas/PaginatedAdminWebhookDeadLetterResponse' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  '/v1/admin/webhooks/dead-letter/{id}/replay':
+    post:
+      tags: [Webhooks (Admin)]
+      operationId: adminReplayWebhookDeadLetter
+      summary: '[ADMIN] Replay manuel d''un job DLQ'
+      description: |
+        Relance le traitement d'un `WebhookDeadLetter` après diagnostic admin.
+
+        **Acteurs autorisés** : `ADMIN` exclusivement (revue CTO state machines rev2 —
+        aucun acteur métier ne peut déclencher un replay DLQ).
+
+        **Idempotence** : header `Idempotency-Key` obligatoire (rétention ≥ 24 h). Même clé
+        rejouée → 202 idempotent sans déclencher un second traitement Stripe.
+
+        **Traitement asynchrone** : enqueue un job BullMQ avec `jobId` déterministe
+        `dlq-replay-{deadLetterId}`. Renvoie 202. Le résultat est observable via
+        `GET /v1/admin/webhooks/events` (status passe à `PROCESSED` ou re-`FAILED`).
+
+        **Garde-fous** :
+        - `WebhookDeadLetter.resolvedAt != null` → 409 `WEBHOOK_ALREADY_PROCESSED`.
+        - Signature originale invalide / payload corrompu → 422 `WEBHOOK_PAYLOAD_MALFORMED` (pas de replay).
+      x-rbac: [ADMIN]
+      x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
+      parameters:
+        - $ref: '#/components/parameters/UuidPathId'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      responses:
+        '202':
+          description: Replay enclenché (traitement async).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedAsyncBody' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '409 — `WEBHOOK_ALREADY_PROCESSED` (DLQ déjà résolue).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookErrorBody' }
+        '422':
+          description: '422 — `WEBHOOK_PAYLOAD_MALFORMED` (replay refusé).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookErrorBody' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   # ---------------------------------------------------------------------------

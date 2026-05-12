@@ -1,5 +1,5 @@
 ---
-description: Stripe Connect Express — séquestre, webhooks, auto-release, idempotence, cohérence env
+description: Stripe Connect Express — séquestre via capture_method=manual + delayed transfer, webhooks 202+async signés, idempotence renforcée toutes mutations, table StripeWebhookEvent, AutoReleaseJob verrou applicatif, refund intégral MVP, API version pinned
 globs: apps/api/src/modules/payments/**/*.ts
 alwaysApply: false
 ---
@@ -8,43 +8,66 @@ alwaysApply: false
 
 > Activé sur `apps/api/src/modules/payments/**`.
 > Cahier des charges : §4.3 et §4.4.
+> ADRs : [ADR-008 Escrow capture_method=manual + delayed transfer](../../docs/adr/ADR-008-escrow-manual-capture-delayed-transfer.md), [ADR-011 Stripe API pinning](../../docs/adr/ADR-011-stripe-api-pinning.md).
 
 ---
 
-## Flow paiement complet
+## Flow paiement complet — `capture_method='manual'` + delayed transfer (ADR-008)
 
 ```
-1. Client paie une mission
-   → PaymentIntent créé avec idempotency_key (clé = mission.id)
-   → application_fee_amount = montant × 18 % (commission)
-   → transfer_data.destination = stripe_account_id du prestataire (différé)
-   → State: SEQUESTRE_BLOQUÉ
+1. Client paie une mission (avant publication, cf. D15 + Q4)
+   → PaymentIntent créé avec capture_method='manual' (autorisation, pas de débit)
+   → automatic_payment_methods.enabled=true (3DS automatique, Q8)
+   → idempotencyKey serveur déterministe = 'pi-mission-{missionId}-{attempt}'
+   → application_fee_amount calculé serveur (18 % HT, jamais transmis client)
+   → Pas de transfer_data.destination (transfer différé via stripe.transfers.create après capture)
+   → Webhook payment_intent.amount_capturable_updated → PaymentStatus.AUTHORIZED
+   → Mission: PENDING_PAYMENT → PAID → PUBLISHED (visible matching)
 
-2. Prestataire exécute la mission
-   → State: EN_COURS → EN_ATTENTE_VALIDATION_CLIENT
-   → BullMQ delayed job programmé à T+48h ouvrées : 'auto-release'
-   → Rappels push + email programmés à T+24h, T+36h, T+47h
+2. Prestataire accepte + exécute la mission
+   → Mission: ACCEPTED → IN_PROGRESS (≥ 3 BEFORE syncées) → CLIENT_VALIDATION_PENDING (≥ 5 AFTER syncées)
+   → BullMQ delayed job 'escrow.auto-release' programmé à T+48h ouvrées (jobId 'auto-release-{missionId}')
+   → Rappels push + email programmés à T+24h, T+36h, T+47h ouvrées (ADR-012 + ADR-013)
+   → AutoReleaseJob.status = SCHEDULED
 
-3a. Client valide manuellement
-    → stripe.transfers.create() avec idempotency_key
-    → State: LIBÉRÉ
-    → Job BullMQ 'auto-release' annulé
+3a. Client valide manuellement (POST /missions/:id/validate)
+    → Job BullMQ enqueue : capture + transfer (jamais synchrone HTTP)
+    → stripe.paymentIntents.capture(piId, { idempotencyKey: 'capture-mission-{missionId}' })
+    → Webhook payment_intent.succeeded → PaymentStatus.CAPTURED
+    → stripe.transfers.create({ destination, amount: providerPayoutCents, source_transaction }, { idempotencyKey: 'transfer-mission-{missionId}' })
+    → Webhook transfer.paid → TransferStatus.SENT
+    → Mission: COMPLETED, AutoReleaseJob.status = CANCELLED (cancelReason='client_validated')
 
 3b. Pas de réponse à T+48h ouvrées
-    → Job 'auto-release' s'exécute
-    → Vérifie : photos AVANT sync ? pas de litige ouvert ?
-    → Si OK : stripe.transfers.create()
-    → State: LIBÉRÉ_AUTO
+    → Job 'escrow.auto-release' s'exécute (lock applicatif AutoReleaseJob.lockedAt/lockedBy)
+    → canReleaseEscrow() vérifie photos BEFORE/AFTER + pas de dispute + payoutStatus READY + PaymentStatus AUTHORIZED encore valide
+    → Si OK : capture + transfer idempotents (mêmes clés que 3a)
+    → AutoReleaseJob.status = COMPLETED, Mission: AUTO_RELEASED → COMPLETED
 
-3c. Client prolonge (avant T+24h)
-    → Job 'auto-release' replanifié à T+96h ouvrées
-    → State: SEQUESTRE_PROLONGÉ
+3c. Client conteste (POST /missions/:id/report-problem, fenêtre limitée)
+    → Mission: → DISPUTE_OPEN, audit DISPUTE_OPENED
+    → Job 'escrow.auto-release' annulé via lock + cancelReason='dispute_opened'
+    → AutoReleaseJob.status = CANCELLED
+    → Process litige (modules/disputes/) — vrai workflow PRD-005
 
-3d. Client conteste
-    → State: LITIGE_OUVERT
-    → Job 'auto-release' annulé
-    → Process litige (modules/disputes/)
+3d. Authorization Stripe expirée (>7j Visa/MC sans capture)
+    → stripe.paymentIntents.capture() renvoie 'authorization_expired'
+    → Audit CAPTURE_FAILED, AutoReleaseJob.status = FAILED + DLQ + alerte ops
+    → Mission reste CLIENT_VALIDATION_PENDING (retry manuel admin)
+    → POST /missions/:id/validate côté client → 409 PAYMENT_AUTHORIZATION_EXPIRED
+
+3e. Refund admin (POST /payments/:id/refund — intégral uniquement MVP)
+    → Refund.status = PENDING, PaymentStatus.REFUND_PENDING
+    → stripe.refunds.create({ payment_intent, amount, reason }, { idempotencyKey: 'refund-mission-{missionId}-{attempt}' })
+    → Webhook charge.refunded → Refund.status = REFUNDED, PaymentStatus.REFUNDED
+    → Échec : Refund.status = FAILED, PaymentStatus rollback à CAPTURED, retry admin via nouvel Idempotency-Key
 ```
+
+**Interdit** :
+- `transfer_data.destination` au PaymentIntent (Destination charges refusé — Q1).
+- Capture synchrone côté handler HTTP (toujours queue BullMQ retryable — D9).
+- Capture sans `idempotencyKey` (D14 + D18).
+- Refund partiel MVP (`PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED` 422).
 
 ---
 
@@ -83,32 +106,52 @@ async createOnboardingLink(userId: string) {
 
 ---
 
-## Création PaymentIntent avec séquestre
+## Initialisation SDK Stripe — `apiVersion` pinné (ADR-011)
 
 ```typescript
-async createPaymentIntent(mission: Mission) {
+// apps/api/src/common/stripe/stripe.client.ts
+export const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
+  apiVersion: env.STRIPE_API_VERSION as Stripe.LatestApiVersion, // ex: '2025-02-24.acacia'
+  typescript: true,
+  maxNetworkRetries: 0, // on gère idempotence + retry via BullMQ
+  appInfo: { name: 'clean-connect-api', version: env.APP_VERSION, url: 'https://cleanconnect.fr' },
+})
+```
+
+`STRIPE_API_VERSION` validée Zod boot (regex `^\d{4}-\d{2}-\d{2}\.[a-z]+$`). Crash si invalide.
+Le dashboard Stripe doit avoir **la même version** sur le webhook endpoint (test + live). Bump = ADR dédiée.
+
+---
+
+## Création PaymentIntent avec séquestre — `capture_method='manual'`
+
+```typescript
+async createPaymentIntent(mission: Mission, attempt: number) {
   return this.stripe.paymentIntents.create(
     {
       amount: mission.amountCents,
       currency: 'eur',
       customer: mission.client.stripeCustomerId,
-      application_fee_amount: Math.round(mission.amountCents * 0.18),
-      transfer_data: { destination: mission.prestataire.stripeAccountId },
-      capture_method: 'automatic',
+      application_fee_amount: Math.round(mission.amountCents * 0.18), // serveur uniquement
+      capture_method: 'manual', // autorisation, pas de débit (ADR-008)
+      automatic_payment_methods: { enabled: true }, // 3DS auto (Q8)
       metadata: {
         missionId: mission.id,
         env: env.NODE_ENV,
       },
+      // PAS de transfer_data.destination — transfer différé via stripe.transfers.create
     },
-    { idempotencyKey: `payment-intent-${mission.id}` },
+    { idempotencyKey: `pi-mission-${mission.id}-${attempt}` },
   )
 }
 ```
 
-**Règles dures** :
-- `idempotencyKey` Stripe sur **toute** création PaymentIntent / Transfer / Refund
-- `application_fee_amount` calculé serveur, **jamais** transmis depuis le client
-- `metadata.env` permet de tracer / corréler les events par environnement
+**Règles dures** (D14 + D18) :
+- `idempotencyKey` Stripe sur **toute** création/mutation : PaymentIntent, capture, Transfer, Refund.
+- `application_fee_amount` calculé **serveur**, **jamais** transmis depuis le client.
+- `metadata.env` permet de tracer / corréler les events par environnement (audit + investigation).
+- **Rétention idempotency-key ≥ 24 h** côté serveur (header `Idempotency-Key`).
+- **Refund intégral uniquement MVP** : `amountCents == Payment.amountCapturedCents` strict, sinon 422 `PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED`.
 
 ---
 
@@ -132,51 +175,86 @@ const HANDLERS: Record<string, (event: Stripe.Event) => Promise<void>> = {
 
 ---
 
-## Vérification webhook — séquence stricte
+## Vérification webhook — séquence stricte + réponse 202 async
 
 ```typescript
-@Post()
-@HttpCode(HttpStatus.OK)
+@Post('webhooks/stripe')
+@HttpCode(HttpStatus.ACCEPTED) // 202 — traitement async, Stripe ne timeout pas
 async handle(
   @Req() req: RawBodyRequest<Request>,
   @Headers('stripe-signature') signature: string,
 ) {
-  // 1. Signature
+  // 1. Signature AVANT toute désérialisation (constructEvent + raw body)
   let event: Stripe.Event
   try {
     event = this.stripe.webhooks.constructEvent(req.rawBody, signature, env.STRIPE_WEBHOOK_SECRET)
   } catch (err) {
-    throw new BadRequestException('Invalid signature')
+    throw new BadRequestException({ error: 'WEBHOOK_INVALID_SIGNATURE' })
   }
 
-  // 2. Cohérence env
+  // 2. Cohérence env (sk_test_* ne reçoit jamais livemode=true, et inverse)
   this.assertEnvConsistency(event)
 
-  // 3. Idempotence
-  const exists = await this.prisma.stripeEvent.findUnique({ where: { id: event.id } })
-  if (exists) return { received: true, idempotent: true }
+  // 3. Warning api_version mismatch (ADR-011) — pas un reject, juste audit
+  if (event.api_version !== env.STRIPE_API_VERSION) {
+    this.logger.warn(
+      { eventId: event.id, eventApiVersion: event.api_version, expected: env.STRIPE_API_VERSION },
+      'webhook.api_version.mismatch',
+    )
+  }
 
-  // 4. Enregistrer + enqueue (traitement async)
-  await this.prisma.stripeEvent.create({
-    data: { id: event.id, type: event.type, payload: event as any, status: 'PENDING' },
-  })
-  await this.webhookQueue.add('process', { eventId: event.id }, {
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 30_000 },
-    removeOnFail: false,
-  })
+  // 4. Anti-replay : StripeWebhookEvent.stripeEventId PK + payload_hash sha256
+  const payloadHash = createHash('sha256').update(req.rawBody).digest('hex')
+  try {
+    await this.prisma.stripeWebhookEvent.create({
+      data: {
+        stripeEventId: event.id, // PK = idempotent par construction
+        type: event.type,
+        payload: event as any,
+        payloadHash,
+        processingStatus: 'PENDING',
+        livemode: event.livemode,
+      },
+    })
+  } catch (err: any) {
+    if (err.code === 'P2002') {
+      // Doublon Stripe — renvoyer 202 sans réenfiler (anti double traitement)
+      return { accepted: true, idempotent: true }
+    }
+    throw err
+  }
 
-  return { received: true }
+  // 5. Enqueue traitement asynchrone (BullMQ jobId déterministe)
+  await this.webhookQueue.add(
+    'process',
+    { stripeEventId: event.id },
+    {
+      jobId: `stripe-webhook-${event.id}`, // idempotence BullMQ
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 30_000 },
+      removeOnFail: false,
+    },
+  )
+
+  return { accepted: true } // 202 — confirme à Stripe, traitement async
 }
 
 private assertEnvConsistency(event: Stripe.Event) {
   const isLiveEvent = event.livemode
   const isProdEnv = env.NODE_ENV === 'production'
   if (isLiveEvent !== isProdEnv) {
-    throw new BadRequestException(`Webhook livemode=${isLiveEvent} mismatches env=${env.NODE_ENV}`)
+    throw new BadRequestException({
+      error: 'WEBHOOK_LIVEMODE_MISMATCH',
+      reason: `Webhook livemode=${isLiveEvent} mismatches env=${env.NODE_ENV}`,
+    })
   }
 }
 ```
+
+**Règles dures** :
+- Réponse `202 Accepted` rapide (< 200 ms) ; tout traitement métier dans le worker BullMQ.
+- Table dédiée **`StripeWebhookEvent`** (D19) — pas de `stripeEvent` générique : `stripeEventId` PK + `payloadHash` SHA-256 (anti-tampering + replay détection).
+- Replay même `stripeEventId` → 202 idempotent, code interne `WEBHOOK_ALREADY_PROCESSED` côté worker BullMQ si on tente de re-traiter.
 
 ---
 
@@ -293,33 +371,68 @@ Toutes les heures, scan des missions en `EN_ATTENTE_VALIDATION_CLIENT` qui ont d
 
 ---
 
-## Conditions de libération (auto ou manuelle)
+## Conditions de libération (auto ou manuelle) — `canReleaseEscrow`
 
 ```typescript
 async canReleaseEscrow(missionId: string): Promise<{ ok: boolean; reason?: string }> {
   const mission = await this.repo.findById(missionId)
 
-  if (mission.status === 'LITIGE_OUVERT') return { ok: false, reason: 'dispute_open' }
-  if (mission.escrowStatus === 'RELEASED') return { ok: false, reason: 'already_released' }
+  if (mission.status === 'DISPUTE_OPEN') return { ok: false, reason: 'dispute_open' }
+  if (!['CLIENT_VALIDATION_PENDING', 'AUTO_RELEASE_PENDING'].includes(mission.status)) {
+    return { ok: false, reason: 'invalid_mission_status' }
+  }
 
-  const photosBefore = await this.photos.list(missionId, 'BEFORE')
-  const allSynced = photosBefore.every(p => p.syncedAt !== null)
-  if (!allSynced) return { ok: false, reason: 'photos_before_not_synced' }
+  const photosBefore = await this.photos.count(missionId, 'BEFORE', { synced: true })
+  if (photosBefore < 3) return { ok: false, reason: 'photos_before_insufficient' }
+
+  const photosAfter = await this.photos.count(missionId, 'AFTER', { synced: true })
+  if (photosAfter < 5) return { ok: false, reason: 'photos_after_insufficient' }
+
+  const payment = await this.repo.findPaymentByMission(missionId)
+  if (payment.status !== 'AUTHORIZED') return { ok: false, reason: 'payment_not_authorized' }
+
+  const prestataire = await this.users.findById(mission.prestataireId)
+  if (prestataire.providerPayoutStatus !== 'READY') return { ok: false, reason: 'payouts_disabled' }
 
   return { ok: true }
 }
 ```
 
-**Règle dure** : pas de libération si photos AVANT non synchronisées (cahier §4.2 et §5).
+**Règle dure** : pas de libération si une seule condition est fausse. Audit `AUTO_RELEASE_BLOCKED { reason }` + alerte admin.
+
+---
+
+## Verrou applicatif AutoReleaseJob — anti double exécution (V10)
+
+```typescript
+// Worker BullMQ pose le lock atomiquement
+const job = await this.prisma.autoReleaseJob.updateMany({
+  where: { id: jobId, lockedAt: null }, // race condition safe : UPDATE atomique
+  data: { lockedAt: new Date(), lockedBy: this.workerId, status: 'RUNNING' },
+})
+if (job.count === 0) {
+  // Un autre worker a déjà pris le verrou (BullMQ delayed vs cron safety-net)
+  logger.info({ jobId }, 'auto-release.already-locked')
+  return
+}
+```
+
+Le **cron safety-net horaire** ne peut jamais exécuter en parallèle d'un BullMQ delayed job car le `UPDATE ... WHERE lockedAt IS NULL` retourne 0 lignes si déjà locked.
 
 ---
 
 ## Interdictions
 
-- Création PaymentIntent / Transfer sans `idempotencyKey`
+- Création PaymentIntent / Capture / Transfer / Refund sans `idempotencyKey`
 - `application_fee_amount` ou destination déterminés côté client
-- Webhook sans `constructEvent`
+- `transfer_data.destination` au PaymentIntent (Destination charges refusé — Q1)
+- Capture synchrone dans handler HTTP (toujours queue/job BullMQ — D9)
+- Webhook sans `stripe.webhooks.constructEvent` (signature AVANT désérialisation)
 - Body parsé en JSON avant vérification signature
-- Mélange env : clé `sk_test_*` sur DB prod ou inverse
+- Mélange env : clé `sk_test_*` sur DB prod ou inverse (`assertEnvConsistency`)
 - Libération séquestre sans passage par `canReleaseEscrow`
-- Logger un PaymentMethod ID brut sans masquage
+- Logger un PaymentMethod ID / `client_secret` / `stripeAccountId` / `cardNumber` / `cvv` (Pino redactor)
+- Refund partiel MVP (`PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED` 422)
+- DLQ replay accessible aux acteurs non-ADMIN (route `/v1/admin/webhooks/dead-letter/{id}/replay` `x-rbac: [ADMIN]` strict)
+- Transition `PUBLISHED → EXPIRED` via une route HTTP (uniquement cron BullMQ `mission.expire`)
+- `apiVersion: 'latest'` côté SDK Stripe (toujours `env.STRIPE_API_VERSION` — ADR-011)

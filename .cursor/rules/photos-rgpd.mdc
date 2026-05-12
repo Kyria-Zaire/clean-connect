@@ -1,5 +1,5 @@
 ---
-description: Photos & RGPD — upload Cloudinary signé, idempotence UUID, rétention 12 mois, droit à l'effacement
+description: Photos & RGPD — upload Cloudinary signé (multipart, pas base64), dual variant ORIGINAL/DISPLAY, EXIF strip, idempotence captureClientUuid + PhotoUploadSession, rétention 30 jours, droit à l'effacement
 globs: apps/api/src/modules/photos/**/*.ts
 alwaysApply: false
 ---
@@ -8,81 +8,120 @@ alwaysApply: false
 
 > Activé sur `apps/api/src/modules/photos/**`.
 > Cahier des charges : §6.4 (sécurité) et §6.5 (RGPD).
+> ADRs : [ADR-009 Cloudinary signed upload + dual variant](../../docs/adr/ADR-009-cloudinary-signed-upload-dual-variant.md), [ADR-010 rétention 30 jours](../../docs/adr/ADR-010-photos-retention-30-days.md).
 
 ---
 
-## Upload — Signed URL Cloudinary
+## Upload — Signed URL Cloudinary + PhotoUploadSession (ADR-009)
 
-**Principe** : le mobile upload **directement** à Cloudinary, le backend ne transite jamais le binaire.
+**Principes** :
+- Le mobile upload **directement** à Cloudinary (multipart). Le backend ne transite **jamais** le binaire.
+- **Interdiction des base64 uploads** (D16 + ADR-009). Multipart direct uniquement.
+- **2 variants Cloudinary** par capture : `ORIGINAL` (audit/litige, ADMIN only) + `DISPLAY` (compressé `f_auto,q_auto,w_1600`, EXIF strip, exposé aux acteurs métier). Même `captureClientUuid` pour les deux variants.
+- **Idempotence** par `captureClientUuid` (UUID v4 client-generated) + `PhotoUploadSession` (jeton court TTL 5 min).
 
-### Étape 1 — Le mobile demande une signature
+### Étape 1 — Le mobile demande un presign + ouvre une session
 
 ```typescript
-// POST /api/photos/sign
-@Post('sign')
-@UseGuards(JwtAuthGuard)
-async sign(@Body() dto: SignPhotoDto, @CurrentUser() user: AuthUser) {
-  // dto : { uuid (client-generated), missionId, phase: 'BEFORE' | 'AFTER' }
+// POST /v1/missions/:id/photos/presign
+@Post(':id/photos/presign')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('PRESTATAIRE')
+async presign(
+  @Param('id', new ZodValidationPipe(uuidSchema)) missionId: string,
+  @Body() dto: PresignPhotoUploadInput,
+  @CurrentUser() user: AuthUser,
+) {
+  // dto : { captureClientUuid, variant, phase, mimeType, bytes }
+  // 1) Ownership prestataire ACCEPTED sur la mission
+  await this.assertCanUploadPhoto(missionId, user)
+  // 2) MIME whitelist (image/jpeg|png|heic|webp) + bytes <= 10 MiB (Zod + check Cloudinary preset)
+  // 3) Crée PhotoUploadSession (TTL 5 min, token_digest = sha256(opaqueToken))
+  const session = await this.sessions.create({
+    missionId,
+    uploaderUserId: user.id,
+    phase: dto.phase,
+    captureClientUuid: dto.captureClientUuid,
+    maxBytes: 10 * 1024 * 1024,
+  })
 
-  // Vérifier ownership : prestataire de cette mission ?
-  await this.assertCanUploadPhoto(dto.missionId, user)
-
-  // Idempotence : UUID déjà connu ?
-  const existing = await this.prisma.photo.findUnique({ where: { uuid: dto.uuid } })
-  if (existing) {
-    return { idempotent: true, photoId: existing.id }
-  }
-
-  // Dossier privé par mission + phase
-  const folder = `${env.NODE_ENV}/missions/${dto.missionId}/${dto.phase.toLowerCase()}`
-  const publicId = `${folder}/${dto.uuid}`
+  // 4) Signature Cloudinary (folder privé)
+  const folder = `${env.NODE_ENV}/missions/${missionId}/${dto.phase.toLowerCase()}/${dto.captureClientUuid}`
+  const publicId = `${folder}/${dto.variant.toLowerCase()}` // /original ou /display
   const timestamp = Math.floor(Date.now() / 1000)
-
   const signature = cloudinary.utils.api_sign_request(
     { public_id: publicId, timestamp, folder, type: 'private' },
     env.CLOUDINARY_API_SECRET,
   )
 
-  // Pré-enregistrer la photo en DB avec status PENDING
-  await this.prisma.photo.create({
-    data: {
-      uuid: dto.uuid,
-      missionId: dto.missionId,
-      phase: dto.phase,
-      uploadedBy: user.id,
-      cloudinaryPublicId: publicId,
-      status: 'PENDING_UPLOAD',
-    },
-  })
-
-  return { signature, timestamp, publicId, apiKey: env.CLOUDINARY_API_KEY, cloudName: env.CLOUDINARY_CLOUD_NAME }
+  return {
+    sessionId: session.id,
+    sessionToken: session.opaqueToken, // jamais re-loggé
+    expiresAt: session.expiresAt.toISOString(),
+    cloudinaryParams: { signature, timestamp, publicId, apiKey: env.CLOUDINARY_API_KEY, cloudName: env.CLOUDINARY_CLOUD_NAME, folder, type: 'private' },
+  }
 }
 ```
 
-### Étape 2 — Le mobile upload à Cloudinary
+### Étape 2 — Le mobile upload à Cloudinary (multipart direct, EXIF strip + compress mobile-side)
 
-(Côté mobile, voir `mobile.mdc`. Le serveur n'intervient pas dans le transit.)
+(Côté mobile, voir `mobile.mdc` + skill `offline-sync-pattern`. Le serveur n'intervient pas dans le transit. Le mobile a déjà strippé l'EXIF + compressé via `expo-image-manipulator` AVANT l'upload.)
 
-### Étape 3 — Cloudinary notifie (webhook)
+### Étape 3 — Le mobile confirme l'upload
+
+```typescript
+// POST /v1/missions/:id/photos/confirm
+@Post(':id/photos/confirm')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('PRESTATAIRE')
+async confirm(
+  @Param('id', new ZodValidationPipe(uuidSchema)) missionId: string,
+  @Body() dto: ConfirmPhotoUploadInput,
+  @CurrentUser() user: AuthUser,
+) {
+  const session = await this.sessions.consume(dto.sessionId, dto.sessionToken)
+  if (!session) throw new ConflictException({ error: 'PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED' })
+  if (session.expiresAt < new Date()) throw new GoneException({ error: 'UPLOAD_SESSION_EXPIRED' }) // HTTP 410
+
+  // Anti cross-session / cross-mission
+  if (session.captureClientUuid !== dto.captureClientUuid) {
+    throw new ConflictException({ error: 'PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH' })
+  }
+  if (session.missionId !== missionId) {
+    throw new ConflictException({ error: 'PHOTO_UPLOAD_SESSION_MISSION_MISMATCH' })
+  }
+
+  // Crée la ligne Photo (idempotent via UNIQUE(missionId, captureClientUuid, variant))
+  return this.photos.upsert({
+    missionId,
+    captureClientUuid: dto.captureClientUuid,
+    variant: dto.variant, // ORIGINAL | DISPLAY
+    phase: session.phase,
+    cloudinaryPublicId: dto.cloudinaryPublicId,
+    checksumSha256: dto.checksumSha256,
+    gpsLatitude: dto.gpsLatitude ?? null, // **séparé EXIF** — envoyé explicitement par mobile
+    gpsLongitude: dto.gpsLongitude ?? null,
+    gpsAccuracyMeters: dto.gpsAccuracyMeters ?? null,
+    gpsMissing: !dto.gpsLatitude || !dto.gpsLongitude,
+  })
+}
+```
+
+### Étape 4 — Cloudinary notifie (webhook signé)
 
 ```typescript
 @Post('cloudinary/webhook')
 @HttpCode(HttpStatus.OK)
-async cloudinaryWebhook(@Body() body: any, @Headers('x-cld-signature') sig: string) {
-  if (!verifyCloudinarySignature(body, sig, env.CLOUDINARY_API_SECRET)) {
+async cloudinaryWebhook(@Req() req: RawBodyRequest<Request>, @Headers('x-cld-signature') sig: string) {
+  // 1. Signature AVANT toute désérialisation
+  if (!verifyCloudinarySignature(req.rawBody, sig, env.CLOUDINARY_API_SECRET)) {
     throw new BadRequestException('Invalid signature')
   }
-
+  const body = JSON.parse(req.rawBody.toString())
   if (body.notification_type === 'upload') {
     await this.prisma.photo.update({
       where: { cloudinaryPublicId: body.public_id },
-      data: {
-        status: 'UPLOADED',
-        syncedAt: new Date(),
-        width: body.width,
-        height: body.height,
-        bytes: body.bytes,
-      },
+      data: { syncedAt: new Date(), imageWidth: body.width, imageHeight: body.height, bytes: body.bytes },
     })
   }
 }
@@ -90,32 +129,48 @@ async cloudinaryWebhook(@Body() body: any, @Headers('x-cld-signature') sig: stri
 
 ---
 
-## Idempotence — UUID client
+## Idempotence — `captureClientUuid` + `PhotoUploadSession`
 
-**Règle dure** : le mobile génère un UUID v4 **avant** capture, le backend stocke avec contrainte UNIQUE.
+**Règle dure** : le mobile génère un UUID v4 **avant** la capture (`captureClientUuid`). Le backend stocke avec contrainte `@@unique([missionId, captureClientUuid, variant])`.
 
 ```prisma
 model Photo {
-  id                  String   @id @default(uuid())
-  uuid                String   @unique   // UUID v4 généré côté client
-  missionId           String
-  phase               PhotoPhase
-  uploadedBy          String
-  cloudinaryPublicId  String   @unique
-  status              PhotoStatus
-  syncedAt            DateTime?
-  width               Int?
-  height              Int?
-  bytes               Int?
-  createdAt           DateTime @default(now())
+  id                   String              @id @db.Uuid // UUID v4 généré côté CLIENT (offline-first)
+  missionId            String              @db.Uuid
+  mission              Mission             @relation(...)
+  type                 PhotoType           // BEFORE | AFTER
+  variant              PhotoVariant        @default(DISPLAY) // ORIGINAL | DISPLAY
+  captureClientUuid    String              @db.Uuid // OBLIGATOIRE, relie ORIGINAL/DISPLAY
+  photoUploadSessionId String?             @db.Uuid
+  cloudinaryPublicId   String?             @db.VarChar(1024)
+  checksumSha256       String?             @db.VarChar(64)
+  gpsLatitude          Decimal?            @db.Decimal(10, 8)
+  gpsLongitude         Decimal?            @db.Decimal(11, 8)
+  gpsAccuracyMeters    Int?
+  gpsMissing           Boolean             @default(false)
+  flagSuspicious       Boolean             @default(false)
+  syncedAt             DateTime?
+  deletedAt            DateTime?           // tombstone post-purge
+  createdAt            DateTime            @default(now())
 
-  mission             Mission  @relation(fields: [missionId], references: [id])
+  @@unique([missionId, captureClientUuid, variant])
+  @@index([missionId, type])
+}
 
-  @@index([missionId, phase])
+model PhotoUploadSession {
+  id                String    @id @default(uuid()) @db.Uuid
+  missionId         String    @db.Uuid
+  uploaderUserId    String    @db.Uuid
+  phase             PhotoType
+  tokenDigest       String    @unique @db.VarChar(64) // sha256(opaqueToken) — secret jamais stocké
+  expiresAt         DateTime
+  consumedAt        DateTime?
+  maxBytes          Int       @default(10485760) // 10 MiB
+  createdAt         DateTime  @default(now())
 }
 ```
 
-Si le mobile retry par erreur, le serveur renvoie `{ idempotent: true, photoId: existing.id }` sans rien dupliquer.
+Si le mobile retry par erreur, le serveur renvoie la photo existante (upsert idempotent) sans rien dupliquer. **Session expirée** = `410 UPLOAD_SESSION_EXPIRED` (distinct de 409, sémantique HTTP correcte).
 
 ---
 
@@ -144,38 +199,76 @@ async getSignedReadUrl(photoId: string, user: AuthUser): Promise<string> {
 
 ---
 
-## RGPD — Rétention 12 mois
+## RGPD — Rétention **30 jours** par défaut (ADR-010)
+
+> **Mise à jour PRD-003 — ADR-010** : rétention abaissée de 12 mois à **30 jours** par défaut. Configurable via env `PHOTO_RETENTION_DAYS` (Zod 1..3650).
+> Skip cron si mission en `DISPUTE_OPEN` ou `LEGAL_HOLD`. Suppression réelle Cloudinary + audit `PhotoDeletionLog`.
 
 ### Suppression automatique des photos
 
-Cron quotidien :
+Cron quotidien (`0 3 * * *` Europe/Paris) :
 
 ```typescript
-@Cron('0 3 * * *')   // 3 h du matin
-async purgeOldPhotos() {
-  const cutoff = subMonths(new Date(), 12)
+@Cron('0 3 * * *', { timeZone: 'Europe/Paris' })
+async purgeExpiredPhotos() {
+  const cutoff = subDays(new Date(), env.PHOTO_RETENTION_DAYS) // 30 j par défaut
+  const batchId = `photos-purge-${format(new Date(), 'yyyyMMdd')}` // idempotence inter-runs
 
   const photos = await this.prisma.photo.findMany({
     where: {
-      mission: { completedAt: { lt: cutoff } },
       deletedAt: null,
+      cloudinaryPublicId: { not: null },
+      mission: {
+        completedAt: { lt: cutoff },
+        disputeOpenedAt: null, // skip si dispute actif
+      },
     },
     take: 500,
   })
 
   for (const photo of photos) {
-    await cloudinary.uploader.destroy(photo.cloudinaryPublicId, { type: 'private' })
-    await this.prisma.photo.update({
-      where: { id: photo.id },
-      data: { deletedAt: new Date(), cloudinaryPublicId: '__deleted__' },
-    })
+    try {
+      await cloudinary.uploader.destroy(photo.cloudinaryPublicId!, { type: 'private', invalidate: true })
+    } catch (err: any) {
+      if (err?.http_code !== 404) {
+        await this.recordDeletionLog(photo, batchId, false, err.message)
+        continue // retry au prochain run
+      }
+      // 404 tolérance : asset déjà supprimé Cloudinary, on poursuit
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.photo.update({
+        where: { id: photo.id },
+        data: { deletedAt: new Date(), cloudinaryPublicId: null }, // tombstone
+      }),
+      this.prisma.photoDeletionLog.create({
+        data: {
+          photoId: photo.id,
+          missionId: photo.missionId,
+          reason: 'RETENTION_POLICY',
+          performedBy: 'SYSTEM', // jamais CLIENT ni PRESTATAIRE
+          batchId,
+          metadata: { previousPublicId: photo.cloudinaryPublicId },
+        },
+      }),
+    ])
   }
 
-  this.logger.info({ count: photos.length }, 'Photos purged (RGPD retention)')
+  this.logger.info({ batchId, count: photos.length }, 'photos.purge.completed')
 }
 ```
 
-**On garde** la ligne en DB (pour l'historique de mission), on supprime juste le blob Cloudinary.
+**Suppression réelle Cloudinary** (`uploader.destroy` + `invalidate: true`) + **tombstone DB** (la ligne reste pour audit) + **audit `PhotoDeletionLog`** (qui / quand / pourquoi / succès).
+
+### Exceptions à la purge 30 j
+
+| Cas | Comportement |
+|---|---|
+| Mission `DISPUTE_OPEN` actif | Skip (jamais purger pendant litige). |
+| `LEGAL_HOLD` (obligation judiciaire) | Skip jusqu'à levée admin. |
+| `flagSuspicious=true` (fraude soft) | 90 jours rétention (`PhotoDeletionLog.reason = 'FRAUD_INVESTIGATION'`). |
+| Compte utilisateur supprimé RGPD | 30 jours post `user.deletedAt`, cron `user.purge`. |
 
 ---
 
@@ -256,16 +349,24 @@ async exportMyData(@CurrentUser() user: AuthUser) {
 ## Sécurité — checklist photos
 
 ```
-☐ DTO Zod sur Sign + Webhook
-☐ Ownership check (prestataire de la mission ?)
-☐ Idempotence UUID UNIQUE
-☐ Dossier privé Cloudinary `type: 'private'`
-☐ Signed URL expirations ≤ 5 min
-☐ Webhook Cloudinary signature vérifiée
+☐ DTO Zod sur presign + confirm + webhook Cloudinary
+☐ Ownership check (prestataire ACCEPTED de la mission)
+☐ Idempotence captureClientUuid + PhotoUploadSession (TTL 5 min)
+☐ Anti cross-session : confirm vérifie captureClientUuid == session.captureClientUuid
+☐ Anti cross-mission : confirm vérifie session.missionId == URL :id
+☐ Dossier privé Cloudinary `type: 'private'` par mission
+☐ Dual variant ORIGINAL (ADMIN only) + DISPLAY (CLIENT/PRESTATAIRE assigné/ADMIN)
+☐ EXIF strip côté mobile (expo-image-manipulator) **ET** côté Cloudinary (`exif=strip`)
+☐ GPS séparé en DB (gpsLatitude/Lng), jamais lu via EXIF photo
+☐ MIME whitelist (image/jpeg|png|heic|webp), bytes ≤ 10 MiB
+☐ Signed URL lecture ≤ 5 min (expires_at)
+☐ Webhook Cloudinary signature `x-cld-signature` vérifiée AVANT toute mutation
 ☐ Pas d'URL publique permanente
-☐ Photos non-utiles purgées à T+12 mois
+☐ Photos non-utiles purgées à T+30 j (PHOTO_RETENTION_DAYS, ADR-010)
+☐ Suppression réelle Cloudinary (uploader.destroy + invalidate: true)
+☐ PhotoDeletionLog systématique (SYSTEM | ADMIN — jamais CLIENT/PRESTATAIRE)
 ☐ Photos utilisateur supprimé : nettoyage à T+30 j (sauf litige en cours)
-☐ EXIF stripping côté Cloudinary (paramètre upload preset)
+☐ Session expirée → HTTP 410 UPLOAD_SESSION_EXPIRED (pas 409)
 ```
 
 ---
@@ -273,8 +374,11 @@ async exportMyData(@CurrentUser() user: AuthUser) {
 ## Interdictions
 
 - URL Cloudinary publique (`type: 'upload'`) sur des photos privées
-- Signed URL à expiration > 1 h
+- Signed URL à expiration > 5 min (≤ 1 h max pour cas exceptionnel documenté)
+- **Base64 uploads** (D16 + ADR-009) — multipart direct uniquement
 - Upload du binaire via le backend NestJS (toujours direct mobile → Cloudinary)
 - Stocker des photos en base de données (toujours dans Cloudinary)
 - Supprimer une photo de mission **non clôturée** (besoin pour litige)
-- Conserver des photos > 12 mois après clôture mission (RGPD)
+- Conserver des photos > 30 jours après clôture mission (RGPD — ADR-010, sauf dispute / fraude / LEGAL_HOLD)
+- Route DELETE publique pour CLIENT ou PRESTATAIRE (403 `PHOTO_DELETION_FORBIDDEN`)
+- Lire le GPS via EXIF (toujours envoyé séparément par mobile dans `confirm`)

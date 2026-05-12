@@ -88,22 +88,38 @@ enum PhotoVariant {
 }
 
 /// Cycle de vie paiement carte (PaymentIntent). **Ne pas** mélanger avec le transfert Connect — cf. décision CTO Design PRD-003.
+/// Ajustements revue CTO 2026-05-12 (rev2 state machines) :
+/// - `CANCELLED` = capture abandonnée (`payment_intent.canceled`) ou autorisation Visa/MC expirée ~7j (`authorization_expired`).
+/// - `REFUND_PENDING` = refund émis admin, attente `charge.refunded` (lifecycle dédié `RefundStatus` + table `Refund`).
 enum PaymentStatus {
   AUTHORIZED
   CAPTURED
-  FAILED
+  REFUND_PENDING
   REFUNDED
+  FAILED
+  CANCELLED
 }
 
 /// Transfert vers compte Connect Express — état distinct du paiement.
 /// `REVERSED` = alimenté par webhook Stripe `transfer.reversed` (reversal / fonds repris /
 /// correction post-transfer, p. ex. compte prestataire fermé ou fraude détectée).
-/// Effet métier (à figer dans ADR-008) : mission bascule en `DISPUTE_OPEN`, re-transfert manuel hors MVP.
+/// Effet métier (cf. ADR-008) : mission bascule en `DISPUTE_OPEN`, re-transfert manuel hors MVP.
+/// Ajustement revue CTO 2026-05-12 (rev2) : `RETRY_SCHEDULED` permet `FAILED → RETRY_SCHEDULED → PENDING`
+/// (retry idempotent même `idempotencyKey`, piloté DLQ admin ou BullMQ exponentiel ≤ 5 tentatives).
 enum TransferStatus {
   PENDING
   SENT
   FAILED
+  RETRY_SCHEDULED
   REVERSED
+}
+
+/// Cycle refund dédié (table `Refund`). Refund logique = 1 ligne `Refund` + N webhooks Stripe.
+/// MVP : pas de refund partiel — `amountCents == Payment.amountCapturedCents` strict.
+enum RefundStatus {
+  PENDING
+  REFUNDED
+  FAILED
 }
 
 /// Verrouillage traitement webhook Stripe (`SELECT … FOR UPDATE` côté service — ADR-008 / ADR-011).
@@ -124,10 +140,12 @@ enum ProviderPayoutStatus {
   READY
 }
 
+/// États terminaux : `COMPLETED`, `FAILED`, `CANCELLED` (revue CTO 2026-05-12 — renommage `SUCCEEDED → COMPLETED`
+/// pour homogénéité naming des terminaux côté state machines).
 enum AutoReleaseJobStatus {
   SCHEDULED
   RUNNING
-  SUCCEEDED
+  COMPLETED
   CANCELLED
   FAILED
 }
@@ -398,12 +416,49 @@ model Payment {
   status                PaymentStatus
 
   transfer Transfer?
+  refunds  Refund[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([status])
   @@map("payments")
+}
+
+/// Remboursement carte client (Stripe `Refund`). Cycle propre `RefundStatus`. MVP : **pas de refund partiel**
+/// (cf. revue CTO 2026-05-12 — state machines rev2). `amountCents` = `Payment.amountCapturedCents` strict.
+model Refund {
+  id String @id @default(uuid()) @db.Uuid
+
+  paymentId String  @map("payment_id") @db.Uuid
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  /// Identifiant Stripe `re_*` — renseigné dès création (idempotent via `idempotencyKey`).
+  stripeRefundId String? @unique @map("stripe_refund_id") @db.VarChar(255)
+
+  /// Clé idempotence Stripe — déterministe `refund-mission-{missionId}-{attempt}`. Rétention min 24 h.
+  idempotencyKey String @unique @map("idempotency_key") @db.VarChar(255)
+
+  /// MVP : refund intégral uniquement (`= Payment.amountCapturedCents`). Validation côté service.
+  amountCents Int          @map("amount_cents")
+  currency    String       @default("eur") @db.VarChar(3)
+  status      RefundStatus
+  reason      String?      @db.VarChar(255)
+
+  /// Code Stripe en cas d'échec (`charge_for_pending_refund_disputed`, `expired_or_canceled_card`, …).
+  failureCode   String? @map("failure_code") @db.VarChar(120)
+  failureReason String? @map("failure_reason") @db.Text
+
+  /// Audit acteur initiateur (admin id ou `SYSTEM` pour cancellation/expiration auto).
+  initiatedBy String? @map("initiated_by") @db.VarChar(64)
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  settledAt   DateTime? @map("settled_at")
+
+  @@index([paymentId, status])
+  @@index([status])
+  @@map("refunds")
 }
 
 model Transfer {

@@ -28,7 +28,7 @@
 
 import { z } from 'zod'
 
-import { PaymentStatusSchema, TransferStatusSchema } from './enums'
+import { PaymentStatusSchema, RefundStatusSchema, TransferStatusSchema } from './enums'
 import { serverIdempotencyKeySchema } from './idempotency'
 import {
   currencyEurSchema,
@@ -74,12 +74,14 @@ export type ValidateMissionPaymentInput = z.infer<typeof validateMissionPaymentI
 /**
  * `POST /payments/:id/refund` — body **ADMIN** rembourse (cas exceptionnel).
  *
- * - `amountCents` optionnel : si absent → remboursement total.
+ * MVP : refund **intégral uniquement** (revue CTO 2026-05-12 state machines rev2).
+ * - `amountCents` **obligatoire** et doit être strictement égal à `Payment.amountCapturedCents`
+ *   (validation côté service ; partial refund → 422 `PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED`).
  * - `reason` audit obligatoire (`requested_by_customer`, `fraudulent`, `duplicate`).
  */
 export const refundPaymentInputSchema = z
   .object({
-    amountCents: moneyCentsPositiveSchema.optional(),
+    amountCents: moneyCentsPositiveSchema,
     reason: z.enum(['requested_by_customer', 'duplicate', 'fraudulent']),
   })
   .strict()
@@ -291,6 +293,8 @@ export const adminPaymentViewSchema = z
     applicationFeeCents: moneyCentsSchema.nullable(),
     providerPayoutCents: moneyCentsSchema.nullable(),
     vatRateSnapshot: z.number().nonnegative().max(1).nullable(),
+    /** Statut du dernier `Refund` (null si aucun). Admin-only, MVP refund intégral uniquement. */
+    latestRefundStatus: RefundStatusSchema.nullable(),
     createdAt: isoDateSchema,
     updatedAt: isoDateSchema,
   })
@@ -355,9 +359,13 @@ export const paymentErrorCodeSchema = z.enum([
   'PAYMENT_AUTHORIZATION_EXPIRED',
   'PAYMENT_STRIPE_ERROR',
   'PAYMENT_REFUND_NOT_ALLOWED',
+  'PAYMENT_ALREADY_REFUNDED',
+  'PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED',
   'TRANSFER_NOT_FOUND',
   'TRANSFER_FORBIDDEN',
   'TRANSFER_PROVIDER_NOT_READY',
+  'TRANSFER_RETRY_NOT_ALLOWED',
+  'DISPUTE_WINDOW_EXPIRED',
 ])
 export type PaymentErrorCode = z.infer<typeof paymentErrorCodeSchema>
 

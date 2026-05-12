@@ -17,6 +17,7 @@ import { PhotoDeletionReasonSchema } from './generated/inputTypeSchemas/PhotoDel
 import { PhotoTypeSchema } from './generated/inputTypeSchemas/PhotoTypeSchema'
 import { PhotoVariantSchema } from './generated/inputTypeSchemas/PhotoVariantSchema'
 import { ProviderPayoutStatusSchema } from './generated/inputTypeSchemas/ProviderPayoutStatusSchema'
+import { RefundStatusSchema } from './generated/inputTypeSchemas/RefundStatusSchema'
 import { RoleSchema } from './generated/inputTypeSchemas/RoleSchema'
 import { StripeWebhookProcessingStatusSchema } from './generated/inputTypeSchemas/StripeWebhookProcessingStatusSchema'
 import { TransferStatusSchema } from './generated/inputTypeSchemas/TransferStatusSchema'
@@ -32,6 +33,7 @@ export {
   PhotoTypeSchema,
   PhotoVariantSchema,
   ProviderPayoutStatusSchema,
+  RefundStatusSchema,
   RoleSchema,
   StripeWebhookProcessingStatusSchema,
   TransferStatusSchema,
@@ -47,6 +49,7 @@ export type PhotoDeletionReason = z.infer<typeof PhotoDeletionReasonSchema>
 export type PhotoType = z.infer<typeof PhotoTypeSchema>
 export type PhotoVariant = z.infer<typeof PhotoVariantSchema>
 export type ProviderPayoutStatus = z.infer<typeof ProviderPayoutStatusSchema>
+export type RefundStatus = z.infer<typeof RefundStatusSchema>
 export type Role = z.infer<typeof RoleSchema>
 export type StripeWebhookProcessingStatus = z.infer<typeof StripeWebhookProcessingStatusSchema>
 export type TransferStatus = z.infer<typeof TransferStatusSchema>
