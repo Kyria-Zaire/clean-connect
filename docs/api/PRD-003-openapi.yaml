@@ -14,7 +14,7 @@
 #   - Header `Idempotency-Key` OBLIGATOIRE sur toute opération financière
 #     ou mutation Stripe-bound (POST payments, photos/confirm, validate)
 #   - Rate limit annoté (`x-rate-limit`)
-#   - Codes HTTP : 200/201/202/204/400/401/403/404/409/422/429
+#   - Codes HTTP : 200/201/202/204/400/401/403/404/409/410/422/429
 #   - Aucun schéma `*Internal` ni `*Raw` Stripe exposé (refus CTO)
 #   - Webhook Stripe : authentifié uniquement par signature (pas BearerAuth)
 #   - Aucun exemple ne contient de vraie clé / vrai token (refus CTO)
@@ -24,7 +24,7 @@ openapi: 3.1.0
 
 info:
   title: Clean Connect API
-  version: '1.0.0-prd003-design'
+  version: '1.0.1-prd003-design-cto-openapi-rev1'
   description: |
     API publique Clean Connect — bloc **Photos & Paiements** (PRD-003).
 
@@ -36,6 +36,10 @@ info:
     - **Idempotency-Key** : header obligatoire sur toute opération financière ou mutation
       Stripe-bound. Format : `[A-Za-z0-9_-]{8,255}`. **Aucun trim** côté serveur — la clé
       est consommée *telle quelle*. Voir `IdempotencyKeyHeader`.
+    - **Rétention idempotence (CTO)** : réponse identique garantie **au minimum 24 h** pour
+      rejouer la même clé avec le même corps (remboursements, captures, presign, etc.).
+      Même clé + corps différent avant expiration de la fenêtre → `409 PAYMENT_IDEMPOTENCY_CONFLICT`
+      (paiements) ou équivalent domaine.
     - **Rate limiting** : annoté par endpoint via `x-rate-limit` (NestJS `@nestjs/throttler`).
       Réponse `429 Too Many Requests` standardisée.
     - **Erreurs métier stables** : chaque domaine expose un enum `*ErrorCode` versionné
@@ -89,9 +93,11 @@ tags:
     description: Cycle de vie complétion mission (start / complete / validate / report-problem).
   - name: Mission Status (RBAC)
     description: |
-      Lectures RBAC-aware par mission : le client voit son paiement, le prestataire
-      voit son paiement (vue limitée) et son transfer. Mandaté CTO PRD-003 livrable 3/5
-      ("client voit ses paiements, prestataire ses transferts").
+      Lectures par mission **sans polymorphisme ambigu** (revue CTO) :
+      `GET .../payment` → **CLIENT** ou **ADMIN** uniquement (réponses `ClientPaymentView`
+      vs `AdminPaymentView`, déterministe selon le rôle JWT).
+      `GET .../transfer` → **PRESTATAIRE** ou **ADMIN** uniquement (`PrestataireTransferView`
+      vs `AdminTransferView`).
   - name: Auto-release (Admin)
     description: Console admin jobs auto-release (V10 — observabilité verrou applicatif).
 
@@ -115,7 +121,7 @@ components:
       description: |
         Signature HMAC Stripe vérifiée via `stripe.webhooks.constructEvent()`.
         **Obligatoire** sur `POST /v1/webhooks/stripe`. Le webhook est rejeté en `400`
-        si signature absente ou invalide (sans pollution de log).
+        si signature absente ou invalide (sans pollution de log). Réponse succès : `202`.
 
   # ---------------------------------------------------------------------------
   # Parameters réutilisables
@@ -133,8 +139,10 @@ components:
         pattern: '^[A-Za-z0-9_-]+$'
       description: |
         Clé d'idempotence client. Format : `[A-Za-z0-9_-]{8,255}`. **Aucun trim**.
-        Si la même clé est rejouée < 24 h avec un body différent → `409 IDEMPOTENCY_CONFLICT`.
-        Si rejouée avec le même body → réponse cache identique (200/201).
+        **Rétention minimale côté serveur : 24 h** (décision CTO) : rejouer la même clé
+        avec le **même** corps dans cette fenêtre → **réponse identique** (cache idempotent,
+        codes 200/201/202 selon l'endpoint). Même clé + corps **différent** dans la fenêtre
+        → `409 PAYMENT_IDEMPOTENCY_CONFLICT` (paiements) ou conflit équivalent domaine.
       example: cc-mobile-7f8e9d1a-mission42
 
     IdempotencyKeyHeaderOptional:
@@ -173,6 +181,27 @@ components:
         maximum: 50
         default: 20
       description: Plafond serveur 50 par page.
+
+    AutoReleaseLimitQuery:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+      description: Taille de page pour `GET /v1/admin/auto-release-jobs` (défaut 50, max 100).
+
+    AutoReleaseOffsetQuery:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+      description: Offset pagination (base 0) pour `GET /v1/admin/auto-release-jobs`.
 
   # ---------------------------------------------------------------------------
   # Responses réutilisables (codes HTTP standards)
@@ -218,6 +247,12 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/GenericErrorBody' }
 
+    UploadSessionExpired:
+      description: '410 — Session d''upload expirée ou invalide (`UPLOAD_SESSION_EXPIRED`).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PhotoErrorBody' }
+
   # ---------------------------------------------------------------------------
   # Schemas — Public uniquement (RBAC-aware)
   # AUCUN schema *Internal ni *Raw n'est référencé ici (refus CTO).
@@ -262,11 +297,6 @@ components:
     PaymentStatus:
       type: string
       enum: [AUTHORIZED, CAPTURED, FAILED, REFUNDED]
-
-    PrestatairePaymentStatus:
-      type: string
-      enum: [AUTHORIZED, CAPTURED, FAILED]
-      description: Sous-ensemble exposé au prestataire (REFUNDED masqué — admin only).
 
     TransferStatus:
       type: string
@@ -325,6 +355,7 @@ components:
         - PHOTO_UPLOAD_SESSION_EXPIRED
         - PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED
         - PHOTO_UPLOAD_SESSION_MISSION_MISMATCH
+        - PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH
         - PHOTO_CHECKSUM_MISMATCH
         - PHOTO_MIME_NOT_ALLOWED
         - PHOTO_MAX_BYTES_EXCEEDED
@@ -333,6 +364,13 @@ components:
         - PHOTO_INSUFFICIENT_AFTER
         - PHOTO_DELETION_FORBIDDEN
         - PHOTO_GPS_INCONSISTENT
+        - UPLOAD_SESSION_EXPIRED
+
+    MissionWorkflowErrorCode:
+      type: string
+      enum:
+        - MISSING_REQUIRED_BEFORE_PHOTOS
+        - AFTER_REQUIRES_BEFORE
 
     WebhookErrorCode:
       type: string
@@ -369,6 +407,8 @@ components:
             - Photos : voir `PhotoErrorCode`
             - Webhooks : voir `WebhookErrorCode`
             - Auto-release : voir `AutoReleaseErrorCode`
+            - Workflow mission (start/complete) : voir `MissionWorkflowErrorCode`
+            - Session upload expirée : `UPLOAD_SESSION_EXPIRED` (**HTTP 410**)
           examples:
             - PAYMENT_INVALID_STATE
             - PHOTO_UPLOAD_SESSION_EXPIRED
@@ -409,6 +449,13 @@ components:
         - type: object
           properties:
             error: { $ref: '#/components/schemas/AutoReleaseErrorCode' }
+
+    MissionWorkflowErrorBody:
+      allOf:
+        - $ref: '#/components/schemas/GenericErrorBody'
+        - type: object
+          properties:
+            error: { $ref: '#/components/schemas/MissionWorkflowErrorCode' }
 
     ValidationErrorBody:
       type: object
@@ -489,24 +536,6 @@ components:
           oneOf:
             - { $ref: '#/components/schemas/MoneyCents' }
             - { type: 'null' }
-        currency: { $ref: '#/components/schemas/CurrencyEur' }
-        createdAt: { $ref: '#/components/schemas/IsoDateTime' }
-        updatedAt: { $ref: '#/components/schemas/IsoDateTime' }
-
-    PrestatairePaymentView:
-      # Zod : `prestatairePaymentViewSchema`
-      type: object
-      required: [id, missionId, status, providerPayoutCents, currency, createdAt, updatedAt]
-      additionalProperties: false
-      properties:
-        id: { $ref: '#/components/schemas/Uuid' }
-        missionId: { $ref: '#/components/schemas/Uuid' }
-        status: { $ref: '#/components/schemas/PrestatairePaymentStatus' }
-        providerPayoutCents:
-          oneOf:
-            - { $ref: '#/components/schemas/MoneyCents' }
-            - { type: 'null' }
-          description: Montant net prestataire (snapshot). `null` tant que non confirmé.
         currency: { $ref: '#/components/schemas/CurrencyEur' }
         createdAt: { $ref: '#/components/schemas/IsoDateTime' }
         updatedAt: { $ref: '#/components/schemas/IsoDateTime' }
@@ -713,8 +742,9 @@ components:
         captureClientUuid:
           allOf: [{ $ref: '#/components/schemas/Uuid' }]
           description: |
-            UUID v4 généré côté mobile. **Obligatoire** pour ORIGINAL et DISPLAY.
-            Lie la paire ORIGINAL/DISPLAY d'une même capture. Idempotent.
+            UUID v4 généré côté mobile. **Obligatoire au presign** (revue CTO).
+            Stocké côté serveur sur la `PhotoUploadSession` (lien logique capture ↔ session).
+            Sert à apparier ORIGINAL/DISPLAY et à garantir l'idempotence d'upload.
         bytes:
           type: integer
           minimum: 1
@@ -739,7 +769,13 @@ components:
       additionalProperties: false
       properties:
         photoUploadSessionId: { $ref: '#/components/schemas/Uuid' }
-        captureClientUuid: { $ref: '#/components/schemas/Uuid' }
+        captureClientUuid:
+          allOf: [{ $ref: '#/components/schemas/Uuid' }]
+          description: |
+            Doit **strictement** égaler le `captureClientUuid` stocké sur la
+            `PhotoUploadSession` identifiée par `photoUploadSessionId` (revue CTO).
+            Croisé avec `{id}` mission dans l'URL : empêche upload **cross-session** et
+            **cross-mission**. Sinon → `409 PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH`.
         cloudinaryPublicId: { type: string, minLength: 1, maxLength: 1024 }
         checksumSha256:
           type: string
@@ -1031,26 +1067,33 @@ components:
 
     PaginatedAdminAutoReleaseJobsResponse:
       type: object
-      required: [items, nextCursor]
+      required: [items, totalCount, limit, offset, hasMore]
       additionalProperties: false
+      description: |
+        Pagination **offset/limit** (décision CTO revue OpenAPI) — distincte du
+        cursor opaque utilisé sur d'autres listes admin.
       properties:
         items:
           type: array
           items: { $ref: '#/components/schemas/AdminAutoReleaseJobView' }
-        nextCursor:
-          oneOf:
-            - { $ref: '#/components/schemas/Uuid' }
-            - { type: 'null' }
-
-    # ----- Polymorphic mission-payment view (RBAC) ------------------------
-
-    RbacMissionPaymentView:
-      description: |
-        Vue polymorphique du paiement d'une mission — discriminée serveur par
-        rôle JWT. `CLIENT` → `ClientPaymentView`. `PRESTATAIRE` → `PrestatairePaymentView`.
-      oneOf:
-        - { $ref: '#/components/schemas/ClientPaymentView' }
-        - { $ref: '#/components/schemas/PrestatairePaymentView' }
+        totalCount:
+          type: integer
+          minimum: 0
+          description: Nombre total de lignes correspondant aux filtres (hors pagination).
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Taille de page effective (défaut 50, max 100).
+        offset:
+          type: integer
+          minimum: 0
+          description: Offset appliqué (défaut 0).
+        hasMore:
+          type: boolean
+          description: >
+            Vaut true s'il existe des éléments après la fenêtre courante
+            (offset + limit).
 
     # ----- Inputs : Mission completion ------------------------------------
 
@@ -1097,6 +1140,17 @@ components:
           description: Auto-déduit serveur via JWT — header informatif.
 
     # ----- Generic success bodies pour 202 / 204 ---------------------------
+
+    WebhookAccepted202Body:
+      type: object
+      required: [accepted]
+      additionalProperties: false
+      description: |
+        Réponse **202** immédiate au webhook Stripe (décision CTO) : acquittement HTTP
+        rapide ; le traitement métier (idempotence DB, `DomainEvent`, BullMQ) est **asynchrone**.
+        Évite les timeouts Stripe tout en garantissant `409 WEBHOOK_ALREADY_PROCESSED` sur replay.
+      properties:
+        accepted: { type: boolean, enum: [true] }
 
     AcceptedAsyncBody:
       type: object
@@ -1223,7 +1277,14 @@ paths:
         - `amountCents` présent → remboursement partiel (ne peut pas dépasser
           `amountCapturedCents`).
         - Si la mission est en `DISPUTE_OPEN`, le refund est autorisé (cas standard).
-        - Idempotence Stripe garantie via `Idempotency-Key`.
+
+        **Idempotence remboursement (CTO)** :
+        - Header `Idempotency-Key` **obligatoire**. Même clé + même corps rejoués dans
+          la fenêtre de rétention (**≥ 24 h** côté serveur, cf. `IdempotencyKeyHeader`) →
+          **réponse identique** (`202`) sans second appel Stripe (anti double remboursement).
+        - Même clé + corps différent → `409 PAYMENT_IDEMPOTENCY_CONFLICT`.
+        - Opération **asynchrone** : `202` + traitement Stripe + confirmation webhook ;
+          aucun double refund même en cas de retry réseau (Stripe idempotent + verrou DB).
       x-rbac: [ADMIN]
       x-rate-limit: { strategy: 'token-bucket', max: 5, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1244,7 +1305,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409':
+          description: '409 — `PAYMENT_IDEMPOTENCY_CONFLICT` ou état incompatible remboursement.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentErrorBody' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
@@ -1411,11 +1476,12 @@ paths:
         5. Verrou applicatif (`SELECT … FOR UPDATE`) pour empêcher double traitement
            concurrent (audit Verify V1).
         6. Vérification `livemode` cohérent avec env serveur (PROD ne touche pas TEST).
-        7. **Réponse 200 toujours rapide** (`< 500 ms`) — traitement métier déporté
-           en BullMQ via `DomainEvent`. Stripe re-tente sinon.
+        7. **Réponse `202` immédiate** (décision CTO) — traitement métier **asynchrone**
+           (idempotence DB, `DomainEvent`, BullMQ). Stripe reçoit un 2xx rapide ; replay
+           concurrent → `409 WEBHOOK_ALREADY_PROCESSED` ou `WEBHOOK_PROCESSING_LOCKED`.
 
         **Sécurité** : aucune réponse ne contient de payload renvoyé, pas de
-        détails Stripe — uniquement `{ received: true }` minimal.
+        détails Stripe — uniquement `{ accepted: true }` minimal.
       x-rate-limit: { strategy: 'disabled', reason: 'Authentifié par signature HMAC Stripe.' }
       security:
         - stripeSignature: []
@@ -1433,16 +1499,13 @@ paths:
               description: Stripe Event raw (validation interne uniquement).
               additionalProperties: true
       responses:
-        '200':
-          description: 'Event reçu et accepté pour traitement asynchrone.'
+        '202':
+          description: |
+            Event accepté pour traitement asynchrone (réponse rapide — décision CTO).
+            Replay idempotent : `409 WEBHOOK_ALREADY_PROCESSED` si `stripe_event_id` déjà traité.
           content:
             application/json:
-              schema:
-                type: object
-                required: [received]
-                additionalProperties: false
-                properties:
-                  received: { type: boolean, enum: [true] }
+              schema: { $ref: '#/components/schemas/WebhookAccepted202Body' }
         '400':
           description: 'WEBHOOK_INVALID_SIGNATURE / WEBHOOK_PAYLOAD_MALFORMED / WEBHOOK_LIVEMODE_MISMATCH'
           content:
@@ -1530,15 +1593,21 @@ paths:
         Le mobile upload directement à Cloudinary (multipart) avec les
         `cloudinaryParams` retournés — **aucune photo ne transite par l'API**.
 
+        **`captureClientUuid` (revue CTO)** :
+        - **Obligatoire** dans le corps ; UUID v4 généré côté mobile.
+        - Persisté sur la `PhotoUploadSession` : relie logiquement presign → confirm
+          et apparie ORIGINAL/DISPLAY (même valeur pour les deux variants).
+        - À `confirm`, le serveur vérifie que `captureClientUuid` du body **égale**
+          celui de la session **et** que la session appartient à la mission `{id}` URL
+          (anti cross-session / cross-mission).
+
         Sécurité :
-        - `captureClientUuid` (UUID v4 mobile) garantit l'idempotence et
-          l'appariement ORIGINAL/DISPLAY.
         - `mimeType` validé contre whitelist (`image/jpeg|png|heic|webp`).
         - `bytes` ≤ 10 Mo. Cloudinary applique la même limite côté upload.
-        - Ownership vérifié serveur : le prestataire doit être ACCEPTED sur la mission.
+        - Ownership : prestataire **ACCEPTED** sur la mission `{id}`.
 
-        Idempotence : si la même `(missionId, captureClientUuid, variant)`
-        a déjà une session non consommée → `409 PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED`.
+        Idempotence : session active existante pour `(missionId, captureClientUuid, variant)`
+        → `409 PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED`.
       x-rbac: [PRESTATAIRE]
       x-rate-limit: { strategy: 'token-bucket', max: 60, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1564,6 +1633,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PhotoErrorBody' }
+        '410': { $ref: '#/components/responses/UploadSessionExpired' }
         '422':
           description: '422 — règle métier (cf. `PhotoErrorCode`).'
           content:
@@ -1578,16 +1648,18 @@ paths:
       summary: '[PRESTATAIRE] Confirmer un upload Cloudinary réussi'
       description: |
         Mobile signale que l'upload Cloudinary a réussi. Le serveur :
-        1. Vérifie la `PhotoUploadSession` (non expirée, non consommée).
-        2. Vérifie `(missionId, captureClientUuid, variant)` cohérents avec la session.
-        3. Vérifie via Cloudinary admin API que l'asset existe avec le bon `checksumSha256`.
-        4. Crée la ligne `Photo` (tombstone tracking, etc.).
-        5. Marque la session `consumedAt = NOW()`.
+        1. Vérifie la `PhotoUploadSession` (non consommée ; si `expiresAt` dépassé → **`410 UPLOAD_SESSION_EXPIRED`**).
+        2. Vérifie que le `{id}` mission URL = `missionId` de la session (**cross-mission** → `409`).
+        3. Vérifie que `captureClientUuid` du body = celui stocké sur la session (**cross-session** / replay → `409 PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH`).
+        4. Vérifie via Cloudinary que l'asset existe + `checksumSha256` cohérent.
+        5. Crée la ligne `Photo` ; marque la session `consumedAt = NOW()`.
+
+        **Important (revue CTO)** : cet appel est **uniquement** « prestataire signale fin upload ».
+        Il **ne** valide **pas** la mission côté client (cf. `POST /v1/missions/{id}/validate`).
 
         Sécurité :
-        - `checksumSha256` est **internal** : recalculé serveur via Cloudinary
-          metadata, comparé au déclaré. Mismatch → `409 PHOTO_CHECKSUM_MISMATCH`.
-        - GPS cohérence vérifiée (lat/lng co-présents ou tous NULL).
+        - `checksumSha256` recalculé / comparé serveur — mismatch → `409 PHOTO_CHECKSUM_MISMATCH`.
+        - GPS : cohérence lat/lng (cf. `PhotoGpsInput`).
       x-rbac: [PRESTATAIRE]
       x-rate-limit: { strategy: 'token-bucket', max: 60, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1609,10 +1681,14 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: '409 — `PHOTO_CHECKSUM_MISMATCH`, `PHOTO_UPLOAD_SESSION_EXPIRED`, `PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED` ou `PHOTO_UPLOAD_SESSION_MISSION_MISMATCH`.'
+          description: |
+            `PHOTO_CHECKSUM_MISMATCH`, `PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED`,
+            `PHOTO_UPLOAD_SESSION_MISSION_MISMATCH`, `PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH`.
+            (Session expirée → **`410`** `UPLOAD_SESSION_EXPIRED`, pas 409.)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PhotoErrorBody' }
+        '410': { $ref: '#/components/responses/UploadSessionExpired' }
         '422':
           description: '422 — règle métier (cf. `PhotoErrorCode`).'
           content:
@@ -1701,8 +1777,11 @@ paths:
       operationId: startMission
       summary: '[PRESTATAIRE] Démarrer l''intervention (mission ACCEPTED → IN_PROGRESS)'
       description: |
-        Précondition : ≥ 3 photos `BEFORE` syncées (CTO Q3).
-        Sinon → `422 PHOTO_INSUFFICIENT_BEFORE`.
+        **Réservé au prestataire** (revue CTO).
+
+        Précondition : ≥ 3 photos `BEFORE` valides / syncées.
+        Sinon → `422 MISSING_REQUIRED_BEFORE_PHOTOS` (ou `PHOTO_INSUFFICIENT_BEFORE` selon implémentation).
+
         Met à jour `Mission.startedAt`, push notification client.
       x-rbac: [PRESTATAIRE]
       x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
@@ -1721,19 +1800,33 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '422':
+          description: '422 — `MISSING_REQUIRED_BEFORE_PHOTOS` ou règle photos (cf. codes).'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/MissionWorkflowErrorBody' }
+                  - { $ref: '#/components/schemas/PhotoErrorBody' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   '/v1/missions/{id}/complete':
     post:
       tags: [Mission Completion]
       operationId: completeMission
-      summary: '[PRESTATAIRE] Marquer la mission terminée (IN_PROGRESS → CLIENT_VALIDATION_PENDING)'
+      summary: '[PRESTATAIRE] Signaler la fin d''intervention (IN_PROGRESS → CLIENT_VALIDATION_PENDING)'
       description: |
-        Précondition : ≥ 5 photos `AFTER` syncées (CTO Q3).
-        Sinon → `422 PHOTO_INSUFFICIENT_AFTER`.
-        Déclenche le timer auto-release T+48h ouvrées (`AutoReleaseJob.SCHEDULED`).
-        Notif client : « Confirmez votre satisfaction ».
+        **Réservé au prestataire** (revue CTO). Signifie : le prestataire **a terminé**
+        son passage sur site (pas une validation client).
+
+        Préconditions :
+        - Photos **AFTER** valides / syncées (quota ≥ 5 — CTO Q3). Sinon → `422` avec
+          `PHOTO_INSUFFICIENT_AFTER` ou `AFTER_REQUIRES_BEFORE` si ordre métier violé
+          (upload AFTER sans BEFORE minimum requis).
+        - **Ne valide pas** la mission côté client : la mission passe en
+          **`CLIENT_VALIDATION_PENDING`** (attente action client ou auto-release T+48h ouvrées).
+
+        Déclenche le timer auto-release (`AutoReleaseJob.SCHEDULED`) et notifie le client.
       x-rbac: [PRESTATAIRE]
       x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1755,7 +1848,14 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '422':
+          description: '422 — `AFTER_REQUIRES_BEFORE`, `PHOTO_INSUFFICIENT_AFTER`, etc.'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/MissionWorkflowErrorBody' }
+                  - { $ref: '#/components/schemas/PhotoErrorBody' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   '/v1/missions/{id}/validate':
@@ -1774,6 +1874,7 @@ paths:
         Race conditions couvertes :
         - Double validation simultanée → 1 seule capture Stripe (idempotency key).
         - Validation pendant auto-release qui tourne → conflit `409`.
+        - Autorisation carte expirée (Visa/MC ~7j) → `409 PAYMENT_AUTHORIZATION_EXPIRED`.
       x-rbac: [CLIENT]
       x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1794,7 +1895,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409':
+          description: '409 — conflit état / course ; inclut `PAYMENT_AUTHORIZATION_EXPIRED`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentErrorBody' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
@@ -1806,25 +1911,36 @@ paths:
     get:
       tags: [Mission Status (RBAC)]
       operationId: getMissionPayment
-      summary: '[CLIENT | PRESTATAIRE] Voir le paiement de cette mission (vue selon rôle)'
+      summary: '[CLIENT | ADMIN] Consulter le paiement de cette mission'
       description: |
-        Lecture polymorphique :
-        - **CLIENT** (propriétaire) → `ClientPaymentView` (tous statuts, son paiement).
-        - **PRESTATAIRE** (ACCEPTED) → `PrestatairePaymentView` (status limité, payout net,
-          aucune fee/vat/stripe id).
+        **Rôles autorisés : `CLIENT` et `ADMIN` uniquement** (revue CTO — pas de prestataire
+        sur cet endpoint).
 
-        Le serveur discrimine la projection via JWT. Ownership vérifié strict.
-        Réponse `404 PAYMENT_NOT_FOUND` si la mission n'a pas (encore) de paiement.
-      x-rbac: [CLIENT, PRESTATAIRE]
+        Projection **déterministe sans ambiguïté** :
+        - JWT **CLIENT** + ownership mission → corps **toujours** conforme à `ClientPaymentView`.
+        - JWT **ADMIN** → corps **toujours** conforme à `AdminPaymentView`.
+
+        Le prestataire consulte son reversement via `GET /v1/missions/{id}/transfer`.
+
+        `404 PAYMENT_NOT_FOUND` si aucun paiement n'existe encore pour cette mission.
+      x-rbac: [CLIENT, ADMIN]
       x-rate-limit: { strategy: 'token-bucket', max: 60, windowSeconds: 60, scope: 'user' }
       parameters:
         - $ref: '#/components/parameters/UuidPathId'
       responses:
         '200':
-          description: 'Vue paiement (projection RBAC).'
+          description: |
+            **Schéma exact selon le rôle** : `ClientPaymentView` (client) ou `AdminPaymentView` (admin).
+            Le `oneOf` ci-dessous liste les deux formes possibles ; une seule est retournée par appel.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/RbacMissionPaymentView' }
+              schema:
+                description: |
+                  **Règle serveur** : exactement un des deux schémas — jamais les deux.
+                  Pas de fusion ni de champ optionnel croisé.
+                oneOf:
+                  - { $ref: '#/components/schemas/ClientPaymentView' }
+                  - { $ref: '#/components/schemas/AdminPaymentView' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1833,27 +1949,35 @@ paths:
   '/v1/missions/{id}/transfer':
     get:
       tags: [Mission Status (RBAC)]
-      operationId: getMissionTransferForPrestataire
-      summary: '[PRESTATAIRE] Voir le Transfer de sa mission (vue limitée)'
+      operationId: getMissionTransferForPrestataireOrAdmin
+      summary: '[PRESTATAIRE | ADMIN] Consulter le Transfer Connect de cette mission'
       description: |
-        Retourne `PrestataireTransferView` (montant net, status, sentAt). Ne contient
-        ni `idempotencyKey`, ni `failureReason` brut (admin only).
+        **Rôles autorisés : `PRESTATAIRE` et `ADMIN` uniquement** (revue CTO).
 
-        Endpoint **réservé prestataire** : le client n'a pas besoin de voir un Transfer
-        Connect (interne plateforme→prestataire). Pour la vue admin → `GET /v1/admin/transfers`.
+        Projection **déterministe sans ambiguïté** :
+        - JWT **PRESTATAIRE** + mission ACCEPTED → **toujours** `PrestataireTransferView`.
+        - JWT **ADMIN** → **toujours** `AdminTransferView`.
 
-        Réponse `404 TRANSFER_NOT_FOUND` si la mission n'a pas (encore) de transfer
-        (paiement pas encore capturé).
-      x-rbac: [PRESTATAIRE]
+        Le client ne consulte **pas** les transfers sur cet endpoint (paiement côté client :
+        `GET /v1/missions/{id}/payment`).
+
+        `404 TRANSFER_NOT_FOUND` si aucun transfer n'existe encore (capture pas encore effectuée).
+      x-rbac: [PRESTATAIRE, ADMIN]
       x-rate-limit: { strategy: 'token-bucket', max: 60, windowSeconds: 60, scope: 'user' }
       parameters:
         - $ref: '#/components/parameters/UuidPathId'
       responses:
         '200':
-          description: 'Vue transfer prestataire.'
+          description: |
+            **Schéma exact selon le rôle** : `PrestataireTransferView` ou `AdminTransferView`.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/PrestataireTransferView' }
+              schema:
+                description: |
+                  **Règle serveur** : exactement un des deux schémas — jamais les deux.
+                oneOf:
+                  - { $ref: '#/components/schemas/PrestataireTransferView' }
+                  - { $ref: '#/components/schemas/AdminTransferView' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1869,7 +1993,7 @@ paths:
       operationId: adminListAutoReleaseJobs
       summary: '[ADMIN] Console jobs auto-release (V10 — verrou applicatif)'
       description: |
-        Liste paginée des `AutoReleaseJob`. Permet de monitorer :
+        Liste paginée des `AutoReleaseJob` (**offset / limit**, décision CTO). Permet de monitorer :
         - les jobs `SCHEDULED` (timer T+48h ouvrées en cours).
         - les jobs `RUNNING` avec `lockedAt`/`lockedBy` (debug verrou applicatif).
         - les jobs `FAILED` (`lastError` tronqué 500 chars).
@@ -1878,8 +2002,8 @@ paths:
       x-rbac: [ADMIN]
       x-rate-limit: { strategy: 'token-bucket', max: 60, windowSeconds: 60, scope: 'user' }
       parameters:
-        - $ref: '#/components/parameters/CursorQuery'
-        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/AutoReleaseLimitQuery'
+        - $ref: '#/components/parameters/AutoReleaseOffsetQuery'
         - in: query
           name: status
           schema: { $ref: '#/components/schemas/AutoReleaseJobStatus' }
@@ -1892,7 +2016,7 @@ paths:
           description: 'Filtre les jobs avec `lockedAt IS NOT NULL`.'
       responses:
         '200':
-          description: Liste paginée admin.
+          description: Liste paginée admin (offset/limit).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PaginatedAdminAutoReleaseJobsResponse' }

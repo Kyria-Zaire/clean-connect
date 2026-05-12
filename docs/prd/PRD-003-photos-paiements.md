@@ -311,6 +311,61 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
    ──── expire (TTL listing dépassé) ────→ EXPIRED (refund auto)
 ```
 
+#### Livrable 4/5 Design — diagrammes d'état (mermaid)
+
+Les diagrammes ci-dessous figent le **Design** pour alignement futur `payment-state.machine.ts`, extension `mission-state.machine.ts`, et processors webhook / auto-release. Ils complètent l'ASCII §3.5 v0.2 sans le remplacer.
+
+**Payment (`PaymentStatus`) — cycle carte (PaymentIntent manual capture)**
+
+```mermaid
+stateDiagram-v2
+  [*] --> AUTHORIZED: webhook amount_capturable_updated
+  AUTHORIZED --> CAPTURED: capture (idempotent) + webhook succeeded
+  AUTHORIZED --> FAILED: webhook payment_failed / cancel
+  CAPTURED --> REFUNDED: refund (idempotent, async)
+  FAILED --> [*]
+  REFUNDED --> [*]
+```
+
+**Transfer Connect (`TransferStatus`) — distinct du paiement**
+
+```mermaid
+stateDiagram-v2
+  [*] --> PENDING: création après capture (job async)
+  PENDING --> SENT: Stripe transfer.paid
+  PENDING --> FAILED: transfer.failed / retry DLQ
+  SENT --> REVERSED: transfer.reversed (fonds repris → mission DISPUTE_OPEN, hors MVP re-transfer)
+  FAILED --> [*]
+  REVERSED --> [*]
+```
+
+**StripeWebhookEvent (`StripeWebhookProcessingStatus`) — verrou + idempotence**
+
+```mermaid
+stateDiagram-v2
+  [*] --> PENDING: insert evt (payload_hash)
+  PENDING --> PROCESSING: SELECT FOR UPDATE lock
+  PROCESSING --> PROCESSED: handler OK + DomainEvent enqueue
+  PROCESSING --> FAILED: erreur métier / retry exhausted
+  PROCESSED --> [*]
+  FAILED --> [*]
+```
+
+**AutoReleaseJob (`AutoReleaseJobStatus`) — T+48h ouvrées + verrou applicatif**
+
+```mermaid
+stateDiagram-v2
+  [*] --> SCHEDULED: mission → CLIENT_VALIDATION_PENDING
+  SCHEDULED --> RUNNING: worker lock (lockedAt/lockedBy)
+  RUNNING --> SUCCEEDED: capture+transfer idempotent OK
+  RUNNING --> FAILED: erreur Stripe / invariant
+  SCHEDULED --> CANCELLED: client validate / dispute_opened
+  RUNNING --> CANCELLED: cancel race (client prioritaire)
+  SUCCEEDED --> [*]
+  FAILED --> [*]
+  CANCELLED --> [*]
+```
+
 **Règles dures associées** :
 - Aucune transition non listée n'est autorisée (extension PRD-002 `assertMissionTransition`).
 - Une mission ne devient `PUBLISHED` (= visible matching) que si `paymentStatus = AUTHORIZED` (Stripe a autorisé la carte).
@@ -356,7 +411,7 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 3. **Contrat API** complet : chaque route avec verbe / auth / RBAC / ownership / idempotency-key / rate limit / codes HTTP.
 4. **State machine paiement** dédiée (`payment-state.machine.ts`) + extension `mission-state.machine.ts`, assertions strictes (pattern PRD-002).
 5. **ADRs à rédiger** :
-   - **Contrat OpenAPI 3.1** — [`docs/api/PRD-003-openapi.yaml`](../api/PRD-003-openapi.yaml). 21 endpoints (18 demandés CTO + 3 ajouts cohérents : `GET /missions/:id/payment`, `GET /missions/:id/transfer`, `GET /admin/auto-release-jobs`). Lint Redocly 0 warning. Tags : Payments, Transfers (Admin), Webhooks, Webhooks (Admin), Photos, Photos (Admin), Mission Completion, Mission Status (RBAC), Auto-release (Admin). Security schemes : `bearerAuth` (JWT) + `stripeSignature` (HMAC) + header `Idempotency-Key` obligatoire sur mutations financières.
+   - **Contrat OpenAPI 3.1** — [`docs/api/PRD-003-openapi.yaml`](../api/PRD-003-openapi.yaml) (`info.version` `1.0.1-prd003-design-cto-openapi-rev1`). 21 endpoints. Revue CTO OpenAPI (corrections) : `GET /missions/:id/payment` réservé **CLIENT + ADMIN** (réponses `ClientPaymentView` | `AdminPaymentView`, projection déterministe — pas de prestataire) ; `GET /missions/:id/transfer` réservé **PRESTATAIRE + ADMIN** (`PrestataireTransferView` | `AdminTransferView`) ; `GET /admin/auto-release-jobs` en **offset/limit** (défaut 50, max 100) ; remboursement documenté **idempotent 24 h min** ; webhook Stripe **202** + traitement async ; **410** `UPLOAD_SESSION_EXPIRED` ; **422** `MISSING_REQUIRED_BEFORE_PHOTOS` / `AFTER_REQUIRES_BEFORE` ; **409** `PAYMENT_AUTHORIZATION_EXPIRED` sur validate client ; codes `WEBHOOK_ALREADY_PROCESSED` / `PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH`. Lint Redocly : 0 erreur.
    - **ADR-008** — Mécanique « escrow » : `capture_method='manual'` + delayed transfer Stripe Connect Express. Limites (autorisation expire ~7j Visa/MC), trade-offs vs destination/separate charges, wording produit. ✅ tranché Q1.
      - **Doit aussi documenter** (ajustements revue CTO 2026-05-12, livrable 1/5 Prisma) :
        - `TransferStatus.REVERSED` : alimenté par webhook Stripe `transfer.reversed` (reversal / fonds repris / compte prestataire fermé / fraude). Effet métier : mission bascule en `DISPUTE_OPEN`, re-transfert manuel **hors MVP**.

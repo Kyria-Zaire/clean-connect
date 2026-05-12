@@ -11,6 +11,7 @@
  *   - `photo.ts`         → DTOs Photo + PhotoUploadSession + PhotoDeletionLog (PRD-003)
  *   - `webhook.ts`       → 3 niveaux (Stripe raw / Internal / Domain event) (PRD-003)
  *   - `auto-release.ts`  → AutoReleaseJob (PRD-003)
+ *   - `mission-workflow.ts` → erreurs workflow start/complete (PRD-003 OpenAPI)
  *   - `generated/*.ts`   → schémas générés par zod-prisma-types (un fichier par modèle)
  *
  * Référence : ADR-002 (montants), ADR-003 (PostGIS), ADR-008/009/010/011 (à venir Sprint 3).
@@ -24,4 +25,5 @@ export * from './mission'
 export * from './payment'
 export * from './photo'
 export * from './webhook'
+export * from './mission-workflow'
 export * from './auto-release'
