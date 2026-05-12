@@ -571,10 +571,363 @@ Le split a l'avantage de permettre une livraison plus rapide d'Ops Foundation, m
 
 ## 4. Phase DESIGN
 
-> _À ouvrir uniquement après sign-off CTO du Discover (§3.4 dernière case)._
-> _Persona pilote Design à confirmer selon arbitrage OQ-9 (un seul PRD vs split)._
+> Le Design est démarré **ticket par ticket** pour minimiser le scope d'une PR de design et faciliter la revue.
+> Sign-off CTO Discover obtenu (arbitrages OQ-1 à OQ-9 — captés dans les ADRs ci-dessous).
 
-`N/A` — non démarrée. Bloquée tant que le Discover n'est pas validé CTO.
+### 4.0 Sommaire Design
+
+| Ticket | Statut | ADRs | Livrable |
+|---|:-:|---|---|
+| **4.1 Observabilité & Ops** | 🟡 Design en cours (cette itération) | [ADR-014](../adr/ADR-014-observability-architecture.md), [ADR-015](../adr/ADR-015-bullmq-monitoring-dlq.md), [ADR-016](../adr/ADR-016-logging-redaction-strategy.md), [ADR-017](../adr/ADR-017-alerting-strategy.md) | §4.1 → §4.7 ci-dessous + [pré-revue sécu](../security-reviews/2026-05-12-prd-004-observability-design-prereview.md) |
+| 4.2 Retry & Recovery BullMQ | ⏳ pending | — | bloqué par 4.1 (instrumentation queue) |
+| 4.3 Admin Tooling UI | ⏳ pending | — | bloqué par 4.1 (tracing admin actions) |
+| 4.4 RGPD avancé | ⏳ pending | — | indépendant 4.1, peut démarrer en parallèle |
+| 4.5 Monitoring financier | ⏳ pending | — | bloqué par 4.1 (métriques + alertes) |
+
+---
+
+### 4.1 Architecture observabilité (vue d'ensemble)
+
+```
+                      ┌────────────────────────────────────────────────────────┐
+                      │             apps/api (NestJS — single process)         │
+                      │                                                        │
+   HTTP request   ───▶│  Pino HTTP middleware (requestId)                      │
+                      │     │                                                  │
+                      │     ▼                                                  │
+                      │  AsyncLocalStorage <─ OTel SDK (traceId, spanId)       │
+                      │     │                                                  │
+                      │     ├─▶ Controller → Service → Prisma (span)           │
+                      │     ├─▶ Stripe SDK (span)                              │
+                      │     └─▶ BullMQ Producer (data.{requestId,traceId})     │
+                      │                                                        │
+                      │  ┌────────────────────────┐                            │
+                      │  │ BullMQ Worker (Process)│  (data → context restore)  │
+                      │  │   span enfant OTel     │                            │
+                      │  └────────────────────────┘                            │
+                      │                                                        │
+                      │  ┌──────────────────────────────────────────┐          │
+                      │  │ AlertingService (BullMQ alerts-queue)    │          │
+                      │  └──────────────────────────────────────────┘          │
+                      └────────────────────────────────────────────────────────┘
+                          │           │                  │          │
+                Sentry ───┘           │                  │          └─── Discord webhook
+                (errors+APM)    OTel exporter            │              + Resend (email)
+                                 (OTLP/HTTP              ▼
+                                  → Sentry)        prom-client
+                                                  /api/internal/metrics
+                                                        │
+                                                        ▼
+                                                   Prometheus (scrape 15 s)
+                                                        │
+                                                        ▼
+                                                   Grafana (D1/D2/D3)
+                                                  (admin only via JWT)
+```
+
+**Frontière fonctionnelle figée** (ADR-014 §2.1) :
+
+- **Sentry** = exceptions + transactions HTTP (p50/p95/p99).
+- **OpenTelemetry** = spans cross-service détaillés (Prisma, Stripe, BullMQ).
+- **Prometheus + Grafana** = métriques techniques + queues + business.
+- **Pino + stdout Docker** = logs structurés (rétention 30 j applicatifs / 90 j erreurs / 180 j sécurité — ADR-016 §2.6).
+
+### 4.2 Flux traces / métriques / logs
+
+#### 4.2.1 Trace d'une requête `POST /v1/missions/:id/validate` (exemple)
+
+```
+[span:HTTP POST /v1/missions/:id/validate]                                    traceId=t1, spanId=s1
+  ├─[span:MissionCompletionService.validate]                                   spanId=s2
+  │   ├─[span:prisma.mission.findUnique]                                       spanId=s3
+  │   ├─[span:prisma.mission.update CLIENT_VALIDATION_PENDING→COMPLETED]       spanId=s4
+  │   ├─[span:AutoReleaseService.cancelByMission]                              spanId=s5
+  │   │   └─[span:bullmq.removeJob auto-release-<missionId>]                   spanId=s6
+  │   └─[span:PaymentsService.requestCapture(actor=CLIENT)]                    spanId=s7
+  │       └─[span:stripe.paymentIntents.capture]                               spanId=s8
+  │           └── (HTTP Stripe — 250 ms)
+```
+
+Cette trace est visible dans **Sentry Performance** → on identifie immédiatement la latence sur le `stripe.paymentIntents.capture` (le span le plus long).
+
+#### 4.2.2 Trace d'un webhook Stripe (cross-process — traceId continu)
+
+```
+[span:HTTP POST /v1/webhooks/stripe]                                          traceId=t2, spanId=s10
+  ├─[span:PaymentsWebhookService.ingest]                                       spanId=s11
+  │   ├─[span:assertEnvConsistency]
+  │   ├─[span:prisma.stripeWebhookEvent.create]                                spanId=s12
+  │   └─[span:bullmq.add stripe-webhook-queue jobId=stripe-webhook-<evtId>]    spanId=s13
+  │
+  └─[ack 202 — Stripe content]
+
+... 200 ms plus tard, worker pick up ...
+
+[span:bullmq.process stripe-webhook-queue]                          traceId=t2 (continued !), spanId=s14
+  ├─[span:PaymentDomainHandler.handle payment_intent.succeeded]                spanId=s15
+  │   ├─[span:prisma.payment.update CAPTURED]                                  spanId=s16
+  │   ├─[span:AutoReleaseService.cancelByMission]                              spanId=s17
+  │   └─[span:OutboundTransferService.ensureOutboundTransferAfterCapture]      spanId=s18
+  │       └─[span:stripe.transfers.create idemKey=transfer-mission-<id>]       spanId=s19
+```
+
+**Crucial** : `traceId=t2` est **identique** entre la requête HTTP webhook et le traitement worker BullMQ, grâce à `data.traceId` injecté côté producer (ADR-014 §2.4). Le webhook se suit bout-en-bout dans Sentry.
+
+#### 4.2.3 Matrice flux × signaux
+
+| Flux | Métriques Prometheus | Spans OTel | Logs Pino |
+|---|---|---|---|
+| `POST /payments/intent` | `http_request_duration_seconds` + `cleanconnect_payment_intent_created_total` | HTTP + Prisma + Stripe | `info payment_intent.created` (sans `clientSecret`) |
+| `POST /webhooks/stripe` | `http_request_duration_seconds` + `cleanconnect_webhook_ingested_total{type}` | HTTP + Prisma + BullMQ producer | `info webhook.ingested` |
+| Worker `stripe-webhook-queue` | `cleanconnect_bullmq_job_duration_seconds{queue}` + handler counter | worker + handler + Stripe + Prisma | `info webhook.processed` |
+| `Transfer.SENT` | `cleanconnect_transfer_succeeded_total` (Ticket 4.5) | span Stripe | `info transfer.sent` |
+| `WebhookDeadLetter` créé | Gauge `cleanconnect_bullmq_dlq_size{source}` ↑ | (état, pas de span dédié) | `error webhook.dead_letter` + **ALERT P1** |
+
+### 4.3 Endpoints health / readiness / metrics
+
+| Route | Auth | Réponse exemple | Quoi vérifier |
+|---|---|---|---|
+| `GET /healthz` | Public | `{ "status":"ok", "uptime":12345, "version":"v3.0.0-prd003", "env":"prod" }` | process up + version |
+| `GET /readyz` | Public | `{ "status":"ok", "services":{ "database":"ok", "redis":"ok", "stripe":"ok" } }` | DB + Redis + Stripe reachable |
+| `GET /api/internal/metrics` | Bearer `OBSERVABILITY_TOKEN` | OpenMetrics text format | scrape Prometheus |
+| `GET /api/internal/queues` | Bearer `OBSERVABILITY_TOKEN` | `{ "queues":[...] }` | snapshot ops BullMQ |
+| `GET /api/v1/admin/queues/*` (BullBoard) | `JwtAccessGuard(ADMIN)` | UI HTML BullBoard read-only | inspection admin |
+| `GET /api/v1/admin/queues/health` | `JwtAccessGuard(ADMIN)` | `{ "status":"ok"\|"degraded", "queues":{...} }` | dashboard widget |
+| `POST /api/v1/admin/observability/silence` | `JwtAccessGuard(ADMIN)` | `{ "silencedUntil":"..." }` | maintenance window |
+
+> **Critique** (ADR-014 §2.3) : `/api/internal/*` jamais public — Bearer interne + firewall réseau Docker (port `9090` Prometheus ouvert uniquement sur l'IP du conteneur Grafana).
+
+### 4.4 Conventions de nommage métriques (`cleanconnect_*`)
+
+#### 4.4.1 Format général
+
+```
+cleanconnect_<domain>_<entity>_<measure>_<unit>{labels}
+```
+
+- `domain` : `http`, `bullmq`, `payment`, `transfer`, `refund`, `photo`, `cloudinary`, `webhook`, `finance`.
+- `entity` : entité métier ou technique.
+- `measure` : `total`, `duration`, `size`, `success_rate`, `failures`, `pending`, etc.
+- `unit` : `_seconds` (durée), `_bytes` (taille), `_total` (counter), pas d'unité pour gauge raw.
+
+#### 4.4.2 Métriques figées Ticket 4.1 (19 métriques)
+
+| Métrique | Type | Labels | Description |
+|---|---|---|---|
+| `cleanconnect_http_request_duration_seconds` | Histogram | `route`, `method`, `status_code` | latence HTTP par route |
+| `cleanconnect_http_requests_total` | Counter | `route`, `method`, `status_code` | volume HTTP |
+| `cleanconnect_bullmq_jobs_total` | Counter | `queue`, `status` | jobs Bull par statut |
+| `cleanconnect_bullmq_job_duration_seconds` | Histogram | `queue`, `name` | durée jobs |
+| `cleanconnect_bullmq_queue_depth` | Gauge | `queue`, `state` | profondeur queue par état |
+| `cleanconnect_bullmq_retries_total` | Counter | `queue`, `name`, `attempt` | retries |
+| `cleanconnect_bullmq_dlq_size` | Gauge | `source` | taille DLQ |
+| `cleanconnect_bullmq_stalled_total` | Counter | `queue` | jobs stalled |
+| `cleanconnect_bullmq_processing_lag_seconds` | Histogram | `queue` | lag enqueue → pickup |
+| `cleanconnect_webhook_ingested_total` | Counter | `type` | webhooks reçus |
+| `cleanconnect_webhook_signature_invalid_total` | Counter | (none) | signature HMAC invalide |
+| `cleanconnect_webhook_livemode_mismatch_total` | Counter | (none) | livemode mismatch rejeté |
+| `cleanconnect_webhook_processing_duration_seconds` | Histogram | `type` | latence end-to-end (ingest → handler done) |
+| `cleanconnect_payment_intent_created_total` | Counter | (none) | volume PaymentIntent (4.5 enrichira) |
+| `cleanconnect_payment_capture_duration_seconds` | Histogram | (none) | latence capture Stripe |
+| `cleanconnect_cloudinary_signed_url_total` | Counter | (none) | volume presign |
+| `cleanconnect_cloudinary_confirm_duration_seconds` | Histogram | (none) | latence confirm |
+| `cleanconnect_alerts_emitted_total` | Counter | `severity` (`p0`-`p3`), `kind` | alertes émises |
+| `cleanconnect_alerts_silenced_total` | Counter | (none) | alertes étouffées par silence window |
+
+> Ticket 4.5 enrichira (`cleanconnect_finance_*`, `cleanconnect_transfer_success_rate`, `cleanconnect_finance_mismatch_amount`, etc.).
+
+### 4.5 Contrats observabilité
+
+#### 4.5.1 Event schema émis par `AlertingService`
+
+```typescript
+// Schéma logique — figé en Design, Zod schema en Build
+type AlertEvent = {
+  severity: 'P0' | 'P1' | 'P2' | 'P3'
+  kind:
+    | 'api_5xx_burst'
+    | 'webhook_dead_letter_new'
+    | 'transfer_failed_rate_high'
+    | 'auto_release_stalled'
+    | 'queue_depth_high'
+    | 'finance_mismatch'             // Ticket 4.5
+    | 'payment_authorization_expiring'  // Ticket 4.5
+    | 'payout_anomaly'                  // Ticket 4.5
+    | 'daily_finance_report'            // Ticket 4.5
+    | 'weekly_retention_audit'          // Ticket 4.4
+    | 'release_deployed'
+    | 'admin_alert_silence_started'
+    | 'admin_alert_silence_ended'
+  title: string                       // 1 ligne, < 80 caractères
+  detail: string                      // 1 ligne supplémentaire, < 200 caractères
+  traceId?: string                    // optionnel — span Sentry à lier
+  sentryUrl?: string                  // optionnel
+  grafanaUrl?: string                 // optionnel
+  env: 'development' | 'recette' | 'preprod' | 'production'
+  emittedAt: string                   // ISO 8601
+  metadata?: Record<string, string | number | boolean>  // jamais de PII
+}
+```
+
+**Garde-fou** : tous les champs `title`, `detail`, `metadata` passent par `sanitizeForAlert(value)` qui rejette toute chaîne contenant un email (`/.+@.+/`), un IBAN-like, un numéro de carte (Luhn check), une clé Stripe (`sk_*`, `pk_*`), un JWT-like.
+
+#### 4.5.2 DLQ payload visibility — lecture admin
+
+```typescript
+type WebhookDeadLetterView = {
+  id: string                          // UUID DLQ
+  source: 'STRIPE' | 'CLOUDINARY'     // CLOUDINARY ajouté en Ticket 4.4 (dette I)
+  externalEventId: string             // `evt_xxx` (Stripe) ou `notif_xxx` (Cloudinary)
+  type: string                        // `payment_intent.succeeded`, etc.
+  payloadHashTruncated: string        // 8 premiers caractères du SHA-256
+  errorMessageSanitized: string       // err.message passé par `sanitizeErrorForDLQ`
+  errorClassName: string              // `StripeSignatureVerificationError`, etc.
+  attempts: number
+  lastAttemptAt: string
+  resolvedAt: string | null
+  traceId: string | null              // span Sentry de la dernière tentative
+}
+```
+
+> **Refus** : exposer le **payload brut**. Si un admin a besoin du payload pour instruire, il interroge Stripe (`stripe.events.retrieve(externalEventId)`) — vérité = Stripe, pas notre DB.
+
+#### 4.5.3 RBAC monitoring — matrice qui peut voir quoi
+
+| Endpoint | CLIENT | PRESTATAIRE | ADMIN | Système (Bearer interne) |
+|---|:-:|:-:|:-:|:-:|
+| `GET /healthz` | ✅ | ✅ | ✅ | ✅ |
+| `GET /readyz` | ✅ | ✅ | ✅ | ✅ |
+| `GET /api/internal/metrics` | ❌ | ❌ | ❌ | ✅ |
+| `GET /api/internal/queues` | ❌ | ❌ | ❌ | ✅ |
+| `GET /admin/queues/*` BullBoard | ❌ | ❌ | ✅ | ❌ |
+| `GET /admin/queues/health` | ❌ | ❌ | ✅ | ❌ |
+| `POST /admin/observability/silence` | ❌ | ❌ | ✅ | ❌ |
+| `GET /admin/webhooks/stripe-dead-letters` | ❌ | ❌ | ✅ | ❌ |
+| `POST /admin/webhooks/stripe-dead-letters/:id/replay` | ❌ | ❌ | ✅ (audit) | ❌ |
+
+**Sentry / Grafana** : hors-app.
+- Sentry : auth Sentry native (email + 2FA obligatoire pour l'organisation Clean Connect).
+- Grafana : `admin.cleanconnect.fr/grafana` derrière reverse proxy Nginx + `auth_request` délégué à `/auth/admin/verify` du backend (Build Ticket 4.1).
+
+### 4.6 Dashboards Grafana figés (3)
+
+#### D1 — API Health
+
+| Panel | Source | Métrique |
+|---|---|---|
+| Uptime % | Better Stack externe (Build) | `up` over time |
+| Request rate (req/s) | Prometheus | `rate(cleanconnect_http_requests_total[1m])` |
+| Error rate (5xx %) | Prometheus | `rate(cleanconnect_http_requests_total{status_code=~"5.."}[5m]) / rate(...)` |
+| p50/p95/p99 par route critique | Prometheus | `histogram_quantile(0.95, cleanconnect_http_request_duration_seconds_bucket)` |
+| Top 5 endpoints lents | Prometheus | top_k 5 |
+| Sentry transactions (lien) | Sentry embed | iframe |
+
+#### D2 — BullMQ Queues
+
+| Panel | Source | Métrique |
+|---|---|---|
+| Queue depth par queue / état | Prometheus | `cleanconnect_bullmq_queue_depth` |
+| Jobs/min par queue | Prometheus | `rate(cleanconnect_bullmq_jobs_total[1m])` |
+| Failed jobs (last 1 h) | Prometheus | `increase(cleanconnect_bullmq_jobs_total{status="failed"}[1h])` |
+| DLQ size par source | Prometheus | `cleanconnect_bullmq_dlq_size` |
+| Job duration histogram | Prometheus | `cleanconnect_bullmq_job_duration_seconds` |
+| Stalled jobs counter | Prometheus | `cleanconnect_bullmq_stalled_total` |
+
+#### D3 — Business Funnel (préparé 4.1, alimenté 4.5)
+
+| Panel | Source | Métrique |
+|---|---|---|
+| Missions créées / publiées / acceptées / complétées | Postgres exporter | count par status |
+| PaymentIntent → Capture → Transfer success funnel | Prometheus (Ticket 4.5) | ratios |
+| Cloudinary signed upload volume | Prometheus | `cleanconnect_cloudinary_signed_url_total` |
+| Refund volume + reasons | Prometheus (Ticket 4.5) | breakdown |
+| Daily finance KPIs | Prometheus + Postgres exporter | TBD Ticket 4.5 |
+
+**Versionnage** : tous les dashboards JSON exports → `docs/ops/grafana/dashboards/D1-api-health.json`, etc. → Build PR.
+
+### 4.7 Modules Nest à créer (Build — pas runtime ici)
+
+> Réservation de noms et boundary fonctionnels. **Aucun code écrit en Design**.
+
+| Module | Responsabilité | Dépendances Nest |
+|---|---|---|
+| `observability/observability.module.ts` | racine — init Sentry + OTel + Pino correlation + Prometheus middleware | racine `AppModule` |
+| `observability/sentry/sentry.module.ts` | wrappers Sentry (init, breadcrumb, captureException) | `@sentry/node` |
+| `observability/otel/otel.module.ts` | init OTel SDK + propagator W3C + auto-instrumentations | `@opentelemetry/sdk-node` |
+| `observability/metrics/metrics.module.ts` | `prom-client` Registry + `/metrics` endpoint + middleware HTTP | `prom-client` |
+| `observability/metrics/bullmq-metrics.service.ts` | hook tous les events Bull → counters/histograms | `@nestjs/bullmq` |
+| `observability/health/health.controller.ts` | `/healthz` + `/readyz` (refactor existant) | `@nestjs/terminus` |
+| `observability/bullboard/bullboard.controller.ts` | mount Bull Board derrière JwtAccessGuard | `@bull-board/express` + `@bull-board/api` |
+| `observability/alerting/alerting.module.ts` | service + processor + Discord client + Resend email | BullMQ `alerts-queue` |
+| `observability/alerting/alerting.service.ts` | API publique `emit(event)` | — |
+| `observability/alerting/alerts.processor.ts` | consumer BullMQ + dispatch Discord/email | — |
+| `observability/alerting/discord-webhook.client.ts` | HTTP client (undici) + Zod payload | — |
+| `admin/observability/silence.controller.ts` | `POST /admin/observability/silence` | JWT + Roles |
+
+**Volumétrie estimée Build** : ~12 fichiers source + ~6 fichiers tests + 4 fichiers config Docker/Grafana. **0** migration Prisma (silence stocké Redis avec TTL natif).
+
+### 4.8 Risk assessment Ticket 4.1 (Design)
+
+| Risque | Score | Mitigation |
+|---|:-:|---|
+| **Coût monitoring** (Sentry SaaS + Prometheus self-host) | 2/5 | Sentry team plan ~26 €/mois + auto-host gratuit. Surveillé via `cleanconnect_alerts_emitted_total{kind='sentry_quota_warning'}`. Réévaluer à J+30. |
+| **Fuite PII** dans Sentry / Prometheus / Grafana | 4/5 | (a) `beforeSend` Sentry filtre PII (Classe A/B/C ADR-016) ; (b) Prometheus n'expose que des nombres ; (c) `/metrics` Bearer interne + firewall ; (d) Discord templates sans payload brut + `sanitizeForAlert`. |
+| **Saturation logs** (volume incontrôlé) | 3/5 | `autoLogging.ignore` sur `/healthz` `/readyz` ; rétention bornée (ADR-016 §2.6) ; Docker logrotate. |
+| **Alert fatigue** | 3/5 | Sévérité stricte (`@here` réservé P0) ; tuning seuils J+7 (ADR-017 §2.3) ; silence window. |
+| **Vendor dependency Sentry** | 3/5 | OTel exporter swappable (Sentry → Tempo) ; redondance Sentry email natif + Discord ; DPA UE Frankfurt RGPD. |
+| **Surface attaquable `/metrics` `/admin/queues`** | 4/5 | Bearer interne firewall réseau Docker ; JwtAccessGuard + RolesGuard sur admin ; aucun mutatif via BullBoard (`readOnlyMode: true`). |
+| **Régression perf (overhead OTel + Sentry)** | 3/5 | Sampling 10 % prod ; `tracesSampler` 100 % pour les routes critiques ; bench avant/après en Build. |
+| **Mauvaise corrélation traceId** | 3/5 | Tests intégration : un webhook → vérifier `traceId` continu HTTP → worker (Build Ticket 4.1 obligatoire). |
+
+### 4.9 Pré-revue sécurité
+
+[`docs/security-reviews/2026-05-12-prd-004-observability-design-prereview.md`](../security-reviews/2026-05-12-prd-004-observability-design-prereview.md) — **0 Critical / 0 Important / 5 Suggestions** (cf. fichier dédié).
+
+### 4.10 TODO Build (à dérouler après sign-off CTO Design)
+
+> Liste figée — ne pas étoffer en Build sans repasser par Design.
+
+1. Ajouter dépendances : `@sentry/node`, `@sentry/profiling-node`, `@opentelemetry/sdk-node`, `@opentelemetry/auto-instrumentations-node`, `@sentry/opentelemetry`, `prom-client`, `@bull-board/express`, `@bull-board/api`. Vérifier compatibilité Node 20 + ESM.
+2. Étendre `env.ts` Zod : `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_TRACES_SAMPLE_RATE`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT` (optionnel — par défaut Sentry), `PROM_METRICS_TOKEN`, `OBSERVABILITY_TOKEN`, `DISCORD_WEBHOOK_URL`, `OPS_ALERT_EMAIL`. Crash boot si manque en prod.
+3. Initialiser Sentry **avant** Nest bootstrap dans `apps/api/src/main.ts` (Sentry SDK contract).
+4. Initialiser OTel SDK **avant** Nest bootstrap aussi (auto-instrumentation HTTP impossible sinon).
+5. Implémenter `ObservabilityModule` + sous-modules selon §4.7.
+6. Hooker tous les events BullMQ existants (`stripe-webhook-queue`, `auto-release-queue`) sur le `bullmq-metrics.service`.
+7. Implémenter `AlertingService.emit()` + processor + Discord client + Resend email.
+8. Implémenter `POST /admin/observability/silence` + storage Redis.
+9. Implémenter middleware HTTP Prometheus + endpoint `/api/internal/metrics` (Bearer).
+10. Implémenter `BullBoardController` montant le router Express derrière `JwtAccessGuard` + `RolesGuard(ADMIN)` + `readOnlyMode: true`.
+11. Étendre redactor Pino Classe A/B/C (ADR-016 §2.2) + test unitaire `pino-redactor.spec.ts`.
+12. Configurer `tracesSampler` custom (routes critiques 100 %, reste 10 %).
+13. Tests intégration : webhook Stripe → vérifier que `traceId` est continu HTTP → worker.
+14. Tests intégration : `POST /admin/queues/health` → vérifier RBAC + format.
+15. Tests intégration : émettre une alerte → vérifier qu'elle arrive sur Discord (avec mock webhook) + sanitisée.
+16. CI : ajouter `pnpm --filter @cc/api typecheck` + `pnpm --filter @cc/api test`.
+17. Dashboards Grafana versionnés `docs/ops/grafana/dashboards/D1.json`, `D2.json`, `D3.json` (export JSON).
+18. `docker-compose.prod.yml` : ajouter services `prometheus` + `grafana` + scrape config.
+19. Mise à jour `CLAUDE.md` § Observabilité + lien ADR-014/015/016/017.
+20. PR Build = **1 grosse PR** ou **séquence de 3 PRs** (Sentry+OTel, Prometheus+BullBoard, Alerting) — à arbitrer en ouverture Build.
+
+### 4.11 Definition of Done — Design Ticket 4.1
+
+- [x] **ADR-014** Architecture observabilité (Sentry + OTel + Prometheus/Grafana) — `Proposed` → `Accepted` au sign-off CTO
+- [x] **ADR-015** BullMQ monitoring & DLQ observability — `Proposed`
+- [x] **ADR-016** Logging & redaction strategy — `Proposed`
+- [x] **ADR-017** Alerting strategy — `Proposed`
+- [x] Architecture observabilité (§4.1) — diagramme + frontière 3 piliers
+- [x] Flux traces/métriques/logs (§4.2) — 2 traces de référence + matrice flux
+- [x] Endpoints health/readiness/metrics (§4.3) — RBAC + format
+- [x] Conventions nommage métriques (§4.4) — préfixe `cleanconnect_*` + 19 métriques figées
+- [x] Contrats observabilité (§4.5) — `AlertEvent` schema + DLQ view + RBAC matrix
+- [x] Dashboards Grafana (§4.6) — D1 API Health + D2 BullMQ + D3 Business Funnel (préparé)
+- [x] Modules Nest réservés (§4.7) — boundary + dépendances pour Build
+- [x] Risk assessment Design (§4.8) — 8 risques scorés + mitigations
+- [x] Pré-revue sécurité (§4.9) — 0 Critical / 0 Important / 5 Suggestions
+- [x] TODO Build (§4.10) — 20 items figés
+- [x] **Aucune ligne de code runtime ajoutée** ✅ (PR doc-only)
+- [ ] **Sign-off CTO Design Ticket 4.1** ← bloque l'ouverture du Build Ticket 4.1
+
+> ✍️ À valider par `<CTO>` le `YYYY-MM-DD`. ADRs passent à `Accepted` au sign-off.
 
 ---
 
