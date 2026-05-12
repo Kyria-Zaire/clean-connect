@@ -234,5 +234,8 @@ export const missionEventTypeSchema = z.enum([
   'PAYMENT_AUTHORIZED',
   'PAYMENT_FAILED',
   'PAYMENT_CANCELLED',
+  /** PRD-003 Ticket 3.3 — événements photo (presign + confirm). */
+  'PHOTO_UPLOAD_PRESIGNED',
+  'PHOTO_CONFIRMED',
 ])
 export type MissionEventType = z.infer<typeof missionEventTypeSchema>

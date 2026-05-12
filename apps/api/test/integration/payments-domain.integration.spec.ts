@@ -294,4 +294,24 @@ describe('PaymentDomainHandler (PRD-003 Ticket 3.2)', () => {
     const payload = events[0]!.payload as { isAuthorizationExpired?: boolean }
     expect(payload.isAuthorizationExpired).toBe(true)
   })
+
+  it('event.livemode=true mismatche APP_ENV=recette → erreur livemode + aucune mutation (ajustement CTO Ticket 3.2 #3)', async () => {
+    const fixture = await createIntentForMission(app)
+    const event = makeEvent('payment_intent.amount_capturable_updated', {
+      id: fixture.intentId,
+      amount: 15_000,
+    })
+    // Forcer livemode=true sur APP_ENV=recette ⇒ mismatch.
+    ;(event as { livemode: boolean }).livemode = true
+
+    await expect(handler.handle(event)).rejects.toThrow(/livemode/iu)
+
+    const prisma = app.get(PrismaService)
+    const payment = await prisma.payment.findUnique({ where: { id: fixture.paymentId } })
+    // Aucune mutation (Payment reste en AUTHORIZATION_PENDING).
+    expect(payment!.status).toBe('AUTHORIZATION_PENDING')
+
+    const mission = await prisma.mission.findUnique({ where: { id: fixture.missionId } })
+    expect(mission!.status).toBe('PENDING_PAYMENT')
+  })
 })

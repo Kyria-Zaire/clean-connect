@@ -154,6 +154,19 @@ export type PresignPhotoUploadInput = z.infer<typeof presignPhotoUploadInputSche
 export const confirmPhotoUploadInputSchema = z
   .object({
     photoUploadSessionId: uuidSchema,
+    /**
+     * Token clair retourné au presign (one-shot). Le serveur recalcule
+     * `sha256(sessionToken)` et compare au `tokenDigest` stocké pour
+     * authentifier la session (anti session-id leak).
+     * **Jamais loggé** (Pino redactor `*.sessionToken`).
+     */
+    sessionToken: z.string().min(32).max(128),
+    /**
+     * PRD-003 Ticket 3.3 — **photoId UUID v4 généré côté mobile** (offline-first).
+     * Reuse le même à chaque retry → idempotence forte via UNIQUE
+     * `(missionId, captureClientUuid, variant)` côté DB.
+     */
+    photoId: uuidSchema,
     captureClientUuid: uuidSchema,
     cloudinaryPublicId: z.string().min(1).max(1024),
     checksumSha256: sha256HexSchema,
@@ -200,6 +213,10 @@ export const photoUploadSessionInternalSchema = z
     consumedAt: isoDateSchema.nullable(),
     maxBytes: photoBytesSchema,
     captureClientUuid: uuidSchema,
+    /** MIME annoncé au presign (whitelist) — utilisé pour cross-check au confirm. */
+    mimeType: photoMimeTypeSchema,
+    /** Cloudinary public_id pré-calculé serveur (la session figé le path). */
+    cloudinaryPublicId: z.string().min(1).max(1024),
     createdAt: isoDateSchema,
   })
   .strict()
@@ -269,6 +286,13 @@ export type PhotoDeletionLogInternal = z.infer<typeof photoDeletionLogInternalSc
 export const photoUploadSignatureResponseSchema = z
   .object({
     photoUploadSessionId: uuidSchema,
+    /**
+     * Token clair retourné **une seule fois** (cf. ADR-009).
+     * - Le mobile DOIT le conserver en mémoire pour `POST /photos/confirm`.
+     * - Le serveur stocke uniquement `sha256(sessionToken)` (`tokenDigest` UNIQUE).
+     * - Pino redactor le masque (`*.sessionToken`).
+     */
+    sessionToken: z.string().min(32).max(128),
     /** URL Cloudinary direct (`https://api.cloudinary.com/v1_1/<cloud>/image/upload`). */
     uploadUrl: z.string().url(),
     /** Paramètres signés Cloudinary à intégrer dans le multipart (timestamp, signature, folder, public_id, etc.). */
@@ -279,6 +303,31 @@ export const photoUploadSignatureResponseSchema = z
   })
   .strict()
 export type PhotoUploadSignatureResponse = z.infer<typeof photoUploadSignatureResponseSchema>
+
+/**
+ * `POST /photos/confirm` — réponse minimale (Ticket 3.3).
+ * Le mobile reçoit l'ID Photo + variant + status, mais **PAS** le `cloudinaryPublicId`
+ * (jamais exposé client, rule photos-rgpd) ni signed URL ici (utiliser le futur
+ * `GET /photos/:id/signed-url` Ticket 3.4).
+ */
+export const confirmPhotoUploadResponseSchema = z
+  .object({
+    photoId: uuidSchema,
+    missionId: uuidSchema,
+    phase: PhotoTypeSchema,
+    variant: PhotoVariantSchema,
+    captureClientUuid: uuidSchema,
+    /** Bytes confirmés côté Cloudinary (source de vérité, pas le report mobile). */
+    bytes: photoBytesSchema,
+    imageWidth: z.number().int().positive().max(20_000),
+    imageHeight: z.number().int().positive().max(20_000),
+    gpsMissing: z.boolean(),
+    syncedAt: isoDateSchema,
+    /** Idempotent flag — `true` si la photo existait déjà (replay confirm). */
+    idempotent: z.boolean(),
+  })
+  .strict()
+export type ConfirmPhotoUploadResponse = z.infer<typeof confirmPhotoUploadResponseSchema>
 
 /**
  * Vue publique d'une Photo — exposée CLIENT et PRESTATAIRE.
@@ -364,6 +413,8 @@ export const photoErrorCodeSchema = z.enum([
   'PHOTO_DELETION_FORBIDDEN',
   'PHOTO_GPS_INCONSISTENT',
   'UPLOAD_SESSION_EXPIRED',
+  /** Module Photos désactivé via `FF_PHOTOS_ENABLED=false` (PRD-003 Ticket 3.3). */
+  'PHOTOS_DISABLED',
 ])
 export type PhotoErrorCode = z.infer<typeof photoErrorCodeSchema>
 

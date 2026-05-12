@@ -74,7 +74,44 @@ const envSchema = z
      */
     PAYMENT_PLATFORM_FEE_RATE: z.coerce.number().min(0).max(0.5).default(0.18),
 
-    CLOUDINARY_URL: z.string().url().optional(),
+    /**
+     * Cloudinary credentials (PRD-003 Ticket 3.3 — ADR-009).
+     * Format : `cloudinary://<api_key>:<api_secret>@<cloud_name>`.
+     * Parsé au boot par `CloudinaryClientFactory` ; secret jamais loggé (Pino redactor).
+     * Requis quand `FF_PHOTOS_ENABLED=true` (cf. `superRefine` plus bas).
+     */
+    CLOUDINARY_URL: z
+      .string()
+      .regex(
+        /^cloudinary:\/\/[^:]+:[^@]+@[a-zA-Z0-9_-]+$/u,
+        'Format attendu : cloudinary://<api_key>:<api_secret>@<cloud_name>',
+      )
+      .optional(),
+    /**
+     * Préfixe de dossier Cloudinary appliqué côté serveur :
+     *   `<prefix>/missions/<missionId>/<phase>/<captureClientUuid>/<variant>`.
+     * Permet d'isoler dev / recette / preprod / prod sur le même cloud Cloudinary.
+     */
+    CLOUDINARY_FOLDER_PREFIX: z.string().min(1).max(64).default('dev'),
+    /**
+     * Feature flag — gate complet du module Photos (controllers + Cloudinary client).
+     * Reste `false` par défaut tant que Cloudinary n'est pas branché en recette/preprod.
+     * Crash boot si `true` sans `CLOUDINARY_URL` valide (cf. `superRefine`).
+     */
+    FF_PHOTOS_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('false')
+      .transform((v) => v === 'true'),
+    /**
+     * Durée de validité d'une `PhotoUploadSession` (secondes). Défaut 5 min (ADR-009).
+     * Au-delà → 410 `UPLOAD_SESSION_EXPIRED` côté `POST /photos/confirm`.
+     */
+    PHOTO_UPLOAD_SESSION_TTL_SECONDS: z.coerce.number().int().min(60).max(900).default(300),
+    /**
+     * Durée de validité d'une signed URL Cloudinary en lecture (secondes).
+     * Défaut 5 min (ADR-009). Utilisé Ticket 3.4 — `GET /photos/:id/signed-url`.
+     */
+    PHOTO_SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(30).max(3_600).default(300),
     FCM_PROJECT_ID: z.string().optional(),
     FCM_SERVER_KEY: z.string().optional(),
 
@@ -167,6 +204,16 @@ const envSchema = z
           path: ['STRIPE_WEBHOOK_SECRET'],
         })
       }
+    }
+    // Garde-fou PRD-003 Ticket 3.3 : si Photos activées, l'URL Cloudinary doit
+    // être présente (sinon le module crash au démarrage faute de credentials).
+    if (data.FF_PHOTOS_ENABLED && !data.CLOUDINARY_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'CLOUDINARY_URL est obligatoire quand FF_PHOTOS_ENABLED=true (PRD-003 Ticket 3.3).',
+        path: ['CLOUDINARY_URL'],
+      })
     }
   })
 
