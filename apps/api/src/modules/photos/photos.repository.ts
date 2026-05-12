@@ -82,6 +82,49 @@ export class PhotosRepository {
     return r.count
   }
 
+  /**
+   * PRD-004 Ticket 4.2 — Orphan cleanup (risque faible).
+   *
+   * Supprime les `PhotoUploadSession` :
+   *  - `expiresAt < cutoff` (TTL dépassé d'au moins `bufferMs`)
+   *  - `consumedAt IS NULL` (jamais consommée — `confirm` n'a pas réussi)
+   *  - PAS de `Photo` rattachée (`photos: { none: {} }`) — défense en profondeur
+   *    si un confirm s'est terminé mais n'a pas updaté `consumedAt` (cas rare,
+   *    bug applicatif corrigé en PR séparée mais protection ici).
+   *
+   * Risque : nul côté Cloudinary — on **ne supprime pas l'asset Cloudinary**
+   * (ce serait risqué : potentiel asset uploadé puis confirm en cours de
+   * réseau). Le cleanup Cloudinary est dette explicite Ticket 4.4 / RGPD
+   * (`docs/prd/PRD-004 §4.4.5 — cloudinary deletion guarantees`).
+   *
+   * Limite stricte `take` pour borner la charge d'un tick cron.
+   * Retourne le nb de lignes supprimées (utile pour logs/metrics).
+   */
+  async deleteExpiredUnconsumedSessions(opts: {
+    olderThan: Date
+    limit: number
+  }): Promise<number> {
+    // Prisma ne supporte pas `LIMIT` natif dans `deleteMany` sur PostgreSQL.
+    // On fait donc :
+    //  1. select des IDs candidats (avec LIMIT borné)
+    //  2. deleteMany WHERE id IN (...)
+    // Évite l'explosion si la table accumule des semaines de sessions.
+    const candidates = await this.prisma.photoUploadSession.findMany({
+      where: {
+        expiresAt: { lt: opts.olderThan },
+        consumedAt: null,
+        photos: { none: {} },
+      },
+      take: opts.limit,
+      select: { id: true },
+    })
+    if (candidates.length === 0) return 0
+    const r = await this.prisma.photoUploadSession.deleteMany({
+      where: { id: { in: candidates.map((c) => c.id) } },
+    })
+    return r.count
+  }
+
   // ---------------------------------------------------------------------------
   // Photo
   // ---------------------------------------------------------------------------

@@ -29,6 +29,30 @@ export const AUTO_RELEASE_MAX_ATTEMPTS = 3
 export const AUTO_RELEASE_BACKOFF_BASE_MS = 30_000
 
 /**
+ * PRD-004 Ticket 4.2 — Safety-net cron (AC-4.2.4.1).
+ *
+ * `AUTO_RELEASE_SAFETY_GRACE_MS` :
+ *  - Délai après `scheduledFor` au-delà duquel un job SCHEDULED est jugé
+ *    « perdu côté BullMQ » et doit être ré-enqueue par le cron horaire.
+ *  - 30 min : large pour couvrir le délai BullMQ standard + tolérance worker
+ *    en charge, sans laisser pourrir un job pendant des heures.
+ *
+ * `AUTO_RELEASE_STUCK_LOCK_MS` :
+ *  - Délai après `lockedAt` au-delà duquel on considère qu'un worker a
+ *    crashé sans relâcher son lock applicatif (audit V10).
+ *  - 10 min : un `capture` Stripe + transaction DB tient < 30 s en p99, on
+ *    laisse 20× de marge avant d'arracher le lock.
+ *
+ * `AUTO_RELEASE_SAFETY_LIMIT` :
+ *  - Borne max de jobs traités par tick cron (évite de surcharger un worker
+ *    si la file s'accumule lors d'un incident). 100 = ~10s de travail si
+ *    chaque job prend ~100 ms.
+ */
+export const AUTO_RELEASE_SAFETY_GRACE_MS = 30 * 60 * 1_000
+export const AUTO_RELEASE_STUCK_LOCK_MS = 10 * 60 * 1_000
+export const AUTO_RELEASE_SAFETY_LIMIT = 100
+
+/**
  * Build le `bullJobId` **déterministe** pour une mission.
  *
  * Garanties :

@@ -19,14 +19,18 @@ import { PrismaService } from '../../../common/prisma/prisma.service'
 import { assertMissionTransition } from '../../missions/domain/mission-state.machine'
 import { MissionsRepository } from '../../missions/missions.repository'
 import { MissionEventService } from '../../missions/services/mission-event.service'
+import { AlertingService } from '../../observability/alerting/alerting.service'
+import { RetryMetricsTracker } from '../../observability/metrics/retry-metrics.tracker'
 import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
 import { STRIPE_CLIENT_TOKEN } from '../stripe/stripe.client'
 
+import { classifyStripeTransferError } from './stripe-transfer-error'
+import { TransferRetryQueueProducer } from './transfer-retry.queue'
 import {
+  buildTransferStripeIdempotencyKey,
   TRANSFER_MAX_API_ATTEMPTS,
   TRANSFER_RECONCILE_STALE_MS,
-  TRANSFER_RETRY_BACKOFF_MS,
-  buildTransferStripeIdempotencyKey,
+  TRANSFER_RETRY_QUEUE,
 } from './transfer.constants'
 import { TransfersRepository } from './transfers.repository'
 
@@ -46,6 +50,9 @@ export class OutboundTransferService {
     private readonly missions: MissionsRepository,
     private readonly missionEvents: MissionEventService,
     private readonly stripeMetrics: StripeMetricsTracker,
+    private readonly retryMetrics: RetryMetricsTracker,
+    private readonly retryQueue: TransferRetryQueueProducer,
+    private readonly alerting: AlertingService,
     @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
   ) {}
 
@@ -339,35 +346,95 @@ export class OutboundTransferService {
     }
   }
 
+  /**
+   * Persiste l'échec API + déclenche la suite (retry auto ou terminal).
+   *
+   * Politique CTO PRD-004 Ticket 4.2 :
+   *  1. Classifie l'erreur Stripe (transient / permanent / unknown).
+   *  2. Permanent → `Transfer.FAILED` terminal direct (force `retryCount = max`)
+   *     + métrique `retry_exhausted{reason=permanent_error}` + alerte P1
+   *     (action admin requise pour retry manuel).
+   *  3. Transient / unknown → incrément `retryCount`, si `< max` enqueue
+   *     `TRANSFER_RETRY_QUEUE` avec backoff + jitter. Si `>= max` →
+   *     terminal + métrique `retry_exhausted{reason=transient_max_attempts}`
+   *     + alerte P0 (prestataire pas payé après 5 essais).
+   *
+   * Idempotence : `markFailureTx` calcule la nouvelle ligne en SQL via
+   * `WHERE` sur le `retryCount` actuel — pas de double comptage si la
+   * fonction est rejouée par un cron safety-net.
+   */
   private async recordFailure(transferId: string, code: string, err: unknown): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err)
-    let next = 0
-    let terminal = false
-    await this.prisma.$transaction(async (tx) => {
-      const row = await tx.transfer.findUnique({ where: { id: transferId } })
-      if (!row) return
-      next = row.retryCount + 1
-      terminal = next >= TRANSFER_MAX_API_ATTEMPTS
+    const classified = classifyStripeTransferError(err)
+
+    type FailureState = { next: number; terminal: boolean; missionId: string | null }
+    const state: FailureState = await this.prisma.$transaction(async (tx): Promise<FailureState> => {
+      const row = await tx.transfer.findUnique({
+        where: { id: transferId },
+        include: { payment: { select: { missionId: true } } },
+      })
+      if (!row) return { next: 0, terminal: false, missionId: null }
+      let nextCount: number
+      let isTerminal: boolean
+      if (classified.kind === 'permanent') {
+        nextCount = TRANSFER_MAX_API_ATTEMPTS
+        isTerminal = true
+      } else {
+        nextCount = row.retryCount + 1
+        isTerminal = nextCount >= TRANSFER_MAX_API_ATTEMPTS
+      }
       await this.transfers.markFailureTx(tx, {
         transferId,
-        failureCode: code,
+        failureCode: classified.code === 'unknown' ? code : classified.code,
         failureReason: msg,
-        nextRetryCount: next,
+        nextRetryCount: nextCount,
         maxAttempts: TRANSFER_MAX_API_ATTEMPTS,
       })
+      return { next: nextCount, terminal: isTerminal, missionId: row.payment.missionId }
     })
-    if (!terminal) {
-      const delayMs = TRANSFER_RETRY_BACKOFF_MS[Math.min(next - 1, TRANSFER_RETRY_BACKOFF_MS.length - 1)]
-      // TODO(debt): réactiver enqueue BullMQ `TRANSFER_RETRY` (worker isolé) pour
-      // backoff automatique CTO 3.5 — retiré : cohabitation `TransferRetryProcessor`
-      // + `StripeWebhookProcessor` dans le même module provoquait une boucle DI Nest.
-      this.logger.warn(
-        { transferId, next, delayMs },
-        'transfer.outbound.retry_scheduled_without_bull_enqueue_use_admin_retry',
+    const { next, terminal, missionId: missionIdForAlert } = state
+
+    if (terminal) {
+      const reason =
+        classified.kind === 'permanent' ? 'permanent_error' : 'transient_max_attempts'
+      this.retryMetrics.recordExhausted({
+        queue: TRANSFER_RETRY_QUEUE,
+        jobType: 'transfer_payout',
+        reason,
+      })
+      this.logger.error(
+        { transferId, next, classified, code: classified.code },
+        'transfer.outbound.failed_terminal',
       )
-    } else {
-      this.logger.error({ transferId, next }, 'transfer.outbound.failed_terminal')
+      // Alerting non bloquant — `AlertingService.emit` ne throw jamais.
+      // CTO : P0 sur transient exhausted (impact direct prestataire),
+      //       P1 sur permanent (action admin attendue, pas critique).
+      const severity = classified.kind === 'permanent' ? 'P1' : 'P0'
+      const kind = classified.kind === 'permanent' ? 'stuck_transfer' : 'bullmq_failed_jobs'
+      void this.alerting.emit({
+        severity,
+        kind,
+        title: `Transfer FAILED terminal (${reason})`,
+        description: `transfer ${transferId.slice(0, 8)}… exhausted after ${next} attempts (code=${classified.code})`,
+        context: {
+          // Aucun email/PII. transferId/missionId tronqués pour logs uniquement.
+          transferIdShort: transferId.slice(0, 8),
+          missionIdShort: missionIdForAlert?.slice(0, 8) ?? null,
+          attempts: next,
+          stripeStatusCode: classified.statusCode,
+          stripeCode: classified.code,
+          reason,
+        },
+      })
+      return
     }
+
+    // Retry automatique — file dédiée, idempotency Stripe stable.
+    await this.retryQueue.enqueue({ transferId, attempt: next })
+    this.logger.warn(
+      { transferId, attempt: next, code: classified.code, kind: classified.kind },
+      'transfer.outbound.retry_enqueued',
+    )
   }
 
   async applyRemoteTransferState(transferDbId: string, remote: Stripe.Transfer): Promise<void> {

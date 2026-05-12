@@ -24,9 +24,12 @@ import type { Job } from 'bullmq'
 import type Stripe from 'stripe'
 
 import { PrismaService } from '../../../common/prisma/prisma.service'
+import { AlertingService } from '../../observability/alerting/alerting.service'
 import { DlqMetricsTracker } from '../../observability/metrics/dlq-metrics.tracker'
+import { RetryMetricsTracker } from '../../observability/metrics/retry-metrics.tracker'
 import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
 import { WebhookMetricsTracker } from '../../observability/metrics/webhook-metrics.tracker'
+import { runWithExtractedTraceContext } from '../../observability/tracing/bullmq-trace'
 import {
   STRIPE_WEBHOOK_MAX_ATTEMPTS,
   STRIPE_WEBHOOK_PROCESS_JOB,
@@ -53,6 +56,8 @@ export class StripeWebhookProcessor extends WorkerHost {
     private readonly stripeMetrics: StripeMetricsTracker,
     private readonly webhookMetrics: WebhookMetricsTracker,
     private readonly dlqMetrics: DlqMetricsTracker,
+    private readonly retryMetrics: RetryMetricsTracker,
+    private readonly alerting: AlertingService,
     @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
   ) {
     super()
@@ -66,6 +71,16 @@ export class StripeWebhookProcessor extends WorkerHost {
       )
       return
     }
+    // PRD-004 Build B — restore trace context HTTP → worker (no-op si OTel SDK off).
+    return runWithExtractedTraceContext(
+      job.data,
+      STRIPE_WEBHOOK_QUEUE,
+      job.name,
+      () => this.processImpl(job),
+    )
+  }
+
+  private async processImpl(job: Job<StripeWebhookJobPayload>): Promise<void> {
     const { stripeEventId, type, payloadHash } = job.data
     const processStart = process.hrtime.bigint()
     const lockTaken = await this.tryAcquireLock(stripeEventId)
@@ -214,6 +229,26 @@ export class StripeWebhookProcessor extends WorkerHost {
         },
       })
       this.dlqMetrics.recordEnqueued('stripe')
+      // PRD-004 Ticket 4.2 — poison job webhook : métrique + alerte P0.
+      // CTO : on alerte P0 car un webhook Stripe poison peut bloquer une
+      // mission/paiement entier (transfer pas déclenché, payout pas envoyé).
+      this.retryMetrics.recordExhausted({
+        queue: STRIPE_WEBHOOK_QUEUE,
+        jobType: 'stripe_webhook',
+        reason: 'transient_max_attempts',
+      })
+      void this.alerting.emit({
+        severity: 'P0',
+        kind: 'bullmq_failed_jobs',
+        title: `Stripe webhook poison job (${job.data.type})`,
+        description: `Webhook ${job.data.stripeEventId.slice(0, 12)}… exhausted ${attempts} attempts. Routed to DLQ. Investigate handler error + manual replay.`,
+        context: {
+          eventType: job.data.type,
+          attempts,
+          // ID tronqué — pas d'event ID complet (PII potentielle si chaîné avec autres logs).
+          eventIdShort: job.data.stripeEventId.slice(0, 12),
+        },
+      })
       this.logger.error(
         { stripeEventId: job.data.stripeEventId, attempts, type: job.data.type },
         'stripe.webhook.processor.dead_letter',

@@ -12,6 +12,187 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Build — PRD-004 Ticket 4.2 Retry & Recovery BullMQ — 2026-05-13
+
+🟢 **Retry automatique BullMQ + safety-nets recovery sur les jobs critiques (transfers, webhooks, auto-release).**
+PRD : [`docs/prd/PRD-004-hardening-ops-compliance.md`](docs/prd/PRD-004-hardening-ops-compliance.md) §2.2 + §4.14. Runbook : [`docs/ops/recovery-playbook.md`](docs/ops/recovery-playbook.md).
+
+#### Périmètre Ticket 4.2 (scope strict CTO)
+
+6 commits atomiques :
+
+- **C1 — Métrique `retry_exhausted` + helper jitter** : `cleanconnect_bullmq_retry_exhausted_total{queue,job_type,reason}` ajouté à `MetricsService`. `RetryMetricsTracker` typed facade avec whitelists strictes (`queue` ≤ 64 chars + 3 valeurs + `unknown`, `job_type` ∈ `{transfer_payout,stripe_webhook,auto_release}`, `reason` ∈ `{transient_max_attempts,permanent_error,unknown_runtime}`). Helper `applyJitter(baseMs, ratio=0.1)` symétrique ±10 % (floor 1 s) anti retry-storm.
+- **C2 — `TransferRetryProcessor` + classification Stripe** : `TRANSFER_RETRY_QUEUE` réactivée via `TransferRetryCoreModule` qui brise la dépendance circulaire historique (cause de la désactivation en PR #11). Backoff exponentiel **5 min / 15 min / 1 h / 6 h / 24 h** avec jitter, **max 5 attempts**, `jobId` déterministe `transfer-retry-<id>-aN`. Classifier `stripe-transfer-error.ts` (transient / permanent / unknown). `OutboundTransferService.recordFailure` : permanent → FAILED direct + alert P1 ; max attempts → FAILED + alert P0 ; idempotency key Stripe stable `transfer-mission-<missionId>` (no double payout).
+- **C3 — `AutoReleaseSafetyNetScheduler`** : cron horaire `@Cron('0 * * * *')` détecte SCHEDULED overdue (`scheduledFor < now - 30min`) **et** RUNNING orphan lock (`lockedAt < now - 10min`) → re-enqueue idempotent (`buildAutoReleaseBullJobId`). Alerte P1 `auto_release_stalled` si `reenqueued > 10` sur un tick. Limite hard `AUTO_RELEASE_SAFETY_LIMIT = 100` jobs/tick.
+- **C4 — Webhook poison alerting + DLQ growth alert** : `StripeWebhookProcessor.onJobFailed` émet métrique `retry_exhausted{queue=stripe-webhooks}` + alerte P0 `bullmq_failed_jobs` au seuil `STRIPE_WEBHOOK_MAX_ATTEMPTS`. `DlqMetricsTracker.recordEnqueued` émet alerte P1 `dlq_growth` (cooldown 5 min). `recordReplayed` / `recordReplayFailed` n'émettent **pas** d'alerte (action admin volontaire).
+- **C5 — `PhotoUploadSessionCleanupScheduler`** : cleanup quotidien `@Cron('15 4 * * *')` des sessions expirées non-consommées **sans Photo liée**. **DB-only** — Cloudinary asset cleanup reporté Ticket 4.4 (TODO(debt) `debt-prd004-cloudinary-orphan-cleanup`). Tampon 1 h après expiration pour ne pas couper le flux de confirmation client.
+- **C6 — Tests intégration + docs** : 9 tests intégration `payments-ticket-4-2-retry-recovery.integration.spec.ts` (transient/permanent/exhausted/no-double-payout/safety-net SCHEDULED+RUNNING/poison+DLQ growth/orphan cleanup). PRD §4.14 + ce CHANGELOG + runbook recovery `docs/ops/recovery-playbook.md`.
+
+#### Métriques nouvelles
+
+| Métrique | Type | Labels | Cardinalité max |
+|---|---|---|---|
+| `cleanconnect_bullmq_retry_exhausted_total` | counter | `queue`, `job_type`, `reason` | `4 × 3 × 3 = 36` (bornée) |
+
+**Labels CTO strictement interdits** : `jobId`, `missionId`, `paymentId`, `transferId`, `userId`, `email`, `stripeId` (cardinalité non bornée + PII).
+
+#### Alerts wirées en runtime (`AlertKind` enum)
+
+| Alert | Sévérité | Trigger runtime | Cooldown |
+|---|---|---|---|
+| `bullmq_failed_jobs` | **P0** | Transfer max attempts exhausted **OR** webhook `attemptsMade >= STRIPE_WEBHOOK_MAX_ATTEMPTS` | 5 min |
+| `stuck_transfer` | **P1** | Transfer permanent error (`account_closed`, `transfer_already_paid`, etc.) | 5 min |
+| `dlq_growth` | **P1** | `DlqMetricsTracker.recordEnqueued` (chaque nouvelle entrée DLQ) | 5 min |
+| `auto_release_stalled` | **P1** | Safety-net scheduler `reenqueued > 10` sur un tick horaire | 5 min |
+
+#### Variables d'environnement
+
+Aucune nouvelle env — Ticket 4.2 réutilise `ALERTING_ENABLED` / `DISCORD_WEBHOOK_URL` / `METRICS_ENABLED` du Ticket 4.1.
+
+#### Tests
+
+- **39 tests unit nouveaux** : `retry-backoff.spec.ts` (4), `retry-metrics.tracker.spec.ts` (5), `stripe-transfer-error.spec.ts` (6), `transfer-retry.queue.spec.ts` (6), `auto-release-safety-net.scheduler.spec.ts` (5), `auto-release-safety.spec.ts` (5), `stripe-webhook-poison.spec.ts` (5), `dlq-metrics.tracker.spec.ts` étendu (+4), `photo-upload-session-cleanup.scheduler.spec.ts` (5).
+- **9 tests intégration nouveaux** : `payments-ticket-4-2-retry-recovery.integration.spec.ts` (runtime ~7 s, stub Stripe complet + mock Alerting notifier).
+- Aucune régression : suites existantes vertes (**479 unit / 119 integration** au total avant push).
+
+#### Sécurité — points obligatoires CTO respectés
+
+- ✅ **0 PII** dans payloads BullMQ (`{ transferId, attempt }` uniquement — pas de mission/payment/user).
+- ✅ **0 PII** dans labels métriques (whitelists strictes appliquées).
+- ✅ **0 PII** dans alertes (`transferIdShort`/`missionIdShort` tronqués 8 chars, jamais full ID/email).
+- ✅ **Cardinalité bornée** : `cleanconnect_bullmq_retry_exhausted_total` ≤ 36 combinaisons.
+- ✅ **Idempotency Stripe stable** : `transfer-mission-<id>` sur toutes les tentatives (manual admin + auto retry).
+- ✅ **Anti-double-execution** : `jobId` déterministe BullMQ + `markFailureTx` SQL conditionnel + locks DB sur auto-release.
+- ✅ **Alerting non bloquant** : `emit()` swallow toute erreur (contrat strict — alerting ne casse jamais le métier).
+
+#### TODO(debt) explicites (à reprendre Tickets 4.4 / 4.5 / post-MVP)
+
+- `debt-prd004-bullmq-cleanup-policy` — politique `removeOnComplete`/`removeOnFail` (mesurer Redis avant) → post-MVP.
+- `debt-prd004-cloudinary-orphan-cleanup` — cleanup Cloudinary des assets orphelins → Ticket 4.4 RGPD.
+- `debt-prd004-poison-quarantine-auto-release` — quarantine dédiée queues hors Stripe webhook → suivi métrique `retry_exhausted{queue=auto-release}` en prod.
+
+#### Risques résiduels
+
+5 risques `Low/Medium` documentés PRD §4.14 (`R-4.2-1` à `R-4.2-6`) — aucun bloquant le merge.
+
+#### Gates locales
+
+- ✅ `tsc --noEmit` : 0 erreur
+- ✅ `eslint --max-warnings=0` : 0 warning
+- ✅ `pnpm test` : 479/479 unit verts
+- ✅ `pnpm --filter @cc/api run test:integration` : 119/119 integration verts
+- ⏳ **Sign-off CTO Build Ticket 4.2** (PR ouverte, STOP avant merge).
+
+---
+
+### Build — PRD-004 Ticket 4.1 Build B (Sprint 4) — 2026-05-12
+
+🟢 **Couche observabilité runtime ops complète : OpenTelemetry + BullBoard + Alerting + Grafana.**
+PRD : [`docs/prd/PRD-004-hardening-ops-compliance.md`](docs/prd/PRD-004-hardening-ops-compliance.md) §4.1 (Build B). ADR-014 / ADR-015 / ADR-016 / ADR-017.
+
+#### Périmètre Build B (scope strict CTO)
+
+5 commits atomiques :
+
+- **B1 — OpenTelemetry SDK** : SDK NodeJS dédié `apps/api/src/instrumentation.ts` chargé en tout premier (avant Nest / Sentry / Express → require-hook auto-instrumentations OK). Cohabitation Sentry v8 via `skipOpenTelemetrySetup: true` + `SentrySpanProcessor` + `SentryPropagator` (W3C TraceContext + Sentry baggage). Helper `bullmq-trace.ts` (injectTraceContext / runWithExtractedTraceContext) propage `_otel.traceparent` HTTP → BullMQ worker. Câblé sur `PaymentsWebhookService` (ingest + replay), `AutoReleaseService.enqueueDelayedJob`, `StripeWebhookProcessor.process`, `AutoReleaseProcessor.process`.
+- **B2 — BullBoard read-only sécurisé** : monté conditionnellement (`BULL_BOARD_ENABLED=false` par défaut) sur `/api/internal/queues`. `readOnlyMode: true` sur chaque `BullMQAdapter` → BullBoard refuse retry/promote/delete côté serveur. Auth en 2 voies : `INTERNAL_BEARER_TOKEN` (timingSafeEqual) OU JWT ADMIN. Sanitization middleware wrap `res.json` + `res.send` → `deepSanitize` defense-in-depth.
+- **B3 — AlertingService + Discord notifier** : service `@Global` avec API `emit(AlertPayload)`. Routing P0/P1 immédiat (cooldown 5min par `<severity>:<kind>`) / P2 buffer agrégé (flush 60s, batch ≤ 10 embeds) / P3 logs only. `sanitizeForAlert` = `deepSanitize` + `redactSecretsInString` recursive. `DiscordNotifier` POJO testable (fetchImpl injectable), AbortSignal.timeout(5s), `send` retourne `false` sans throw sur 4xx/5xx/network. `emit()` swallow toute erreur notifier (contrat strict : alerting ne casse jamais le métier).
+- **B4 — Grafana provisioning** : 3 dashboards JSON pre-loaded (folder "Clean Connect") + datasource Prometheus auto-provisionnée. `docker-compose.observability.yml` (Prometheus v2.55 + Grafana v11.3, network intra-cluster). `ops/prometheus/prometheus.yml` scrape `/api/internal/metrics` avec `METRICS_BEARER_TOKEN` injecté.
+- **B5 — Documentation** : PRD §4.13 + ce CHANGELOG + TODO(debt) explicites.
+
+#### Métriques nouvelles ou ré-instrumentées
+
+| Métrique | Type | Build | Labels | Source instrumentation |
+|---|---|---|---|---|
+| `cleanconnect_*` (déjà existantes A3+A3-bis) | — | A3 | — | inchangées |
+| `bullmq.process <queue>` (span OTel) | span | B1 | messaging.system / destination / operation / bullmq.job.name | `runWithExtractedTraceContext` (helper) |
+
+Aucune nouvelle métrique Prometheus créée — Build B câble l'existant + ajoute les **traces distribuées**.
+
+#### Dashboards Grafana provisionnés
+
+| Dashboard | UID | Panels |
+|---|---|---|
+| `cc-api-health` | API Health | latency p50/p95/p99, RPS by status, 5xx rate, heap/RSS, event-loop lag, CPU |
+| `cc-stripe-webhooks` | Stripe & Webhooks | API calls/op, failures/op×status, latency p95/op, webhook outcomes, failures by event_type, DLQ gauge + delta |
+| `cc-bullmq` | BullMQ & Queues | jobs completed/failed by queue, state cumulative, webhook latency p95, DLQ size stat, DLQ events/min |
+
+#### Alerts définis (côté `AlertKind` enum)
+
+5 alerts obligatoires CTO (déclencheurs cron `AlertChecker` reportés Ticket 4.2) :
+- `webhook_failed_rate`
+- `dlq_growth`
+- `stripe_api_failure_spike`
+- `bullmq_failed_jobs`
+- `metrics_endpoint_down` (alertmanager Prometheus side — debt)
+
+6 alerts réservés futures itérations (PRD-004 Tickets 4.2 → 4.5).
+
+#### Variables d'environnement ajoutées (env.ts Zod)
+
+| Var | Défaut | Crash boot si |
+|---|---|---|
+| `OTEL_ENABLED` | `false` | — |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | optionnel | — |
+| `OTEL_SERVICE_NAME` | `clean-connect-api` | — |
+| `OTEL_TRACES_SAMPLER_RATIO` | `0.1` | — |
+| `BULL_BOARD_ENABLED` | `false` | `=true` en prod sans `INTERNAL_BEARER_TOKEN` |
+| `INTERNAL_BEARER_TOKEN` | optionnel | — |
+| `ALERTING_ENABLED` | `false` | `=true` sans `DISCORD_WEBHOOK_URL` |
+| `DISCORD_WEBHOOK_URL` | optionnel | regex Discord stricte |
+| `ALERTING_COOLDOWN_SECONDS` | `300` | — |
+
+#### Décisions techniques
+
+- **OTel v1 vs v2** — pin sur `@opentelemetry/sdk-node@^0.57.0` / `auto-instrumentations-node@^0.55.0` / `core@^1.30.0` car Sentry v8 utilise OTel v1 sous le capot. Sentry v10 (qui supporte OTel v2) hors-scope (gros impact A1).
+- **Pas de package `instrumentation-bullmq`** — community uniquement, non audité. Préféré un helper manuel `bullmq-trace.ts` (~110 lignes, testé exhaustivement, propage W3C TraceContext via field `_otel.*` du payload). Idempotent sur replay DLQ.
+- **BullBoard via `MiddlewareConsumer`** — auth/sanitize middlewares Nest chaînés avant le router Express BullBoard. Permet d'utiliser `JwtService` + `deepSanitize` sans wrap Controller artificiel.
+- **AlertingService swallow** — `emit()` ne throw JAMAIS au caller. Une boucle d'erreur Discord ne doit pas casser le webhook Stripe / un job BullMQ.
+- **Auto-instrumentations désactivées** — `fs` (PII paths), `dns` (cardinality), `net` (low-level bruit). Routes `/metrics`, `/healthz`, `/readyz` ignorées par http-instrumentation (anti-bruit + perf).
+- **Sanitization Class A étendue** — `idempotencykey` + `idempotency_key` ajoutés à `CLASS_A_KEY_PATTERNS` (camelCase manquant — couvrait uniquement `idempotency-key` kebab-case).
+
+#### Tests (52 nouveaux)
+
+- **B1** — 13 tests `bullmq-trace.spec.ts` : immutability, idempotence, parent-child linkage, error span, no-PII attribute audit.
+- **B2** — 7 tests `bullboard-auth.middleware.spec.ts` (401/403/Internal/JWT/timingSafe) + 6 tests `bullboard-sanitize.middleware.spec.ts` (json/send/Buffer/HTML/Stripe leak).
+- **B3** — 11 tests `sanitize-alert.spec.ts` (truncation, key-based + regex inline, cap context) + 7 tests `discord.notifier.spec.ts` (POST format, 4xx/5xx/network no-throw, batch cap 10) + 8 tests `alerting.service.spec.ts` (no-op, P0 dispatch, P2 buffer+flush, P3 log-only, cooldown, sanitize, swallow).
+
+**Total avant Build B** : 369 unit / 110 integration.
+**Total après Build B** : 421 unit / 110 integration (aucune régression).
+
+#### Sécurité (vérifications CTO)
+
+- ✅ Aucune PII dans les spans OTel (audit `no userId/missionId/paymentIntentId on span` testé)
+- ✅ Aucun secret dans BullBoard (defense-in-depth `deepSanitize` sur `res.json`/`res.send`)
+- ✅ Aucun secret dans Discord (defense-in-depth `sanitizeForAlert` = `deepSanitize` + `redactSecretsInString`)
+- ✅ `/api/internal/queues` protégé JWT ADMIN + `INTERNAL_BEARER_TOKEN` (timingSafeEqual)
+- ✅ `/api/internal/metrics` inchangé (Build A3 Bearer guard)
+- ✅ BullBoard `readOnlyMode: true` strict côté serveur
+- ✅ OpenTelemetry découplé du métier (uniquement helper + bootstrap, aucune coupling Payments/Photos/Auth)
+- ✅ Pas de dépendance circulaire Nest (`AlertingModule` et `MetricsModule` `@Global`)
+
+#### TODO(debt) (explicite, non bloquant pour merge)
+
+| Debt | Source | Ticket cible |
+|---|---|---|
+| `alerting-cron-checker` | AlertingService prêt à recevoir des emit() mais aucun cron qui lit les counters et déclenche les 5 alerts | PRD-004 Ticket 4.2 |
+| `alerting-retry-policy` | DiscordNotifier ne retry pas en cas de 5xx — P0 perdu si Discord indispo | PRD-004 Ticket 4.2 |
+| `alerting-email-fallback` | SendGrid/Postmark fallback si Discord down | PRD-004 Ticket 4.2 |
+| `bullboard-transfers-refunds-queues` | Files BullMQ `transfers` / `refunds` n'existent pas encore (tournent sync dans webhook processor) — exposées dans ADR-015 | PRD-004 Ticket 4.2 (retry queue) |
+| `tempo-otlp-grafana` | Datasource Tempo + link traces ⇄ dashboards | PRD-004 Build C ou Ticket 4.2 |
+| `alertmanager-metrics-endpoint-down` | Alertmanager rules YAML (impossible à détecter depuis le service lui-même) | Infra cible prod |
+| `bullmq-bullboard-payload-content-type-recompute` | BullBoardSanitizeMiddleware réécrit le body — Content-Length recalculé par Express, à vérifier sous prod load | PRD-004 Verify |
+
+#### Périmètre EXCLU (renvoyé Build C ou autre ticket)
+
+- ❌ Cron `AlertChecker` qui déclenche réellement les 5 alerts (Ticket 4.2 — retry & recovery)
+- ❌ OpenAPI changes (aucun endpoint REST ajouté côté API publique)
+- ❌ Loki agrégation logs Pino
+- ❌ Tempo cluster collector (config + dashboard intégration)
+- ❌ Mobile / Admin observability (out-of-scope ticket 4.1)
+
+---
+
 ### Build — PRD-004 Ticket 4.1 A3-bis Metrics wiring (Sprint 4) — 2026-05-12
 
 🟢 **Instrumentation runtime des métriques Prometheus posées en A3.**

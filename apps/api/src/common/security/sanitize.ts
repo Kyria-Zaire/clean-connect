@@ -21,6 +21,8 @@ const CLASS_A_KEY_PATTERNS: readonly string[] = Object.freeze([
   'setcookie',
   'stripe-signature',
   'idempotency-key',
+  'idempotencykey',
+  'idempotency_key',
   'x-api-key',
   'xapikey',
   'api_secret',

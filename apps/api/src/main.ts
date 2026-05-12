@@ -1,3 +1,8 @@
+// PRD-004 Ticket 4.1 (Build B) — DOIT être le tout premier import :
+// l'OTel SDK NodeJS pose ses require-hooks AVANT que `http`, `express`,
+// `ioredis`, `pg`, `pino` soient chargés par les autres imports.
+import './instrumentation'
+
 import { VersioningType } from '@nestjs/common'
 import { NestFactory } from '@nestjs/core'
 import type { NestExpressApplication } from '@nestjs/platform-express'
@@ -13,13 +18,17 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter'
 // instanciation Nest pour que les auto-instrumentations Node attachent
 // `http`, `fetch`, `pg`, etc. Idempotent.
 import { initSentry } from './modules/observability/sentry/sentry.config'
+import { shutdownOpenTelemetry } from './modules/observability/tracing/otel.bootstrap'
 
 patchNestJsSwagger()
 
 async function bootstrap() {
   const env = loadEnv()
 
-  initSentry(env)
+  // Quand OTel SDK custom est actif (instrumentation.ts), on demande à Sentry
+  // de skip son auto-setup OTel pour éviter la double registration (SentrySpan
+  // Processor est déjà branché par notre bootstrap).
+  initSentry(env, { skipOpenTelemetrySetup: env.OTEL_ENABLED })
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
@@ -65,6 +74,11 @@ async function bootstrap() {
   }
 
   app.enableShutdownHooks()
+
+  // PRD-004 Build B — flush OTel batch span processor avant SIGTERM.
+  process.on('beforeExit', () => {
+    void shutdownOpenTelemetry().catch(() => undefined)
+  })
 
   await app.listen(env.PORT, '0.0.0.0')
 

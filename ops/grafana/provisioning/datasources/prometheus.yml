@@ -1,0 +1,22 @@
+# PRD-004 Ticket 4.1 — Build B (provisioning Grafana).
+# Datasource Prometheus auto-attachee a Grafana au boot.
+#
+# CRITIQUE : aucune credential en clair ici. Le token de scrape Prometheus
+# est cote `prometheus.yml` (compose), pas cote Grafana.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # `prometheus` = service name dans docker-compose.observability.yml.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+      # Manage exemplars si Tempo/OTel exporte les trace IDs.
+      exemplarTraceIdDestinations:
+        - name: traceID
+          datasourceUid: tempo

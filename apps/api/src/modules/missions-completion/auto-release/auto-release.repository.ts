@@ -42,6 +42,71 @@ export class AutoReleaseJobRepository {
     return this.prisma.autoReleaseJob.findUnique({ where: { bullJobId } })
   }
 
+  /**
+   * PRD-004 Ticket 4.2 — Safety-net cron horaire (AC-4.2.4.1 + AC-4.2.2.1).
+   *
+   * Retourne les jobs candidats à un re-enqueue :
+   *  - `SCHEDULED` + `scheduledFor < now - graceMs` : delayed BullMQ perdu
+   *    (Redis purge, restart sans persistance, etc.). Le job DB existe mais
+   *    Bull a perdu la trace → on rejoue.
+   *  - `RUNNING` + `lockedAt < now - stuckLockMs` : worker crashé entre le
+   *    `tryAcquireLockTx` et le `markCompletedTx`/`markFailedTx`. Le lock
+   *    applicatif n'a jamais été relâché → on relâche puis on rejoue.
+   *
+   * Limite stricte (`take`) pour borner la charge d'un tick cron.
+   * `orderBy scheduledFor asc` : les plus vieux d'abord (priorité au cas
+   * où la file s'accumule).
+   *
+   * IMPORTANT : aucune mutation ici. Le caller (`AutoReleaseService.
+   * reenqueueStuck`) lit, vérifie les invariants métier dans une
+   * transaction dédiée, puis poste le job BullMQ.
+   */
+  async findStuckJobs(opts: {
+    now: Date
+    graceMs: number
+    stuckLockMs: number
+    limit: number
+  }): Promise<AutoReleaseJob[]> {
+    const overdueCutoff = new Date(opts.now.getTime() - opts.graceMs)
+    const stuckLockCutoff = new Date(opts.now.getTime() - opts.stuckLockMs)
+    return this.prisma.autoReleaseJob.findMany({
+      where: {
+        OR: [
+          { status: 'SCHEDULED', scheduledFor: { lte: overdueCutoff } },
+          { status: 'RUNNING', lockedAt: { lte: stuckLockCutoff } },
+        ],
+      },
+      orderBy: { scheduledFor: 'asc' },
+      take: opts.limit,
+    })
+  }
+
+  /**
+   * Relâche un lock applicatif orphelin (status `RUNNING` mais worker crashé).
+   * Idempotent : seuls les jobs `RUNNING` avec `lockedAt` strictement antérieur
+   * au cutoff sont impactés. Repose le job à `SCHEDULED` pour permettre une
+   * nouvelle exécution.
+   */
+  async releaseStuckLockTx(
+    tx: Prisma.TransactionClient,
+    opts: { jobId: string; stuckLockCutoff: Date },
+  ): Promise<number> {
+    const r = await tx.autoReleaseJob.updateMany({
+      where: {
+        id: opts.jobId,
+        status: 'RUNNING',
+        lockedAt: { lte: opts.stuckLockCutoff },
+      },
+      data: {
+        status: 'SCHEDULED',
+        lockedAt: null,
+        lockedBy: null,
+        startedAt: null,
+      },
+    })
+    return r.count
+  }
+
   // ---------------------------------------------------------------------------
   // Mutations transactionnelles
   // ---------------------------------------------------------------------------

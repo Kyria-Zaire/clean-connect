@@ -21,6 +21,7 @@ import {
   CloudinaryClient,
   CloudinaryClientFactory,
 } from './cloudinary/cloudinary.client'
+import { PhotoUploadSessionCleanupScheduler } from './photo-upload-session-cleanup.scheduler'
 import { PhotosController } from './photos.controller'
 import { PhotosRepository } from './photos.repository'
 import { PhotosService } from './photos.service'
@@ -41,6 +42,7 @@ import { PhotosService } from './photos.service'
     },
     PhotosRepository,
     PhotosService,
+    PhotoUploadSessionCleanupScheduler,
   ],
   exports: [PhotosService],
 })

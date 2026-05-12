@@ -16,10 +16,13 @@ import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
 import { MissionsModule } from './modules/missions/missions.module'
 import { MissionsCompletionModule } from './modules/missions-completion/missions-completion.module'
+import { BullBoardModule } from './modules/observability/bullboard/bullboard.module'
 import { ObservabilityModule } from './modules/observability/observability.module'
 import { PaymentsModule } from './modules/payments/payments.module'
 import { PhotosModule } from './modules/photos/photos.module'
 import { UsersModule } from './modules/users/users.module'
+
+const env = loadEnv()
 
 @Module({
   imports: [
@@ -138,6 +141,15 @@ import { UsersModule } from './modules/users/users.module'
      * report-problem + AutoReleaseJob BullMQ delayed T+48h ouvrées).
      */
     MissionsCompletionModule,
+    /**
+     * PRD-004 Ticket 4.1 (Build B) — BullBoard read-only sécurisé, monté UNIQUEMENT
+     * si `BULL_BOARD_ENABLED=true`. Sinon le module est importé mais ne mount
+     * aucune route (zéro surface d'attaque par défaut).
+     *
+     * NB : enregistré conditionnellement pour éviter d'injecter les queues
+     * (`@InjectQueue`) côté tests unitaires/intégration qui ne mock pas BullMQ.
+     */
+    ...(env.BULL_BOARD_ENABLED ? [BullBoardModule] : []),
   ],
   providers: [
     { provide: APP_GUARD, useClass: ConditionalThrottlerGuard },

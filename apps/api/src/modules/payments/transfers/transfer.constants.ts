@@ -6,7 +6,13 @@ export const TRANSFER_RETRY_QUEUE = 'transfer-retry'
 
 export const TRANSFER_RETRY_JOB = 'retry-outbound-transfer'
 
-/** 5 min, 15 min, 1 h, 6 h, 24 h — décision CTO Ticket 3.5 (après 5 échecs → FAILED + DLQ/alerte). */
+/**
+ * 5 min, 15 min, 1 h, 6 h, 24 h — décision CTO Tickets 3.5 + 4.2
+ * (après 5 échecs → `Transfer.FAILED` terminal + DLQ/alerte).
+ *
+ * PRD-004 Ticket 4.2 : un jitter ± 10 % est appliqué à l'enqueue
+ * (`applyJitter` côté observability/metrics/retry-backoff) — anti retry-storm.
+ */
 export const TRANSFER_RETRY_BACKOFF_MS = [
   5 * 60 * 1_000,
   15 * 60 * 1_000,
