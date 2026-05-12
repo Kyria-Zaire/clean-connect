@@ -1013,6 +1013,85 @@ type WebhookDeadLetterView = {
 
 > ✍️ À valider par `<CTO>` le `YYYY-MM-DD`. ADRs passent à `Accepted` au sign-off.
 
+### 4.13 Build Ticket 4.1 — Build B (OTel + BullBoard + Alerting + Grafana) ✅
+
+> 5 commits atomiques sur la branche `build/prd-004-ticket-4.1-b-otel-grafana-bullboard-alerting`. STOP CTO avant merge.
+
+#### B1 — OpenTelemetry SDK (commit `build(obs): integrate opentelemetry sdk + bullmq trace propagation`)
+
+- `apps/api/src/instrumentation.ts` chargé **en tout premier** par `main.ts` (require-hook OTel pose ses crochets sur `http`/`express`/`ioredis`/`pg`/`pino` avant que ces modules soient résolus).
+- `otel.bootstrap.ts` : `NodeSDK` avec `getNodeAutoInstrumentations()` filtré (fs/dns/net désactivés — PII paths + cardinalité), HTTP ignore `/metrics`+`/healthz`+`/readyz`.
+- Cohabitation Sentry v8 : `Sentry.init({ skipOpenTelemetrySetup: true })` + `SentrySpanProcessor` + `SentryPropagator`. Sentry capte ses propres traces via le tracer OTel custom.
+- Helper `bullmq-trace.ts` : `injectTraceContext(payload)` côté producer + `runWithExtractedTraceContext(payload, queue, jobName, fn)` côté processor. Field `_otel.traceparent` + `_otel.tracestate` injecté dans le payload BullMQ (idempotent sur replay DLQ). Aucun package community `instrumentation-bullmq` utilisé.
+- Producers câblés : `PaymentsWebhookService.ingest` + `replayStripeDeadLetter` + `AutoReleaseService.enqueueDelayedJob`.
+- Processors câblés : `StripeWebhookProcessor.process` + `AutoReleaseProcessor.process` (wrap CONSUMER span enfant).
+- Envs Zod ajoutées : `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER_RATIO`.
+- 13 tests unit `bullmq-trace.spec.ts` : immutability, idempotence, parent-child linkage, error span status, no-PII attributes.
+
+#### B2 — BullBoard read-only sécurisé (commit `build(obs): secure read-only bullboard on /api/internal/queues`)
+
+- Module `BullBoardModule` (Nest `NestModule`) monté conditionnellement (`BULL_BOARD_ENABLED=false` par défaut).
+- Path : `/api/internal/queues`. Queues exposées : `stripe-webhooks` + `escrow-auto-release`. Files `transfers`/`refunds` listées ADR-015 = TODO(debt) (pas encore files BullMQ séparées).
+- Sécurité 4 couches :
+  1. `BullBoardAuthMiddleware` — JWT ADMIN **ou** `INTERNAL_BEARER_TOKEN` (timingSafeEqual). Fail-closed 401/403.
+  2. `BullBoardSanitizeMiddleware` — wrap `res.json` + `res.send`, `deepSanitize` defense-in-depth.
+  3. `readOnlyMode: true` strict sur chaque `BullMQAdapter` (BullBoard refuse retry/promote/delete server-side).
+  4. Préfixe `/api/internal/*` → bloquable Nginx en complément.
+- Envs Zod : `BULL_BOARD_ENABLED`, `INTERNAL_BEARER_TOKEN`. SuperRefine : crash boot si `BULL_BOARD_ENABLED=true` en prod sans `INTERNAL_BEARER_TOKEN`.
+- Bonus : `idempotencykey` + `idempotency_key` ajoutés à `CLASS_A_KEY_PATTERNS` (camelCase manquant).
+- 13 tests unit (7 auth middleware + 6 sanitize middleware).
+
+#### B3 — AlertingService + Discord notifier (commit `build(obs): add alerting service with discord notifier`)
+
+- `AlertingService` `@Global` avec API `emit(AlertPayload): Promise<void>` (ne throw JAMAIS — contrat strict).
+- Routing par sévérité :
+  | Sévérité | Dispatch | Cooldown | Buffer |
+  |---|---|---|---|
+  | P0 | Discord immédiat | 5 min / kind | — |
+  | P1 | Discord immédiat | 5 min / kind | — |
+  | P2 | Discord agrégé | n/a | 60s flush, max 50 entries |
+  | P3 | Logs only (Pino) | n/a | — |
+- `DiscordNotifier` POJO testable (fetchImpl injectable), `AbortSignal.timeout(5s)`, embed format `[<sev>][<kind>] <title>` + color enum + fields = context entries + timestamp + footer `clean-connect@<env>`. `sendBatch` cap 10 embeds (Discord limit).
+- `sanitizeForAlert` = `deepSanitize` sur context entier + `redactSecretsInString` recursive sur valeurs string + `title`/`description`. Bornes : title 96 chars / description 1024 chars / context 12 clés top-level.
+- 5 alerts CTO définis comme `AlertKind` enum : `webhook_failed_rate`, `dlq_growth`, `stripe_api_failure_spike`, `bullmq_failed_jobs`, `metrics_endpoint_down`. Triggers cron `AlertChecker` reportés Ticket 4.2 (TODO(debt) explicite).
+- Envs Zod : `ALERTING_ENABLED`, `DISCORD_WEBHOOK_URL` (regex Discord), `ALERTING_COOLDOWN_SECONDS` (10-3600s default 300). SuperRefine : crash boot si `ALERTING_ENABLED=true` sans `DISCORD_WEBHOOK_URL`.
+- 26 tests unit (11 sanitize-alert + 7 discord.notifier + 8 alerting.service).
+
+#### B4 — Grafana provisioning (commit `build(obs): provision grafana dashboards + prometheus stack`)
+
+- `docker-compose.observability.yml` à la racine : Prometheus v2.55 + Grafana v11.3, network `cc-observability` intra-cluster.
+- `ops/prometheus/prometheus.yml` : scrape `api:3000/api/internal/metrics` avec Bearer (`METRICS_BEARER_TOKEN` injecté au lancement).
+- `ops/grafana/provisioning/` : datasource Prometheus + dashboards provider (folder "Clean Connect", reload 30s).
+- 3 dashboards JSON pré-loadés :
+  - `cc-api-health` : HTTP latency p50/p95/p99 + RPS by status + 5xx rate + heap/RSS + event-loop lag + CPU.
+  - `cc-stripe-webhooks` : Stripe API calls/op + failures by status + latency p95/op + webhook outcomes + failures by event_type + DLQ gauge + delta.
+  - `cc-bullmq` : jobs completed/failed by queue + state cumulative + webhook latency p95 by outcome + DLQ size stat + DLQ events/min by action.
+- Variables templates : `$route` (api-health), `$queue` (bullmq).
+- Sécurité : aucune credential en clair dans les YAML versionnés, anon Grafana désactivée, admin password obligatoire via env.
+- Aucun test (provisioning déclaratif).
+
+#### B5 — Documentation (commit `docs(prd-004): document build b ops layer`)
+
+- Ce CHANGELOG : section "Build — PRD-004 Ticket 4.1 Build B (Sprint 4) — 2026-05-12" exhaustive.
+- Cette section PRD §4.13 — récap des 5 commits + métriques + dashboards + envs + TODO(debt).
+- `ops/grafana/README.md` — procédure stack runtime + sécurité + conventions PromQL.
+- TODO(debt) listés (8 items) avec ticket cible.
+
+#### Definition of Done — Build B (résumé)
+
+- [x] OTel SDK chargé pre-bootstrap, traces distribuées HTTP → BullMQ worker
+- [x] BullBoard read-only monté `/api/internal/queues` (off par défaut)
+- [x] AlertingService + DiscordNotifier opérationnels (no-op si désactivé)
+- [x] 3 dashboards Grafana JSON provisionnés
+- [x] Aucune fuite PII / secret dans traces / BullBoard / alerts (tests verts)
+- [x] 0 nouvelle métrique exposée (Build B = câblage runtime des métriques A3-bis)
+- [x] Tests unit : 52 nouveaux verts (421 total avant integration)
+- [x] Tests integration : 110/110 verts (aucune régression)
+- [x] Typecheck `tsc --noEmit` : 0 erreur
+- [x] Lint `eslint --max-warnings=0` : 0 warning
+- [x] Documentation CHANGELOG + PRD à jour
+- [ ] **Sign-off CTO Build B** ⏳ (PR ouverte, STOP avant merge)
+
 ---
 
 ## 5. Phase BUILD
