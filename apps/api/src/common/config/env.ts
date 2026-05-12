@@ -27,6 +27,39 @@ const envSchema = z
 
     STRIPE_SECRET_KEY: z.string().regex(/^sk_(test|live)_/, 'Préfixe sk_test_ ou sk_live_ requis.'),
     STRIPE_WEBHOOK_SECRET: z.string().startsWith('whsec_'),
+    /**
+     * Version API Stripe pinnée (ADR-011 / rule stripe). Format `YYYY-MM-DD.<codename>`.
+     * Le SDK est instancié avec cette version exacte ; le dashboard webhook DOIT
+     * pointer la même version sur test + live (audit Verify V8).
+     * Bump = nouvel ADR + tests régression. Aucun fallback `latest` autorisé.
+     */
+    STRIPE_API_VERSION: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}\.[a-z]+$/u, 'Format YYYY-MM-DD.codename requis (ADR-011).')
+      .default('2025-02-24.acacia'),
+    /**
+     * Tolérance HMAC `stripe.webhooks.constructEvent` (en secondes).
+     * Par défaut 300s = recommandation Stripe. Réduire ne casse pas la sécurité
+     * (HMAC reste validé) — c'est juste la fenêtre anti-replay basée sur `timestamp` Stripe.
+     */
+    STRIPE_WEBHOOK_TOLERANCE_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
+
+    /**
+     * Feature flag — gate complet du module Payments (controller webhook + processors).
+     * Décision CTO Build : `false` par défaut tant que l'observabilité Stripe n'est pas
+     * branchée en recette/preprod. Crash boot si `true` en production sans webhook secret
+     * réel (cf. `superRefine`).
+     */
+    FF_PAYMENTS_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('false')
+      .transform((v) => v === 'true'),
+
+    /**
+     * Version applicative — utilisée par le SDK Stripe pour `appInfo` (rule stripe).
+     * Doit refléter la version publiée (CI peut injecter le SHA git court).
+     */
+    APP_VERSION: z.string().min(1).max(40).default('0.1.0-dev'),
 
     CLOUDINARY_URL: z.string().url().optional(),
     FCM_PROJECT_ID: z.string().optional(),
@@ -109,6 +142,19 @@ const envSchema = z
         path: ['DISABLE_THROTTLE'],
       })
     }
+    // Garde-fou PRD-003 Build : si Payments activés, secret webhook doit être réel
+    // (pas un placeholder `whsec_ci_*`). On bloque les flags incohérents au boot.
+    if (data.FF_PAYMENTS_ENABLED && data.NODE_ENV === 'production') {
+      if (data.STRIPE_WEBHOOK_SECRET.startsWith('whsec_ci_') ||
+          data.STRIPE_WEBHOOK_SECRET.length < 32) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'STRIPE_WEBHOOK_SECRET placeholder/court interdit avec FF_PAYMENTS_ENABLED=true en production (PRD-003).',
+          path: ['STRIPE_WEBHOOK_SECRET'],
+        })
+      }
+    }
   })
 
 export type Env = z.infer<typeof envSchema>
@@ -125,4 +171,12 @@ export function loadEnv(): Env {
   }
   cachedEnv = parsed.data
   return cachedEnv
+}
+
+/**
+ * @internal — usage exclusif des tests unitaires/intégration pour forcer une
+ * re-lecture de `process.env`. JAMAIS appeler en runtime.
+ */
+export function __resetEnvCacheForTests(): void {
+  cachedEnv = null
 }
