@@ -24,7 +24,7 @@ openapi: 3.1.0
 
 info:
   title: Clean Connect API
-  version: '1.0.3-prd003-build-ticket-3.1-webhook-ingestion'
+  version: '1.0.4-prd003-build-ticket-3.2-payment-lifecycle'
   description: |
     API publique Clean Connect — bloc **Photos & Paiements** (PRD-003).
 
@@ -296,10 +296,15 @@ components:
 
     PaymentStatus:
       type: string
-      enum: [AUTHORIZED, CAPTURED, REFUND_PENDING, REFUNDED, FAILED, CANCELLED]
+      enum: [AUTHORIZATION_PENDING, AUTHORIZED, CAPTURED, REFUND_PENDING, REFUNDED, FAILED, CANCELLED]
       description: |
-        Cycle paiement carte (PaymentIntent manual capture). `CANCELLED` = capture abandonnée
-        ou `authorization_expired` Visa/MC (~7j) — revue CTO state machines rev2.
+        Cycle paiement carte (PaymentIntent manual capture).
+        - `AUTHORIZATION_PENDING` (PRD-003 Ticket 3.2) : PaymentIntent créé,
+          en attente du webhook `payment_intent.amount_capturable_updated`.
+        - `AUTHORIZED` : autorisation confirmée Stripe — fonds bloqués sur la carte.
+        - `CAPTURED` : capture déclenchée (Ticket 3.4 — validation client / auto-release / admin).
+        - `CANCELLED` : capture abandonnée ou `authorization_expired` Visa/MC (~7j)
+          — revue CTO state machines rev2.
 
     TransferStatus:
       type: string
@@ -1265,11 +1270,21 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PaymentErrorBody' }
         '422':
-          description: '422 — règle métier violée (cf. `PaymentErrorCode`).'
+          description: |
+            422 — règle métier violée (cf. `PaymentErrorCode`) :
+            `PAYMENT_AMOUNT_REQUIRED` (mission sans `estimatedPriceCents`),
+            `PAYMENT_STRIPE_ERROR` (échec création Stripe).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PaymentErrorBody' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503':
+          description: |
+            `PAYMENTS_DISABLED` — feature flag `FF_PAYMENTS_ENABLED=false`
+            sur cet environnement (PRD-003 Ticket 3.2).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentErrorBody' }
 
   '/v1/payments/{id}/validate':
     post:
@@ -1378,7 +1393,8 @@ paths:
       summary: '[CLIENT] Lister mes paiements'
       description: |
         Retourne les `ClientPaymentView` de l'utilisateur courant (paginé).
-        Ownership vérifié serveur via JWT.
+        Ownership vérifié serveur via JWT. **JAMAIS** `clientSecret` exposé
+        ici (rule securite + PRD-003 Ticket 3.2 — clientSecret jamais refetchable).
       x-rbac: [CLIENT]
       x-rate-limit: { strategy: 'token-bucket', max: 60, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1397,6 +1413,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503':
+          description: '`PAYMENTS_DISABLED` — feature flag `FF_PAYMENTS_ENABLED=false`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentErrorBody' }
 
   '/v1/admin/payments':
     get:
@@ -1438,6 +1459,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503':
+          description: '`PAYMENTS_DISABLED` — feature flag `FF_PAYMENTS_ENABLED=false`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentErrorBody' }
 
   # ---------------------------------------------------------------------------
   # Bloc 2 — Transfers (Admin) (2 endpoints)

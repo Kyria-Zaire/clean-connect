@@ -16,8 +16,8 @@
 | **ID** | `PRD-003` |
 | **Slug** | `photos-paiements` |
 | **Titre** | Photos AVANT/APRÈS + Stripe Connect Express (escrow) — sous-systèmes Media Evidence / Payment Lifecycle / Mission Completion / Stripe Connect Onboarding |
-| **Version PRD** | `0.4` (Design ✅ signé-off, Build Ticket 3.1 livré 2026-05-12) |
-| **Statut** | `BUILD_IN_PROGRESS` (Ticket 3.1 livré, en attente validation CTO avant Ticket 3.2) |
+| **Version PRD** | `0.5` (Design ✅ signé-off, Build Tickets 3.1 + 3.2 livrés 2026-05-12) |
+| **Statut** | `BUILD_IN_PROGRESS` (Tickets 3.1 + 3.2 livrés, en attente validation CTO avant Ticket 3.3) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` (cadrage) → `architecte-api` + `securite` + `stripe` + `photos-rgpd` (Design) |
 | **Persona pilote Discover** | `senior-dev` |
@@ -561,9 +561,9 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 
 | # | Ticket | Statut | Branche / PR |
 |---|---|---|---|
-| 3.1 | Infra Stripe + Config + Webhook ingestion | ✅ **Livré 2026-05-12** | `feat/prd-003-payments-photos` |
-| 3.2 | Payment lifecycle + PaymentIntent manual capture | ⛔ Bloqué (validation CTO 3.1 requise) | — |
-| 3.3 | Cloudinary signed upload + PhotoUploadSession | ⛔ | — |
+| 3.1 | Infra Stripe + Config + Webhook ingestion | ✅ **Livré 2026-05-12** (PR #7) | `feat/prd-003-payments-photos` |
+| 3.2 | Payment lifecycle + PaymentIntent manual capture | ✅ **Livré 2026-05-12** | `feat/prd-003-payments-photos` |
+| 3.3 | Cloudinary signed upload + PhotoUploadSession | ⛔ Bloqué (validation CTO 3.2 requise) | — |
 | 3.4 | Mission completion + client validation + auto-release | ⛔ | — |
 | 3.5 | Refunds + DLQ + retries + observabilité | ⛔ | — |
 | 3.6 | Verify renforcé + audits V1–V11 + race tests | ⛔ | — |
@@ -588,7 +588,51 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 
 **`TODO(debt)` ouverts** (à clore Verify) :
 - `webhook-409-on-replay-deferred` : clarification Build CTO — replay (`P2002`) → 202 idempotent au lieu de 409 (pour ne pas piéger Stripe en boucle de retry 3 jours). Le contrat OpenAPI est aligné dans cette PR ; à reconsulter en Verify V1.
-- `payments-processor-no-domain-routing` : en 3.1 le processor marque simplement `PROCESSED` sans dispatcher de domain event ; le mapping métier arrive aux Tickets 3.2 → 3.5.
+- `payments-processor-no-domain-routing` : ✅ levé par Ticket 3.2 (cf. `PaymentDomainHandler`, mapping `payment_intent.*`).
+
+### 5.1bis Ticket 3.2 — Payment lifecycle + PaymentIntent manual capture (livré 2026-05-12)
+
+**Périmètre livré** (toujours gated `FF_PAYMENTS_ENABLED`, défaut `false`) :
+
+- ✅ Schéma Prisma : `MissionStatus.PENDING_PAYMENT` (entre `DRAFT` et `PUBLISHED`), `PaymentStatus.AUTHORIZATION_PENDING` (état initial strict), `Payment.idempotencyKey` (UNIQUE, `VARCHAR(255)`), `Payment.failureCode` (`VARCHAR(120)`), `Payment.failureMessage` (`TEXT`). Migration manuelle `20260512240000_prd003_payment_lifecycle_3_2`.
+- ✅ Mission state machine étendue : `DRAFT → PENDING_PAYMENT → PUBLISHED | CANCELLED`. `MissionsService.publish` rejette toute transition `DRAFT → PUBLISHED` quand `FF_PAYMENTS_ENABLED=true` (`MissionInvalidStateError('mission_publish_requires_payment')`). Repository transactionnel : `transitionDraftToPendingPaymentTx`, `transitionPendingPaymentToPublishedTx`, `transitionPendingPaymentToCancelledTx` — chacun avec audit `MissionEvent` (`PAYMENT_INTENT_CREATED`, `PAYMENT_AUTHORIZED`, `PAYMENT_FAILED`, `PAYMENT_CANCELLED`).
+- ✅ `PaymentsService.createIntent` :
+  - Idempotence stricte : header `Idempotency-Key` obligatoire (sinon `400 PAYMENT_MISSING_IDEMPOTENCY_KEY`), unique en DB, propagée directement à Stripe (`stripe.paymentIntents.create({...}, { idempotencyKey })`).
+  - Ownership + état mission vérifiés (`MISSION_NOT_FOUND`, `MISSION_FORBIDDEN`, `MISSION_NOT_PAYABLE` quand `status ∉ {DRAFT, PENDING_PAYMENT}`).
+  - Montant lu **côté serveur** depuis `mission.estimatedPriceCents` (anti-tamper, ADR-008). Commission `PAYMENT_PLATFORM_FEE_RATE` env (défaut `0.18`) snapshottée à la création (`applicationFeeCents`, `providerPayoutCents`).
+  - PaymentIntent Stripe créé avec `capture_method='manual'`, `automatic_payment_methods.enabled=true`, `currency='eur'`, `metadata: { missionId, clientId, env, appVersion }`.
+  - Transaction atomique : `Payment` créé (`AUTHORIZATION_PENDING`) + mission `DRAFT → PENDING_PAYMENT` (audit). Si déjà `PENDING_PAYMENT`, on conserve.
+  - `clientSecret` retourné **uniquement** à la création (HTTP 201 `CreatePaymentIntentResponse`), jamais persisté en DB, jamais loggé (Pino redactor), jamais re-fetchable via `GET /payments/mine`.
+- ✅ `GET /v1/payments/mine` (CLIENT) + `GET /v1/admin/payments` (ADMIN) : pagination cursor, filtres `status / missionId / clientId / prestataireId / createdAfter / createdBefore`. RBAC strict côté guard + repository (`listForClient` filtre par `clientId`).
+- ✅ Webhook routing (`StripeWebhookProcessor` → `PaymentDomainHandler`) :
+  - Le processor récupère désormais l'event **authentifié** via `stripe.events.retrieve(stripeEventId)` (pas de confiance dans le payload Redis).
+  - `payment_intent.amount_capturable_updated` → `Payment AUTHORIZATION_PENDING → AUTHORIZED`, `Mission PENDING_PAYMENT → PUBLISHED`, audit `PAYMENT_AUTHORIZED`.
+  - `payment_intent.payment_failed` → `Payment → FAILED` (capture `failure_code` / `failure_message` Stripe, jamais PII), audit `PAYMENT_FAILED`. Mission reste `PENDING_PAYMENT` (cf. AC-B.6 + scope CTO Ticket 3.2 — pas d'auto-transition CANCELLED ici).
+  - `payment_intent.canceled` → `Payment → CANCELLED`, `Mission → CANCELLED`, audit `PAYMENT_CANCELLED`. `cancellation_reason='automatic'` détecté ⇒ `failure_code='authorization_expired'` (pré-câblage `PAYMENT_AUTHORIZATION_EXPIRED` pour 3.5).
+  - Tous les autres `payment_intent.*` sont ignorés (no-op, marqués `PROCESSED`, journalisés `routed: true/false`).
+- ✅ API publique :
+  - `POST /v1/payments/intent` (CLIENT, `IdempotencyKeyHeader` obligatoire) → 201 / 400 / 401 / 403 / 404 / 409 / 422 / 429 / 503.
+  - `GET /v1/payments/mine` (CLIENT) → 200 / 401 / 403 / 429 / 503.
+  - `GET /v1/admin/payments` (ADMIN) → 200 / 401 / 403 / 429 / 503.
+  - Tous les endpoints `503 PAYMENTS_DISABLED` quand `FF_PAYMENTS_ENABLED=false`.
+- ✅ Zod shared-types étendus : `paymentInternalSchema` (idempotencyKey, failureCode, failureMessage), `paymentErrorCodeSchema` (+ `PAYMENT_AMOUNT_REQUIRED`, `PAYMENT_MISSING_IDEMPOTENCY_KEY`, `MISSION_NOT_FOUND`, `MISSION_FORBIDDEN`, `MISSION_NOT_PAYABLE`), `missionEventTypeSchema` (+ `PAYMENT_INTENT_CREATED`, `PAYMENT_AUTHORIZED`, `PAYMENT_FAILED`, `PAYMENT_CANCELLED`), `clientPaymentListQuery/Response`, `adminPaymentListQuery/Response`, `createPaymentIntentResponseSchema` (incluant `clientSecret`).
+- ✅ Tests :
+  - **Unit** `payments.service.spec.ts` : happy path, idempotency replay (même `Idempotency-Key` → même `Payment` + `clientSecret` regénéré, pas d'appel Stripe redondant), ownership refus, mission `ACCEPTED` refusée (`MISSION_NOT_PAYABLE`), montant manquant (`PAYMENT_AMOUNT_REQUIRED`), feature flag off (`PAYMENTS_DISABLED`), header idempotency manquant (`PAYMENT_MISSING_IDEMPOTENCY_KEY`), erreur Stripe convertie (`PAYMENT_STRIPE_ERROR`).
+  - **Intégration** `payments-intent.integration.spec.ts` : Stripe stubbé en module, scénarios POST `/v1/payments/intent` (201 + `clientSecret` retourné, replay même clé → 201 idempotent, ownership différent → 403, JWT prestataire → 403, header manquant → 400, mission inconnue → 404), GET `/v1/payments/mine` (filtre `status`, pagination, **`clientSecret` absent** dans toutes les réponses).
+  - **Intégration** `payments-domain.integration.spec.ts` : injection `Stripe.Event` synthétiques dans `PaymentDomainHandler` → vérifie transitions `Payment` + `Mission` + `MissionEvent` (AUTHORIZED → PUBLISHED, FAILED, CANCELLED `authorization_expired`).
+  - Total : **126 unit** + **69 intégration** verts (jest serial DB Postgres + Redis).
+- ✅ OpenAPI bump `1.0.4-prd003-build-ticket-3.2-payment-lifecycle` : `PaymentStatus.AUTHORIZATION_PENDING` ajouté, `503 PAYMENTS_DISABLED` documenté sur les 3 endpoints, `422` enrichi (`PAYMENT_AMOUNT_REQUIRED` / `PAYMENT_STRIPE_ERROR`). Redocly lint 0 erreur.
+
+**Hors-scope 3.2** (confirmé CTO — à traiter dans tickets suivants) :
+- ❌ Transfer prestataire (`stripe.transfers.create`) → **3.4** (validation client) + **3.5** (auto-release).
+- ❌ Refund complet / partiel → **3.5**.
+- ❌ Capture réelle après completion (`stripe.paymentIntents.capture`) → **3.4** (validation client) + **3.5** (auto-release + admin force).
+- ❌ Photos / upload Cloudinary → **3.3**.
+- ❌ Auto-release T+48h ouvrées + BullMQ delayed job → **3.4** + **3.5**.
+
+**`TODO(debt)` ouverts Ticket 3.2** (à clore Verify ou ticket dédié) :
+- `payments-client-secret-replay-strict-vs-loose` : en replay idempotent, on régénère le `clientSecret` via `stripe.paymentIntents.retrieve(...)` (loose). Strict serait `null` côté replay pour forcer le mobile à conserver le secret initial. Décision CTO en Verify V2.
+- `payments-failed-mission-status-stay-pending` : sur `payment_intent.payment_failed`, la mission reste `PENDING_PAYMENT` (cf. AC-B.6). Le mobile doit relancer un nouveau `POST /payments/intent` avec une **nouvelle** `Idempotency-Key`. À documenter côté mobile API doc.
 
 ### 5.2 Garde-fous transverses (rappel — actifs sur tous les tickets Build)
 
