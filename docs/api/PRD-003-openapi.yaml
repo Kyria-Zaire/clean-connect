@@ -1245,6 +1245,41 @@ paths:
         - Idempotence : `Idempotency-Key` obligatoire. Une même clé renvoie la même
           réponse (cache 24 h).
         - État mission requis : `DRAFT` ou `PENDING_PAYMENT`. Sinon → `409 PAYMENT_INVALID_STATE`.
+
+        ### Idempotency replay (ajustement CTO Ticket 3.2 #1 — mode `loose`)
+
+        Quand un client rejoue la **même** `Idempotency-Key` sur la **même** mission :
+
+        - L'API ne crée **PAS** un nouveau `PaymentIntent` Stripe (zéro double appel).
+        - L'API peut **régénérer le `clientSecret`** côté serveur via
+          `paymentIntents.retrieve(...)` (mode dit `loose` — par opposition au mode `strict`
+          qui renverrait `null` pour forcer le mobile à conserver le secret initial).
+        - **Dette `payments-client-secret-replay-strict-vs-loose`** ouverte : la décision
+          finale (loose vs strict) sera tranchée en Verify V2.
+
+        Conséquence mobile : si tu as **perdu** le `clientSecret` initial (kill app, restart
+        device) et que la mission est toujours en `PENDING_PAYMENT`, tu peux **rejouer**
+        ta requête `POST /v1/payments/intent` avec la **même** `Idempotency-Key` pour
+        récupérer un `clientSecret` exploitable. **N'utilise PAS** une nouvelle clé tant
+        que la mission n'est pas passée en `payment_failed` ou `canceled` — sinon le
+        serveur répondra `409 PAYMENT_INVALID_STATE`.
+
+        ### Retry après `payment_failed` / `payment_canceled` (ajustement CTO Ticket 3.2 #2)
+
+        Si Stripe a émis `payment_intent.payment_failed` (carte refusée, 3DS abandonné) :
+
+        - Le `Payment` côté DB est `FAILED` (statut terminal pour cet intent).
+        - La mission **reste** en `PENDING_PAYMENT` (`AC-B.6` PRD-003).
+        - Le client mobile DOIT effectuer une **nouvelle** requête `POST /v1/payments/intent`
+          avec une **nouvelle** `Idempotency-Key` (UUID v4 régénéré côté mobile).
+          Rejouer l'ancienne clé → `200/201` idempotent inutile car le PaymentIntent
+          précédent est en `FAILED` côté Stripe.
+        - Le serveur créera un **nouveau** `PaymentIntent` Stripe et renverra un
+          nouveau `clientSecret`.
+
+        Idem si la mission a transitionné en `CANCELLED` via `payment_intent.canceled`
+        (notamment `authorization_expired`) : la mission n'est plus `PENDING_PAYMENT`,
+        seul le client peut redémarrer un cycle de paiement depuis une nouvelle mission.
       x-rbac: [CLIENT]
       x-rate-limit: { strategy: 'token-bucket', max: 30, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1295,10 +1330,31 @@ paths:
         **Cas exceptionnel** — admin force la capture d'un PaymentIntent
         (intervention support, race webhook, etc.).
 
-        - Le flow nominal reste `POST /v1/missions/:id/validate` (client).
+        - Le flow nominal reste `POST /v1/missions/:id/validate` (client) — qui
+          déclenche la capture **en backend** via job BullMQ (jamais HTTP synchrone).
         - Action auditée dans `MissionEvent` avec `adminNote`.
         - Idempotence Stripe garantie via `Idempotency-Key`.
         - **JAMAIS exposé au prestataire ni au client.**
+
+        ### Ownership de la capture (ajustement CTO Ticket 3.2 #4)
+
+        La capture réelle d'un `PaymentIntent` (`stripe.paymentIntents.capture(...)`)
+        n'arrive **JAMAIS** au paiement initial (`capture_method='manual'` snapshotté
+        à la création — PRD-003 Ticket 3.2). Trois ownerships exclusifs sont autorisés
+        à déclencher la capture :
+
+        1. **`SYSTEM`** (job BullMQ déclenché par `POST /v1/missions/:id/validate` côté
+           CLIENT) — flow nominal de validation mission. Idempotency key déterministe
+           `capture-mission-{missionId}`. Ticket 3.4.
+        2. **`SYSTEM`** (job BullMQ déclenché par auto-release T+48h ouvrées si le
+           client laisse silence). Même idempotency key. Ticket 3.4 + 3.5.
+        3. **`ADMIN` exceptionnel** (cet endpoint `POST /v1/payments/:id/validate`)
+           — intervention support quand le flow nominal a échoué (webhook perdu,
+           race condition, escalade litige résolue). Audit obligatoire avec `adminNote`.
+
+        Le **prestataire** ne peut **JAMAIS** déclencher une capture, ni directement,
+        ni via une route détournée. Le **client** ne peut la déclencher qu'**indirectement**
+        via `POST /v1/missions/:id/validate` (qui n'est pas cet endpoint).
       x-rbac: [ADMIN]
       x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
       parameters:

@@ -41,6 +41,27 @@ export const PAYMENT_DOMAIN_EVENT_TYPES = new Set<string>([
 ])
 
 /**
+ * Erreur défense-en-profondeur Ticket 3.2 (ajustement CTO #3) — l'event
+ * Stripe re-fetché côté processor doit toujours matcher l'env d'exécution
+ * (`event.livemode === (APP_ENV === 'production')`). L'ingestion HTTP a
+ * déjà filtré, mais on re-vérifie au handler pour parer toute injection
+ * directe en DB (rejeu admin, bug processor, etc.).
+ */
+export class PaymentDomainLivemodeMismatchError extends Error {
+  constructor(
+    readonly stripeEventId: string,
+    readonly eventLivemode: boolean,
+    readonly appEnvIsProduction: boolean,
+  ) {
+    super(
+      `Stripe event ${stripeEventId} livemode=${eventLivemode} ` +
+        `mismatches APP_ENV production=${appEnvIsProduction}`,
+    )
+    this.name = 'PaymentDomainLivemodeMismatchError'
+  }
+}
+
+/**
  * Cancellation reasons Stripe → mapping `failureCode` côté Payment.
  *
  * Source : https://stripe.com/docs/api/payment_intents/object#payment_intent_object-cancellation_reason
@@ -62,6 +83,7 @@ const CANCELLATION_REASON_TO_FAILURE_CODE: Record<string, string> = {
 export class PaymentDomainHandler {
   private readonly logger = new Logger(PaymentDomainHandler.name)
   private readonly listingTtlMs: number
+  private readonly appEnvIsProduction: boolean
 
   constructor(
     private readonly prisma: PrismaService,
@@ -72,6 +94,7 @@ export class PaymentDomainHandler {
     config: ConfigService<Env, true>,
   ) {
     this.listingTtlMs = config.get('MISSION_LISTING_TTL_MS', { infer: true })
+    this.appEnvIsProduction = config.get('APP_ENV', { infer: true }) === 'production'
   }
 
   /** Indique si cet event doit être routé (vs marqué PROCESSED sans action). */
@@ -83,8 +106,14 @@ export class PaymentDomainHandler {
    * Point d'entrée — appelé par `StripeWebhookProcessor` après lock et
    * `stripe.events.retrieve()`. Toute exception relance le retry BullMQ
    * (jusqu'à 5 tentatives avant DLQ — cf. `payments.constants.ts`).
+   *
+   * Ticket 3.2 ajustement CTO #3 (Verify V11) : on revérifie ici la
+   * cohérence `event.livemode` ↔ `APP_ENV` (défense en profondeur — le
+   * filtre ingestion existe déjà côté `PaymentsWebhookService`, mais la
+   * couche domain doit rester safe en cas de rejeu DB direct).
    */
   async handle(event: Stripe.Event): Promise<void> {
+    this.assertEnvConsistency(event)
     switch (event.type) {
       case 'payment_intent.amount_capturable_updated':
         await this.onAuthorized(event.data.object as Stripe.PaymentIntent)
@@ -98,6 +127,29 @@ export class PaymentDomainHandler {
       default:
         // Should-never-happen : le caller filtre via `shouldHandle()`.
         this.logger.warn({ type: event.type }, 'payments.domain.unknown_event_type')
+    }
+  }
+
+  /**
+   * Vérifie `event.livemode === (APP_ENV==='production')`. Lève une
+   * `PaymentDomainLivemodeMismatchError` sinon (loguée + caught par
+   * processor → marquée FAILED, pas retry — c'est un bug structurel).
+   */
+  private assertEnvConsistency(event: Stripe.Event): void {
+    if (event.livemode !== this.appEnvIsProduction) {
+      this.logger.error(
+        {
+          stripeEventId: event.id,
+          eventLivemode: event.livemode,
+          appEnvIsProduction: this.appEnvIsProduction,
+        },
+        'payments.domain.livemode_mismatch',
+      )
+      throw new PaymentDomainLivemodeMismatchError(
+        event.id,
+        event.livemode,
+        this.appEnvIsProduction,
+      )
     }
   }
 
