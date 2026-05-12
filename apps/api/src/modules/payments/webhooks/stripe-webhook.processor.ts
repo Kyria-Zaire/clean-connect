@@ -33,6 +33,8 @@ import { STRIPE_CLIENT_TOKEN } from '../stripe/stripe.client'
 
 import { PaymentDomainHandler } from './payment-domain.handler'
 import type { StripeWebhookJobPayload } from './payments-webhook.service'
+import { RefundDomainHandler } from './refund-domain.handler'
+import { TransferDomainHandler } from './transfer-domain.handler'
 
 const WORKER_ID = `${hostname()}#${process.pid}`
 
@@ -42,7 +44,9 @@ export class StripeWebhookProcessor extends WorkerHost {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly domainHandler: PaymentDomainHandler,
+    private readonly paymentDomain: PaymentDomainHandler,
+    private readonly transferDomain: TransferDomainHandler,
+    private readonly refundDomain: RefundDomainHandler,
     @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
   ) {
     super()
@@ -66,12 +70,38 @@ export class StripeWebhookProcessor extends WorkerHost {
       return
     }
 
+    const shouldRoute =
+      this.paymentDomain.shouldHandle(type) ||
+      this.transferDomain.shouldHandle(type) ||
+      this.refundDomain.shouldHandle(type)
+
     try {
-      if (this.domainHandler.shouldHandle(type)) {
-        // Fetch payload AUTHENTIFIÉ — never sourced from Redis (rule securite).
-        const event = await this.stripe.events.retrieve(stripeEventId)
-        await this.domainHandler.handle(event)
+      if (!shouldRoute) {
+        await this.markProcessed(stripeEventId)
+        this.logger.log(
+          {
+            stripeEventId,
+            type,
+            payloadHash: `${payloadHash.slice(0, 12)}…`,
+            worker: WORKER_ID,
+            routed: false,
+          },
+          'stripe.webhook.processor.processed_no_domain_route',
+        )
+        return
       }
+
+      const event = await this.stripe.events.retrieve(stripeEventId)
+      if (this.paymentDomain.shouldHandle(type)) {
+        await this.paymentDomain.handle(event)
+      }
+      if (this.transferDomain.shouldHandle(type)) {
+        await this.transferDomain.handle(event)
+      }
+      if (this.refundDomain.shouldHandle(type)) {
+        await this.refundDomain.handle(event)
+      }
+
       await this.markProcessed(stripeEventId)
       this.logger.log(
         {
@@ -79,7 +109,7 @@ export class StripeWebhookProcessor extends WorkerHost {
           type,
           payloadHash: `${payloadHash.slice(0, 12)}…`,
           worker: WORKER_ID,
-          routed: this.domainHandler.shouldHandle(type),
+          routed: true,
         },
         'stripe.webhook.processor.processed',
       )

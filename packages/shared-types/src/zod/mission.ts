@@ -342,5 +342,10 @@ export const missionEventTypeSchema = z.enum([
   'AUTO_RELEASE_CANCELLED',
   /** Job en erreur Stripe (`authorization_expired`, `card_declined`, …). */
   'AUTO_RELEASE_FAILED',
+  // PRD-003 Ticket 3.5 — transfers Connect + refunds admin.
+  'TRANSFER_SENT',
+  'TRANSFER_REVERSED',
+  'TRANSFER_ADMIN_RETRY_REQUESTED',
+  'REFUND_ADMIN_REQUESTED',
 ])
 export type MissionEventType = z.infer<typeof missionEventTypeSchema>

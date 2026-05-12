@@ -175,3 +175,27 @@ export class PaymentAuthorizationExpiredException extends UnprocessableEntityExc
     super({ error: 'PAYMENT_AUTHORIZATION_EXPIRED', reason })
   }
 }
+
+// ---------------------------------------------------------------------------
+// PRD-003 Ticket 3.5 — refund intégral ADMIN + transfer reversal
+// ---------------------------------------------------------------------------
+
+export class PaymentPartialRefundNotSupportedException extends UnprocessableEntityException {
+  constructor() {
+    super({
+      error: 'PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED',
+      reason: 'Seul le remboursement intégral du montant capturé est supporté en MVP (PRD-003 Ticket 3.5).',
+    })
+  }
+}
+
+/** Transfer prestataire déjà `SENT` — refund API interdit (workflow manuel documenté : Stripe Dashboard). */
+export class PaymentRefundBlockedTransferSentException extends ConflictException {
+  constructor() {
+    super({
+      error: 'PAYMENT_REFUND_BLOCKED_TRANSFER_SENT',
+      reason:
+        'Un transfer Connect `SENT` existe pour ce paiement — remboursement API interdit (CTO Ticket 3.5). Traitement manuel requis.',
+    })
+  }
+}

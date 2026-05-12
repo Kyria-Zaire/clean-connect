@@ -42,8 +42,8 @@ describe('mission-state.machine (PRD-002)', () => {
     expect(canTransitionMissionStatus('CLIENT_VALIDATION_PENDING', 'DISPUTE_OPEN')).toBe(true)
   })
 
-  it('refuse COMPLETED → DISPUTE_OPEN (fenêtre 7j PRD-005, hors Ticket 3.4)', () => {
-    expect(canTransitionMissionStatus('COMPLETED', 'DISPUTE_OPEN')).toBe(false)
+  it('autorise COMPLETED → DISPUTE_OPEN (transfer.reversed — Ticket 3.5)', () => {
+    expect(canTransitionMissionStatus('COMPLETED', 'DISPUTE_OPEN')).toBe(true)
   })
 
   it('refuse ACCEPTED → COMPLETED (capture obligatoire)', () => {

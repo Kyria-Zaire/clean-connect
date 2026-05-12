@@ -22,7 +22,7 @@
  *    autre état (lock SQL côté `transitionPendingPaymentToPublished`).
  */
 
-import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import type Stripe from 'stripe'
 
@@ -33,6 +33,9 @@ import { MatchingService } from '../../missions/services/matching.service'
 import { MissionEventService } from '../../missions/services/mission-event.service'
 import { AutoReleaseService } from '../../missions-completion/auto-release/auto-release.service'
 import { PaymentsRepository } from '../payments.repository'
+import { OutboundTransferService } from '../transfers/outbound-transfer.service'
+
+import { PaymentDomainLivemodeMismatchError } from './payment-domain-livemode.error'
 
 /**
  * Types Stripe routés par `PaymentDomainHandler`.
@@ -51,26 +54,7 @@ export const PAYMENT_DOMAIN_EVENT_TYPES = new Set<string>([
   'payment_intent.succeeded',
 ])
 
-/**
- * Erreur défense-en-profondeur Ticket 3.2 (ajustement CTO #3) — l'event
- * Stripe re-fetché côté processor doit toujours matcher l'env d'exécution
- * (`event.livemode === (APP_ENV === 'production')`). L'ingestion HTTP a
- * déjà filtré, mais on re-vérifie au handler pour parer toute injection
- * directe en DB (rejeu admin, bug processor, etc.).
- */
-export class PaymentDomainLivemodeMismatchError extends Error {
-  constructor(
-    readonly stripeEventId: string,
-    readonly eventLivemode: boolean,
-    readonly appEnvIsProduction: boolean,
-  ) {
-    super(
-      `Stripe event ${stripeEventId} livemode=${eventLivemode} ` +
-        `mismatches APP_ENV production=${appEnvIsProduction}`,
-    )
-    this.name = 'PaymentDomainLivemodeMismatchError'
-  }
-}
+export { PaymentDomainLivemodeMismatchError } from './payment-domain-livemode.error'
 
 /**
  * Cancellation reasons Stripe → mapping `failureCode` côté Payment.
@@ -102,8 +86,8 @@ export class PaymentDomainHandler {
     private readonly missions: MissionsRepository,
     private readonly missionEvents: MissionEventService,
     private readonly matching: MatchingService,
-    @Inject(forwardRef(() => AutoReleaseService))
     private readonly autoRelease: AutoReleaseService,
+    private readonly outboundTransfer: OutboundTransferService,
     config: ConfigService<Env, true>,
   ) {
     this.listingTtlMs = config.get('MISSION_LISTING_TTL_MS', { infer: true })
@@ -382,8 +366,9 @@ export class PaymentDomainHandler {
    *  5. Audit `PAYMENT_CAPTURED` (toujours) + `MISSION_COMPLETED` (si
    *     transition effective).
    *
-   * Hors-scope 3.4 :
-   *  - `stripe.transfers.create` (déléguée Ticket 3.5).
+   * Hors-scope historique 3.4 :
+   *  - `stripe.transfers.create` (implémentée Ticket 3.5 via
+   *    `OutboundTransferService.ensureOutboundTransferAfterCapture`).
    *  - Notif push prestataire « mission validée » (PRD-004).
    */
   private async onCaptured(intent: Stripe.PaymentIntent): Promise<void> {
@@ -401,6 +386,7 @@ export class PaymentDomainHandler {
         { paymentId: payment.id, intentId: intent.id },
         'payments.domain.captured.idempotent_skip',
       )
+      await this.outboundTransfer.ensureOutboundTransferAfterCapture(payment.id, 'PAYMENT_CAPTURE_WEBHOOK')
       return
     }
 
@@ -469,6 +455,11 @@ export class PaymentDomainHandler {
       )
       // Non-blocking : la capture est faite, l'auto-release sera no-op
       // au pire (idempotence Stripe).
+    }
+
+    const fresh = await this.payments.findByStripePaymentIntentId(intent.id)
+    if (fresh?.status === 'CAPTURED') {
+      await this.outboundTransfer.ensureOutboundTransferAfterCapture(fresh.id, 'PAYMENT_CAPTURE_WEBHOOK')
     }
 
     this.logger.log(

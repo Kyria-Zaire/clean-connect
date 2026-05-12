@@ -19,7 +19,7 @@
 import { createHash } from 'node:crypto'
 
 import { InjectQueue } from '@nestjs/bullmq'
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { Prisma } from '@prisma/client'
 import type { Queue } from 'bullmq'
 import type Stripe from 'stripe'
@@ -198,5 +198,83 @@ export class PaymentsWebhookService {
       err instanceof Prisma.PrismaClientKnownRequestError &&
       err.code === PRISMA_UNIQUE_VIOLATION
     )
+  }
+
+  /**
+   * PRD-003 Ticket 3.5 — liste DLQ Stripe (observabilité admin).
+   */
+  async listStripeDeadLetters(opts: { limit: number; resolved: boolean }): Promise<
+    {
+      id: string
+      externalEventId: string
+      payloadHash: string | null
+      errorMessage: string
+      attempts: number
+      lastAttemptAt: Date
+      resolvedAt: Date | null
+      createdAt: Date
+    }[]
+  > {
+    return this.prisma.webhookDeadLetter.findMany({
+      where: {
+        source: 'STRIPE',
+        ...(opts.resolved ? { resolvedAt: { not: null } } : { resolvedAt: null }),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: opts.limit,
+      select: {
+        id: true,
+        externalEventId: true,
+        payloadHash: true,
+        errorMessage: true,
+        attempts: true,
+        lastAttemptAt: true,
+        resolvedAt: true,
+        createdAt: true,
+      },
+    })
+  }
+
+  /**
+   * PRD-003 Ticket 3.5 — replay admin-only : reset `StripeWebhookEvent` + re-enqueue BullMQ.
+   * Idempotent / retry-safe : handlers métier restent idempotents sur replay.
+   */
+  async replayStripeDeadLetter(dlqId: string): Promise<void> {
+    const row = await this.prisma.webhookDeadLetter.findUnique({ where: { id: dlqId } })
+    if (!row || row.source !== 'STRIPE') {
+      throw new NotFoundException({ error: 'WEBHOOK_DLQ_NOT_FOUND' })
+    }
+    const ev = await this.prisma.stripeWebhookEvent.findUnique({
+      where: { stripeEventId: row.externalEventId },
+    })
+    if (!ev) {
+      throw new NotFoundException({ error: 'STRIPE_WEBHOOK_EVENT_NOT_FOUND' })
+    }
+    await this.prisma.stripeWebhookEvent.update({
+      where: { stripeEventId: row.externalEventId },
+      data: {
+        processingStatus: 'PENDING',
+        processingStartedAt: null,
+        processedAt: null,
+        lastError: null,
+      },
+    })
+    await this.webhookQueue.add(
+      STRIPE_WEBHOOK_PROCESS_JOB,
+      {
+        stripeEventId: row.externalEventId,
+        type: ev.type,
+        livemode: ev.livemode,
+        payloadHash: row.payloadHash ?? ev.payloadHash,
+      },
+      {
+        jobId: `stripe-webhook-replay-${row.id}-${Date.now()}`,
+        attempts: STRIPE_WEBHOOK_MAX_ATTEMPTS,
+        backoff: { type: 'exponential', delay: STRIPE_WEBHOOK_BACKOFF_BASE_MS },
+        removeOnComplete: { count: 1_000 },
+        removeOnFail: false,
+      },
+    )
+    this.logger.log({ dlqId, stripeEventId: row.externalEventId }, 'stripe.webhook.dlq.replay_enqueued')
   }
 }

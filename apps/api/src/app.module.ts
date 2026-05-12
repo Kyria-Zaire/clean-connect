@@ -134,9 +134,6 @@ import { UsersModule } from './modules/users/users.module'
     MissionsModule,
     /**
      * PRD-003 Ticket 3.1 — module Payments gated par `FF_PAYMENTS_ENABLED`.
-     * Le module se charge toujours (Nest a besoin du graph statique), mais les
-     * controllers / processors sont neutralisés si le flag est `false`
-     * (cf. `PaymentsModule.register()`).
      */
     PaymentsModule,
     /**
@@ -147,9 +144,6 @@ import { UsersModule } from './modules/users/users.module'
     /**
      * PRD-003 Ticket 3.4 — module MissionsCompletion (complete / validate /
      * report-problem + AutoReleaseJob BullMQ delayed T+48h ouvrées).
-     * Cycle forwardRef avec `PaymentsModule` (PaymentDomainHandler appelle
-     * `AutoReleaseService.cancel`, `MissionCompletionService.validate`
-     * appelle `PaymentsService.requestCapture`).
      */
     MissionsCompletionModule,
   ],

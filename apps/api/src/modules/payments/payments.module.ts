@@ -1,84 +1,109 @@
 /**
- * PRD-003 Ticket 3.1 — PaymentsModule (infra Stripe + ingestion webhook).
+ * PRD-003 — `PaymentsModule` (Tickets 3.1 → 3.5).
  *
- * Le module charge ses dépendances même si `FF_PAYMENTS_ENABLED=false` car Nest
- * exige un graph statique. Le gating se fait :
- *  - au controller : `PaymentsWebhookService.assertEnabled()` lève 503
- *  - au processor  : BullMQ est branché mais ne reçoit aucun job tant que le
- *    controller refuse l'ingestion (donc la queue reste vide ; rien à filtrer
- *    côté worker, qui reste idle).
+ * Périmètre :
+ *  - Intent client (`POST /v1/payments/intent`) + admin listing.
+ *  - Webhooks Stripe (`POST /v1/webhooks/stripe`) — ingestion + DLQ replay.
+ *  - Domain handlers (PaymentIntent / Transfer / Refund).
+ *  - Outbound transfers Stripe (capture → transfer) + reconcile cron.
+ *  - Admin refunds + DLQ controllers.
  *
- * Ce design évite des conditionnels d'import (`if FF then`) qui causent des
- * surprises en mode prod build (Webpack tree-shake les modules dynamiques).
+ * DI :
+ *  - `PaymentsRepository` EST exporté — `AutoReleaseExecutor`
+ *    (`MissionsCompletionModule`) l'injecte. Sans export explicite, Nest
+ *    boucle sur `getInstanceByContextId` au lieu d'afficher une erreur
+ *    de dépendance claire (audit Verify bisect bootstrap).
+ *  - `AutoReleaseCoreModule` ré-importé ici (sans `MissionsCompletionModule`)
+ *    pour rompre le cycle Payments ↔ Completion : `PaymentDomainHandler`
+ *    cancel le job auto-release sur `payment_intent.succeeded`.
+ *  - `ScheduleModule.forRoot()` activé au niveau global via le 1er import —
+ *    `TransferReconcileScheduler` utilise `@Cron`.
+ *  - `BullModule.registerQueue(STRIPE_WEBHOOK_QUEUE)` — file d'ingestion.
  *
- * Imports clés :
- * - `AuthModule` : pour réutiliser `JwtAccessGuard` global (`@Public()` côté
- *   webhook). Les endpoints Payments futurs (POST /missions/:id/pay, refund,
- *   etc.) en hériteront sans configuration supplémentaire.
- * - `BullModule.registerQueue` : déclaration locale de la queue webhook
- *   (la connection Redis vient de `BullModule.forRootAsync` posé en AppModule).
+ * Dette :
+ *  - TODO(debt): `TRANSFER_RETRY_QUEUE` Bull (worker isolé) — retiré
+ *    temporairement à cause d'une cohabitation DI Nest avec
+ *    `StripeWebhookProcessor` (boucle `cloneStaticInstance`). Retry
+ *    transfer = manuel via `POST /v1/admin/transfers/:id/retry`.
  */
 
 import { BullModule } from '@nestjs/bullmq'
-import { forwardRef, Module } from '@nestjs/common'
+import { Module } from '@nestjs/common'
+import { ScheduleModule } from '@nestjs/schedule'
 
 import { AuthModule } from '../auth/auth.module'
 import { MissionsModule } from '../missions/missions.module'
-import { MissionsCompletionModule } from '../missions-completion/missions-completion.module'
+import { AutoReleaseCoreModule } from '../missions-completion/auto-release/auto-release-core.module'
 
 import { AdminPaymentsController } from './admin-payments.controller'
+import { AdminRefundsAndDlqController } from './admin-refunds-dlq.controller'
+import { AdminTransfersController } from './admin-transfers.controller'
 import { STRIPE_WEBHOOK_QUEUE } from './payments.constants'
 import { PaymentsController } from './payments.controller'
 import { PaymentsRepository } from './payments.repository'
 import { PaymentsService } from './payments.service'
+import { RefundsRepository } from './refunds/refunds.repository'
+import { RefundsService } from './refunds/refunds.service'
 import { StripeClientFactory, STRIPE_CLIENT_TOKEN } from './stripe/stripe.client'
+import { OutboundTransferService } from './transfers/outbound-transfer.service'
+import { TransferReconcileScheduler } from './transfers/transfer-reconcile.scheduler'
+import { TransfersRepository } from './transfers/transfers.repository'
 import { PaymentDomainHandler } from './webhooks/payment-domain.handler'
 import { PaymentsWebhookController } from './webhooks/payments-webhook.controller'
 import { PaymentsWebhookService } from './webhooks/payments-webhook.service'
+import { RefundDomainHandler } from './webhooks/refund-domain.handler'
 import { StripeWebhookProcessor } from './webhooks/stripe-webhook.processor'
+import { TransferDomainHandler } from './webhooks/transfer-domain.handler'
 
 @Module({
   imports: [
     AuthModule,
-    // PRD-003 Ticket 3.2 — réutilise `MissionsRepository` + `MissionEventService`
-    // + `MatchingService` (exposés via `MissionsModule.exports`).
     MissionsModule,
-    // PRD-003 Ticket 3.4 — `PaymentDomainHandler.onCaptured` (webhook
-    // `payment_intent.succeeded`) appelle `AutoReleaseService.cancel`.
-    // Cycle inverse : `MissionCompletionService.validate` appelle
-    // `PaymentsService.requestCapture`. `forwardRef` côté DI au niveau
-    // service + module pour casser le cycle d'évaluation Nest.
-    forwardRef(() => MissionsCompletionModule),
+    AutoReleaseCoreModule,
+    ScheduleModule.forRoot(),
     BullModule.registerQueue({
       name: STRIPE_WEBHOOK_QUEUE,
       defaultJobOptions: {
-        // Override possible côté `queue.add(…)` (cf. service). On garde un
-        // garde-fou global pour ne jamais perdre un job par défaut.
         removeOnFail: false,
       },
     }),
   ],
   controllers: [
-    PaymentsWebhookController,
     PaymentsController,
+    PaymentsWebhookController,
     AdminPaymentsController,
+    AdminTransfersController,
+    AdminRefundsAndDlqController,
   ],
   providers: [
     StripeClientFactory,
     {
-      // PRD-003 Ticket 3.2 — singleton Stripe SDK injecté via token DI
-      // (`STRIPE_CLIENT_TOKEN`). Une seule instance partagée par tous les
-      // services payments (PaymentsService, PaymentDomainHandler, processor).
       provide: STRIPE_CLIENT_TOKEN,
       useFactory: (factory: StripeClientFactory) => factory.build(),
       inject: [StripeClientFactory],
     },
     PaymentsRepository,
     PaymentsService,
-    PaymentDomainHandler,
     PaymentsWebhookService,
     StripeWebhookProcessor,
+    PaymentDomainHandler,
+    TransferDomainHandler,
+    RefundDomainHandler,
+    TransfersRepository,
+    OutboundTransferService,
+    TransferReconcileScheduler,
+    RefundsRepository,
+    RefundsService,
   ],
-  exports: [PaymentsWebhookService, StripeClientFactory, PaymentsService],
+  exports: [
+    StripeClientFactory,
+    PaymentsRepository,
+    PaymentsService,
+    PaymentsWebhookService,
+    OutboundTransferService,
+    TransfersRepository,
+    RefundsRepository,
+    RefundsService,
+  ],
 })
 export class PaymentsModule {}
