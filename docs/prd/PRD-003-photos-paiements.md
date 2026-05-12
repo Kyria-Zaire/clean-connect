@@ -16,8 +16,8 @@
 | **ID** | `PRD-003` |
 | **Slug** | `photos-paiements` |
 | **Titre** | Photos AVANT/APRÈS + Stripe Connect Express (escrow) — sous-systèmes Media Evidence / Payment Lifecycle / Mission Completion / Stripe Connect Onboarding |
-| **Version PRD** | `0.3` (Design complet — livrables 1/5 à 5/5 livrés, sign-off final CTO en attente) |
-| **Statut** | `DESIGN_REVIEW` (Discover ✅, Design livré, sign-off CTO final attendu) |
+| **Version PRD** | `0.4` (Design ✅ signé-off, Build Ticket 3.1 livré 2026-05-12) |
+| **Statut** | `BUILD_IN_PROGRESS` (Ticket 3.1 livré, en attente validation CTO avant Ticket 3.2) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` (cadrage) → `architecte-api` + `securite` + `stripe` + `photos-rgpd` (Design) |
 | **Persona pilote Discover** | `senior-dev` |
@@ -557,17 +557,49 @@ stateDiagram-v2
 
 ## 5. Phase BUILD
 
-⛔ Bloquée tant que Design non validé CTO. **Aucune migration `schema.prisma`, aucun code, aucun PR Build avant validation Design.**
+Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO entre chaque) :
 
-**Garde-fous attendus pour Build** (anticipation rule `senior-dev` / `architecte-api` / `securite` / `stripe` / `photos-rgpd`) :
-- Webhook Stripe : signature **AVANT** désérialisation, raw body via `RawBodyRequest<Request>`.
-- Webhook Cloudinary : signature `x-cld-signature` vérifiée AVANT mutation.
-- Idempotency keys déterministes sur **toutes** les mutations Stripe.
-- Aucun `application_fee_amount` ni `transfer.destination` calculé côté client.
-- Cron de sécurité `escrow.safety-net` horaire.
-- BullMQ DLQ avec alertes.
-- Logger Pino redactor étendu (`*.cardNumber`, `*.cvv`, `*.stripeAccountId`, `*.stripeCustomerId`, `*.bankAccount.*`).
-- Soft-launch derrière `FF_PAYMENTS_ENABLED`.
+| # | Ticket | Statut | Branche / PR |
+|---|---|---|---|
+| 3.1 | Infra Stripe + Config + Webhook ingestion | ✅ **Livré 2026-05-12** | `feat/prd-003-payments-photos` |
+| 3.2 | Payment lifecycle + PaymentIntent manual capture | ⛔ Bloqué (validation CTO 3.1 requise) | — |
+| 3.3 | Cloudinary signed upload + PhotoUploadSession | ⛔ | — |
+| 3.4 | Mission completion + client validation + auto-release | ⛔ | — |
+| 3.5 | Refunds + DLQ + retries + observabilité | ⛔ | — |
+| 3.6 | Verify renforcé + audits V1–V11 + race tests | ⛔ | — |
+
+### 5.1 Ticket 3.1 — Infra Stripe + Webhook ingestion (livré 2026-05-12)
+
+**Périmètre livré** (gated `FF_PAYMENTS_ENABLED`, défaut `false`) :
+
+- ✅ Config env : `STRIPE_API_VERSION` (pinned `2025-02-24.acacia`, ADR-011), `STRIPE_WEBHOOK_TOLERANCE_SECONDS=300`, `FF_PAYMENTS_ENABLED`, `APP_VERSION`. Garde-fou boot : webhook secret placeholder interdit en prod si flag actif.
+- ✅ `apps/api/src/modules/payments/` : `PaymentsModule` + `StripeClientFactory` (apiVersion + `maxNetworkRetries: 0` + `appInfo`) + `PaymentsWebhookController` (public, raw body, 202) + `PaymentsWebhookService` (signature → livemode → hash → insert → enqueue) + `StripeWebhookProcessor` (BullMQ, lock applicatif, DLQ après 5 retries).
+- ✅ BullMQ infra : `BullModule.forRootAsync` global (Redis + `maxRetriesPerRequest: null`), queue `stripe-webhooks` avec backoff exponentiel 30s → 1m → 2m → 4m → 8m.
+- ✅ Pino redactor étendu : `stripe-signature` header, `idempotency-key`, `client_secret`, `stripeAccountId`, `stripeCustomerId`, `payment_method`, `cardNumber`, `cvv`, `captureClientUuid`, `gps.*`.
+- ✅ Codes erreur : `WEBHOOK_INVALID_SIGNATURE` (400), `WEBHOOK_LIVEMODE_MISMATCH` (400), `WEBHOOK_PAYLOAD_MALFORMED` (400), `PAYMENTS_DISABLED` (503).
+- ✅ Tests : 9 unitaires (signature/envCheck/payloadHash/FF/replay) + 6 intégration (FF off, signature absente, HMAC invalide, livemode mismatch, happy path, replay idempotent) — DB Postgres + Redis test, 57 tests intégration totaux verts.
+- ✅ OpenAPI bump `1.0.3-prd003-build-ticket-3.1-webhook-ingestion` : `WebhookAccepted202Body` étendu (`idempotent`, `eventId`), `PAYMENTS_DISABLED` ajouté à `WebhookErrorCode`, réponse `503` documentée sur la route webhook.
+
+**Hors-scope 3.1** (Tickets suivants) :
+- Mapping `Stripe.Event → DomainEvent` (PaymentIntent, Transfer, Refund, Account) → **3.2 → 3.5**.
+- Création / capture / transfer / refund Stripe → **3.2 + 3.5**.
+- Onboarding Connect Express + `account.updated` handling → **3.2** (provider payout status).
+- Replay admin DLQ → **3.5**.
+
+**`TODO(debt)` ouverts** (à clore Verify) :
+- `webhook-409-on-replay-deferred` : clarification Build CTO — replay (`P2002`) → 202 idempotent au lieu de 409 (pour ne pas piéger Stripe en boucle de retry 3 jours). Le contrat OpenAPI est aligné dans cette PR ; à reconsulter en Verify V1.
+- `payments-processor-no-domain-routing` : en 3.1 le processor marque simplement `PROCESSED` sans dispatcher de domain event ; le mapping métier arrive aux Tickets 3.2 → 3.5.
+
+### 5.2 Garde-fous transverses (rappel — actifs sur tous les tickets Build)
+
+- Webhook Stripe : signature **AVANT** désérialisation, raw body via `RawBodyRequest<Request>` ✅ (3.1).
+- Webhook Cloudinary : signature `x-cld-signature` vérifiée AVANT mutation (3.3).
+- Idempotency keys déterministes sur **toutes** les mutations Stripe (3.2, 3.5).
+- Aucun `application_fee_amount` ni `transfer.destination` calculé côté client (3.2).
+- Cron de sécurité `escrow.safety-net` horaire (3.4).
+- BullMQ DLQ avec alertes (3.1 ✅ infra, 3.5 alerting + replay admin).
+- Logger Pino redactor étendu ✅ (3.1).
+- Soft-launch derrière `FF_PAYMENTS_ENABLED` ✅ (3.1).
 
 ---
 
