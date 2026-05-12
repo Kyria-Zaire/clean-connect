@@ -22,21 +22,25 @@
 | ID | Slug | Titre | Statut | Sprint | Owner produit | Owner technique | Tag |
 |---|---|---|:-:|:-:|---|---|---|
 | [PRD-001](PRD-001-auth-jwt.md) | `auth-jwt` | Authentification JWT (signup / login / refresh / logout / me) | ✅ `DONE` | S1 | CTO | `senior-dev` + `architecte-api` + `mobile` | [`v0.1.0-auth-foundation`](../../CHANGELOG.md#v010-auth-foundation--2026-05-12) |
-| [PRD-002](PRD-002-missions-geolocalisation.md) | `missions-geolocalisation` | Missions & Géolocalisation (entity, états, scheduling, matching PostGIS) | ✅ `RELEASED` (Verify validé, merge PR #4 autorisé) | S2 | CTO | `senior-dev` + `architecte-api` + `mobile` | `v0.2.0-missions-foundation` (à tagger après merge) |
+| [PRD-002](PRD-002-missions-geolocalisation.md) | `missions-geolocalisation` | Missions & Géolocalisation (entity, états, scheduling, matching PostGIS) | ✅ `DONE` | S2 | CTO | `senior-dev` + `architecte-api` + `mobile` | [`v0.2.0-missions-foundation`](../../CHANGELOG.md) |
+| [PRD-003](PRD-003-photos-paiements.md) | `photos-paiements` | Photos AVANT/APRÈS + Stripe Connect Express (escrow + auto-release T+48h ouvrées) — 4 sous-systèmes (Onboarding / Payment Lifecycle / Media Evidence / Mission Completion) | 🟡 `DISCOVER_DRAFT` (15 Open Questions en attente CTO) | S3 | CTO | `senior-dev` (Discover) → `architecte-api` + `securite` + `stripe` + `photos-rgpd` (Design) | — |
 
 ---
 
 ## Dépendances fonctionnelles
 
 ```
-PRD-001 (Auth)
-   └─→ PRD-002 (Missions)    ← bloque
-          ├─→ PRD-003 (Paiements / Escrow Stripe)
-          └─→ PRD-004 (Photos AVANT/APRÈS + Cloudinary)
-                 └─→ PRD-005 (Notifications FCM/email)
-                        └─→ PRD-006 (Disputes / Litiges)
-                               └─→ PRD-007 (Admin dashboard)
+PRD-001 (Auth)                                ← ✅ DONE
+   └─→ PRD-002 (Missions & Géolocalisation)   ← ✅ DONE
+          └─→ PRD-003 (Photos AVANT/APRÈS + Stripe Connect Escrow)   ← 🟡 Discover en cours
+                 ├─→ PRD-004 (Notifications FCM + Email — Postmark/SendGrid)
+                 ├─→ PRD-005 (Disputes / Litiges — process complet remboursement / arbitrage)
+                 └─→ PRD-006 (Admin dashboard — paiements, DLQ, KPIs, modération)
 ```
+
+PRD-003 fusionne **Photos AVANT/APRÈS** et **Paiements Stripe Connect Express** car les deux sont indissociables :
+- les photos servent de **preuve de complétion** sans laquelle le paiement ne peut être libéré (escrow conditionnel) ;
+- le paiement n'a pas de sens sans la preuve photo (litiges impossibles).
 
 > **Règle dure** : aucune feature aval ne démarre tant que sa dépendance n'est pas en statut `DONE` (cf. [BMAD-light §0 Pourquoi](../method/BMAD.md)).
 
@@ -48,8 +52,9 @@ PRD-001 (Auth)
 |---|---|:-:|---|
 | **Sprint 0** | Bootstrap monorepo / Docker / Prisma / NestJS / Expo / CI / readyz | ✅ Terminé | [`docs/CAHIER-DES-CHARGES-v1.4.md`](../CAHIER-DES-CHARGES-v1.4.md) |
 | **Sprint 1** | PRD-001 Auth JWT (API + mobile bootstrap) | ✅ Terminé (`v0.1.0-auth-foundation`) | [PRD-001](PRD-001-auth-jwt.md) + [audit final](../security-reviews/2026-05-12-prd-001-auth-verify.md) |
-| **Sprint 2** | PRD-002 Missions & Géolocalisation | ✅ Terminé (Verify validé 2026-05-12 — sign-off CTO accordé) | [PRD-002](PRD-002-missions-geolocalisation.md) + [audit Verify](../security-reviews/2026-05-12-prd-002-missions-build-verify.md) |
-| Sprint 3 | PRD-003 Paiements Stripe Connect Express + Escrow + Photos AVANT/APRÈS | ⏳ À démarrer | — |
+| **Sprint 2** | PRD-002 Missions & Géolocalisation | ✅ Terminé (`v0.2.0-missions-foundation` — sign-off CTO 2026-05-12) | [PRD-002](PRD-002-missions-geolocalisation.md) + [audit Verify](../security-reviews/2026-05-12-prd-002-missions-build-verify.md) |
+| **Sprint 3** | PRD-003 Photos AVANT/APRÈS + Stripe Connect Express (escrow) | 🟡 Discover ouvert (2026-05-12) — 15 Open Questions résiduelles à trancher CTO avant Design | [PRD-003](PRD-003-photos-paiements.md) |
+| Sprint 4+ | PRD-004 (Notifications FCM/email) → PRD-005 → PRD-006 (Disputes) → PRD-007 (Admin) — bloqués tant que PRD-003 non `DONE` | ⏳ Backlog | — |
 
 ---
 
