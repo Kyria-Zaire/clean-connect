@@ -5,7 +5,7 @@
 > Méthode appliquée : [BMAD-light](../method/BMAD.md).
 > Dépendances : [PRD-001 Auth JWT](PRD-001-auth-jwt.md) ✅ `DONE`, [PRD-002 Missions & Géolocalisation](PRD-002-missions-geolocalisation.md) ✅ `RELEASED`.
 
-> **Statut** : 🟡 **DISCOVER_DRAFT** — en attente validation CTO des Open Questions résiduelles avant Design.
+> **Statut** : ✅ **DISCOVER_DONE** — sign-off CTO 2026-05-12 (cf. §3.6). Design ouvert sur `design/prd-003-photos-paiements`.
 
 ---
 
@@ -16,8 +16,8 @@
 | **ID** | `PRD-003` |
 | **Slug** | `photos-paiements` |
 | **Titre** | Photos AVANT/APRÈS + Stripe Connect Express (escrow) — sous-systèmes Media Evidence / Payment Lifecycle / Mission Completion / Stripe Connect Onboarding |
-| **Version PRD** | `0.1` (Discover draft) |
-| **Statut** | `DISCOVER_DRAFT` |
+| **Version PRD** | `0.2` (Discover validé) |
+| **Statut** | `DISCOVER_DONE` (sign-off CTO 2026-05-12) → ouverture Design |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` (cadrage) → `architecte-api` + `securite` + `stripe` + `photos-rgpd` (Design) |
 | **Persona pilote Discover** | `senior-dev` |
@@ -63,7 +63,7 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 ### 1.4 Out of scope (refusé MVP — ne pas dériver)
 
 - ❌ Multi-prestataires sur une même mission (pas de partage de pot).
-- ❌ Litiges complexes / arbitrage / remboursement partiel (placeholder seulement, vrai workflow = PRD-006).
+- ❌ Litiges complexes / arbitrage / remboursement partiel (placeholder seulement, vrai workflow = **PRD-005**).
 - ❌ Facturation PDF automatique (le reçu Stripe email suffit MVP).
 - ❌ Commission dynamique (fixe **18 %** comme PRD-002 §4.4 cahier v1.4).
 - ❌ Avoirs / wallet / crédit utilisateur.
@@ -86,9 +86,9 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 **Pour** pouvoir recevoir mes paiements après mes missions
 
 - [ ] **AC-A.1** — POST `/payments/connect/onboarding-link` (PRESTATAIRE) crée un compte `account.type='express'` (ou réutilise s'il existe) et retourne un `accountLink.url` (TTL Stripe, généralement 5 min).
-- [ ] **AC-A.2** — Webhook `account.updated` met à jour `users.stripeAccountId`, `users.stripeChargesEnabled`, `users.stripeTransfersEnabled`, `users.stripePayoutsEnabled`, `users.stripeRequirementsCurrentlyDue` (JSON).
-- [ ] **AC-A.3** — Un prestataire dont `transfers !== 'active'` ne peut **pas** apparaître dans le matching (extension du filtre `findEligiblePrestataires` PRD-002 §3) — flag `users.stripeTransfersEnabled` ajouté au WHERE matching.
-- [ ] **AC-A.4** — Un prestataire `transfers !== 'active'` qui tente d'`accept` une mission reçoit `403 PRESTATAIRE_PAYMENT_NOT_READY`.
+- [ ] **AC-A.2** — Webhook `account.updated` met à jour `users.stripeAccountId`, `users.stripeChargesEnabled`, `users.stripeTransfersEnabled`, `users.stripePayoutsEnabled`, `users.stripeRequirementsCurrentlyDue` (JSON), et **calcule** un enum dérivé **`ProviderPayoutStatus`** (cf. décision CTO Q7) avec valeurs : `NOT_ONBOARDED | ONBOARDING_IN_PROGRESS | IDENTITY_PENDING | PAYOUTS_DISABLED | CHARGES_DISABLED | READY`. Une seule colonne dénormalisée à filtrer dans le matching.
+- [ ] **AC-A.3** — Un prestataire dont `providerPayoutStatus !== 'READY'` ne peut **pas** apparaître dans le matching (extension du filtre `findEligiblePrestataires` PRD-002 §3) — clause `WHERE providerPayoutStatus = 'READY'` ajoutée au matching.
+- [ ] **AC-A.4** — Un prestataire `providerPayoutStatus !== 'READY'` qui tente d'`accept` une mission reçoit `403 PRESTATAIRE_PAYMENT_NOT_READY` avec `reason` détaillé (`onboarding_incomplete | payouts_disabled | charges_disabled | identity_pending`).
 - [ ] **AC-A.5** — Le compte Stripe est créé avec `metadata: { userId, env: NODE_ENV }`, `business_type: 'individual'` (par défaut MVP), `country: 'FR'`.
 
 **Cas d'erreur à couvrir** :
@@ -103,17 +103,18 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 **Je veux** payer la mission de manière sécurisée
 **Pour** réserver le créneau et libérer les fonds quand le travail est validé
 
-- [ ] **AC-B.1** — Le paiement n'est possible **que** sur une mission `ACCEPTED` dont le prestataire a `stripeTransfersEnabled = true`.
-- [ ] **AC-B.2** — POST `/payments/missions/:id/intent` (CLIENT owner) crée un PaymentIntent avec **idempotency-key serveur déterministe** = `pi-mission-${missionId}-${attemptNumber}` et retourne `clientSecret`.
-- [ ] **AC-B.3** — Mécanique escrow = **separate charges and transfers** (cf. ADR-008 à créer Design — voir §3.3 Q1) : capture immédiate sur compte plateforme, transfer programmé après validation. Pas de `transfer_data.destination` au moment du PaymentIntent.
+- [ ] **AC-B.1** — Le paiement intervient **avant publication** (cf. décision CTO Q4 + D15 modifié) : `DRAFT → PENDING_PAYMENT → PAID → PUBLISHED`. Aucune mission n'est exposée au matching tant qu'elle n'est pas `PAID` (i.e. `paymentStatus = AUTHORIZED` côté Stripe).
+- [ ] **AC-B.2** — POST `/payments/missions/:id/intent` (CLIENT owner) crée un PaymentIntent **`capture_method='manual'`** (cf. décision CTO Q1, ADR-008) avec `automatic_payment_methods.enabled=true` (3DS automatique, cf. Q8) + **idempotency-key serveur déterministe** = `pi-mission-${missionId}-${attemptNumber}`. Retourne `clientSecret`.
+- [ ] **AC-B.3** — Mécanique « escrow » (wording produit à adapter, ce n'est pas un escrow légal cf. ADR-008) = **`capture_method='manual'` + delayed transfer** : autorisation au paiement, capture déclenchée à validation client (ou auto-release T+48h ouvrées), Transfer Stripe Connect ensuite vers le prestataire. Pas de `transfer_data.destination` au PaymentIntent.
 - [ ] **AC-B.4** — Le `application_fee_amount` (commission 18 % HT) est **calculé serveur**, jamais transmis depuis le client (cf. règle `stripe`).
-- [ ] **AC-B.5** — Webhook `payment_intent.succeeded` → mission passe à `PAID`, audit `MissionEvent { type: 'PAYMENT_CAPTURED' }`. Aucune transition basée sur la confirmation **front** (frontend says success ≠ source de vérité).
-- [ ] **AC-B.6** — Webhook `payment_intent.payment_failed` → mission reste `ACCEPTED` (NB : pas `PENDING_PAYMENT` — voir Q4 §3.3), audit `PAYMENT_FAILED`. Le client peut ré-essayer (nouvelle attempt → idempotency-key change `attemptNumber`).
-- [ ] **AC-B.7** — `PaymentStatus` lifecycle complet en DB : `PENDING → AUTHORIZED → CAPTURED → RELEASE_PENDING → RELEASED → REFUNDED | DISPUTED | FAILED` avec contraintes de transitions strictes (machine d'état dédiée, pattern PRD-002).
-- [ ] **AC-B.8** — Tous les events Stripe `payment_intent.*`, `charge.*`, `transfer.*`, `payout.*`, `account.updated`, `charge.dispute.*`, `radar.early_fraud_warning.*` sont écoutés et persistés en `stripe_events` (table dédiée, déduplication via `stripe_events.id` UNIQUE).
-- [ ] **AC-B.9** — Aucun PaymentIntent / Transfer / Refund créé sans `idempotencyKey` Stripe (éviter double capture / double payout).
-- [ ] **AC-B.10** — Un PaymentIntent ne peut être créé deux fois pour la même mission tant que le précédent est en `PENDING / AUTHORIZED / CAPTURED` (contrainte DB + service).
+- [ ] **AC-B.5** — Webhook `payment_intent.amount_capturable_updated` (= autorisation OK) → `paymentStatus: AUTHORIZED`, mission passe à `PAID → PUBLISHED`, audit `MissionEvent { type: 'PAYMENT_AUTHORIZED' }`. Aucune transition basée sur la confirmation **front** (frontend says success ≠ source de vérité).
+- [ ] **AC-B.6** — Webhook `payment_intent.payment_failed` → mission reste `PENDING_PAYMENT` (cf. Q4 + D15 corrigé), audit `PAYMENT_FAILED`. Le client peut ré-essayer (nouvelle attempt → idempotency-key change `attemptNumber`). Pas de smart retries (Q5).
+- [ ] **AC-B.7** — `PaymentStatus` lifecycle complet en DB : `PENDING → AUTHORIZED → CAPTURED → RELEASE_PENDING → RELEASED → REFUNDED | DISPUTED | FAILED` avec contraintes de transitions strictes (machine d'état dédiée, pattern PRD-002). État `AUTHORIZED` = autorisation Stripe valide mais non capturée (capture déclenchée à validation client / auto-release).
+- [ ] **AC-B.8** — Tous les events Stripe `payment_intent.*`, `charge.*`, `transfer.*`, `payout.*`, `account.updated`, `charge.dispute.*`, `radar.early_fraud_warning.*` sont écoutés et persistés en table dédiée **`StripeWebhookEvent`** (cf. D19) avec colonnes `stripeEventId UNIQUE / type / payloadHash (sha256) / processedAt / status`. Déduplication par `stripeEventId UNIQUE`. `payloadHash` permet de détecter une re-livraison Stripe avec payload divergent (tampering / bug).
+- [ ] **AC-B.9** — Aucune mutation Stripe créée sans `idempotencyKey` (D18 renforcement) : `capture`, `refund`, `transfer`, traitement webhook (job BullMQ `jobId` déterministe). Format clé : `<action>-<missionId>-<attempt>`.
+- [ ] **AC-B.10** — Un PaymentIntent ne peut être créé deux fois pour la même mission tant que le précédent est en `PENDING / AUTHORIZED / CAPTURED` (contrainte DB UNIQUE conditionnel + service).
 - [ ] **AC-B.11** — `assertEnvConsistency(event.livemode === isProdEnv)` rejette tout webhook qui mélange test/live (ex: clé `sk_test_*` reçoit un event `livemode=true`).
+- [ ] **AC-B.12** — Stripe SDK initialisé avec `apiVersion = env.STRIPE_API_VERSION` (cf. Q12 + ADR-011) — version pinnée explicitement, jamais `latest`. Bumps tracés via ADR.
 
 **Cas d'erreur à couvrir** :
 - [ ] Webhook reçu avec signature invalide → 400, jamais traité.
@@ -131,10 +132,13 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 **Pour** prouver mon travail et débloquer le paiement
 
 - [ ] **AC-C.1** — POST `/photos/sign` (PRESTATAIRE assigné de la mission) retourne une signature Cloudinary signed upload + un `cloudinaryPublicId` calculé serveur (`<env>/missions/<missionId>/<phase>/<uuid>`).
-- [ ] **AC-C.2** — **Le binaire ne transite jamais par l'API NestJS** — upload mobile → Cloudinary direct.
+- [ ] **AC-C.2** — **Le binaire ne transite jamais par l'API NestJS** — upload **multipart direct** mobile → Cloudinary (cf. décision CTO D16). **Interdit : base64 uploads** (mémoire mobile + bande passante + charge serveur).
 - [ ] **AC-C.3** — Idempotence : la même `uuid` (UUID v4 généré côté mobile **avant** capture) renvoyée 2× → 1 seul enregistrement DB (UNIQUE constraint), même `cloudinaryPublicId`.
-- [ ] **AC-C.4** — Cloudinary upload preset force : `f_auto, q_auto, type=private, exif=strip` (anti-fuite GPS / device).
-- [ ] **AC-C.5** — Metadata DB **obligatoires** : `missionId`, `phase` (`BEFORE | AFTER`), `uploadedBy`, `uploadedAt`, `clientLat`, `clientLng` (envoyées par mobile, séparément de l'EXIF), `clientCheckSumSha256`, `cloudinaryPublicId`.
+- [ ] **AC-C.4** — Cloudinary upload preset force : `type=private, exif=strip` (anti-fuite GPS device).
+  - **Original sécurisé** conservé (sans transformation, pour audit/litige) — public_id `<env>/missions/<missionId>/<phase>/<uuid>/original` (cf. décision CTO D17).
+  - **Version compressée display** dérivée Cloudinary à la volée (`f_auto, q_auto, w_1600`) accessible aux clients via signed URL — public_id `<env>/missions/<missionId>/<phase>/<uuid>/display`.
+  - Les deux versions partagent le même `Photo.id` côté DB, distinguées par enum `PhotoVariant` (`ORIGINAL | DISPLAY`).
+- [ ] **AC-C.5** — Metadata DB **obligatoires** : `missionId`, `phase` (enum strict `PhotoPhase`: `BEFORE | AFTER` cf. D20), `uploadedBy`, `uploadedAt`, `clientLat?`, `clientLng?`, `clientGpsAccuracyMeters?`, `gpsMissing` (boolean, cf. Q3), `clientCheckSumSha256`, `cloudinaryPublicId`.
 - [ ] **AC-C.6** — Webhook Cloudinary `notification_type=upload` met à jour `photos.status=UPLOADED`, `photos.syncedAt`, `photos.bytes`, `photos.width`, `photos.height` après vérification signature `x-cld-signature`.
 - [ ] **AC-C.7** — **Minimum bloquant** (cf. décision CTO) :
   - **3 photos `BEFORE` synchronisées** sont nécessaires pour passer la mission `PAID → IN_PROGRESS`.
@@ -162,12 +166,12 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 - [ ] **AC-D.3** — POST `/missions/:id/finish` (PRESTATAIRE assigné) → `IN_PROGRESS → CLIENT_VALIDATION_PENDING` **uniquement si** ≥ 5 photos `AFTER` synchronisées.
 - [ ] **AC-D.4** — Sur `CLIENT_VALIDATION_PENDING`, le système programme :
   - 1 job BullMQ delayed `escrow.auto-release` à `addBusinessHoursParis(now, 48)` (Europe/Paris, jours fériés FR exclus).
-  - 3 jobs delayed `notif.reminder` à T+24h, T+36h, T+47h ouvrées.
-- [ ] **AC-D.5** — POST `/missions/:id/validate` (CLIENT owner) → `CLIENT_VALIDATION_PENDING → COMPLETED` immédiat, déclenche `payments.transferToProvider()` (Stripe Transfer API avec idempotencyKey = `transfer-mission-${missionId}`), annule le job `escrow.auto-release`.
-- [ ] **AC-D.6** — Job `escrow.auto-release` : revalide les invariants (`canReleaseEscrow`) → si OK : transfer, `COMPLETED`. Sinon : audit `AUTO_RELEASE_BLOCKED` + alerte admin (ne change pas le state).
+  - 3 jobs delayed `notif.reminder` à T+24h, T+36h, T+47h ouvrées (push FCM **+** email Resend cf. Q9 + Q10).
+- [ ] **AC-D.5** — POST `/missions/:id/validate` (CLIENT owner) → `CLIENT_VALIDATION_PENDING → COMPLETED` immédiat. Déclenche en séquence dans une **queue/job** (jamais synchrone, cf. Q1 + D9) : (1) `paymentIntents.capture()` avec `idempotencyKey = capture-mission-${missionId}`, (2) Transfer Stripe Connect avec `idempotencyKey = transfer-mission-${missionId}`. Annule le job `escrow.auto-release`.
+- [ ] **AC-D.6** — Job `escrow.auto-release` : revalide les invariants (`canReleaseEscrow`) → si OK : capture + transfer + `AUTO_RELEASED → COMPLETED`. Sinon : audit `AUTO_RELEASE_BLOCKED` + alerte admin (ne change pas le state).
 - [ ] **AC-D.7** — Cron horaire de **sécurité** `escrow.safety-net` : scanne les missions en `CLIENT_VALIDATION_PENDING` qui ont dépassé `now + 48h ouvrées + 1h marge` et n'ont pas été libérées (delayed job perdu) → tentative + alerte si échec.
-- [ ] **AC-D.8** — `canReleaseEscrow(missionId)` vérifie : (a) mission status ∈ `{ CLIENT_VALIDATION_PENDING, COMPLETED }`, (b) ≥ 3 photos BEFORE syncées, (c) ≥ 5 photos AFTER syncées, (d) pas de litige `DISPUTE_OPEN`, (e) `paymentStatus = CAPTURED`, (f) prestataire `stripeTransfersEnabled = true`.
-- [ ] **AC-D.9** — POST `/missions/:id/dispute` (CLIENT owner, fenêtre = T+48h ouvrées max après `CLIENT_VALIDATION_PENDING`) → `DISPUTE_OPEN`, annulation job `escrow.auto-release`, audit `DISPUTE_OPENED { reason }`. Process litige détaillé = PRD-006.
+- [ ] **AC-D.8** — `canReleaseEscrow(missionId)` vérifie : (a) mission status ∈ `{ CLIENT_VALIDATION_PENDING, AUTO_RELEASE_PENDING }`, (b) ≥ 3 photos BEFORE syncées, (c) ≥ 5 photos AFTER syncées, (d) pas de litige `DISPUTE_OPEN`, (e) `paymentStatus = AUTHORIZED` (autorisation Stripe encore valide, pas expirée), (f) prestataire `providerPayoutStatus = 'READY'`.
+- [ ] **AC-D.9** — POST `/missions/:id/dispute` (CLIENT owner, fenêtre = T+48h ouvrées max après `CLIENT_VALIDATION_PENDING`) → `DISPUTE_OPEN`, annulation job `escrow.auto-release`, audit `DISPUTE_OPENED { reason }`. Process litige détaillé = **PRD-005**.
 
 **Cas d'erreur à couvrir** :
 - [ ] Concurrence : 2 POST `/finish` simultanés du même prestataire → un seul gagne (lock optimiste UPDATE conditionnel pattern PRD-002).
@@ -196,9 +200,9 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 
 - [x] `apps/api/src/modules/payments/` — **NOUVEAU** : Stripe Connect Express, PaymentIntents, Transfers, escrow state machine, webhooks Stripe.
 - [x] `apps/api/src/modules/photos/` — **NOUVEAU** : signed URL upload, webhook Cloudinary, ownership, retention.
-- [x] `apps/api/src/modules/missions/` — **EXTENSION** : nouveaux états `PAID / IN_PROGRESS / CLIENT_VALIDATION_PENDING / COMPLETED / DISPUTE_OPEN / REFUNDED`, hooks photo count, hook `stripeTransfersEnabled` dans `findEligiblePrestataires`.
-- [x] `apps/api/src/modules/notifications/` — **NOUVEAU** (ou extension future PRD-005) : rappels push T+24h/T+36h/T+47h. **Décision MVP** : juste log + email (FCM repoussé PRD-005, voir Q9 §3.3).
-- [x] `apps/api/src/modules/disputes/` — **PLACEHOLDER** : route POST `/missions/:id/dispute` qui passe en `DISPUTE_OPEN`. Vrai workflow = PRD-006.
+- [x] `apps/api/src/modules/missions/` — **EXTENSION** : nouveaux états (cf. §3.5 v0.2 : `PENDING_PAYMENT / PAID / IN_PROGRESS / CLIENT_VALIDATION_PENDING / AUTO_RELEASE_PENDING / AUTO_RELEASED / COMPLETED / DISPUTE_OPEN / REFUNDED`), hooks photo count, filtre `providerPayoutStatus = 'READY'` dans `findEligiblePrestataires`.
+- [x] `apps/api/src/modules/notifications/` — **NOUVEAU module minimal** (cf. décision CTO Q9) : rappels **push FCM + email Resend** à T+24h/T+36h/T+47h ouvrées. Le module complet (templates riches, in-app, settings utilisateur) reste dans le scope **PRD-004**.
+- [x] `apps/api/src/modules/disputes/` — **PLACEHOLDER** : route POST `/missions/:id/dispute` qui passe en `DISPUTE_OPEN`. Vrai workflow = **PRD-005**.
 - [x] `apps/api/src/queue/processors/` — **NOUVEAU** : `escrow-auto-release.processor.ts`, `stripe-webhook.processor.ts`, `cloudinary-webhook.processor.ts`, `photos-purge.processor.ts`.
 - [x] `apps/mobile/src/features/payments/` — **NOUVEAU** : intégration `@stripe/stripe-react-native` (PaymentSheet), écrans onboarding Connect, écrans validation client.
 - [x] `apps/mobile/src/features/photos/` — **NOUVEAU** : capture (expo-camera), compression (expo-image-manipulator 1600px qualité 75), file MMKV, sync background (expo-task-manager + expo-background-fetch).
@@ -207,30 +211,30 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 - [x] `apps/api/prisma/schema.prisma` — **EXTENSION** : `Payment`, `StripeEvent`, `Photo`, `WebhookDeadLetter`, extension `User` (champs Stripe), extension `Mission` (états + relations).
 - [x] Configuration / infra / CI : nouveaux env vars Stripe + Cloudinary, secrets manager, webhook endpoint exposé HTTPS (ngrok/cloudflare en dev, vrai domaine en preprod/prod).
 
-### 3.3 Open questions (à résoudre AVANT Design)
+### 3.3 Open questions — toutes `RESOLVED` (sign-off CTO 2026-05-12)
 
-> Décisions CTO **déjà tranchées** (issues du message d'ouverture) — sont consignées en §3.4 ci-dessous.
-> Ce tableau ne liste que les questions **résiduelles** qui doivent être tranchées par le CTO avant validation Discover.
+> Décisions CTO **déjà tranchées** au brief d'ouverture sont consignées en §3.4 ci-dessous (D1-D15).
+> Ce tableau liste les **15 questions résiduelles** soulevées en Discover, **toutes tranchées** par le CTO le 2026-05-12.
 
-| # | Question | Owner | Statut | Réponse |
-|---|---|---|---|---|
-| **Q1** | **Mécanique escrow exacte** — le CTO a écrit "manual capture + delayed transfer", mais ce sont 2 mécaniques **distinctes** : (a) `capture_method='manual'` (autorisation puis capture, **mais l'autorisation expire à 7j sur Visa/MC** → si auto-release T+48h ouvrées tombe au-delà, échec capture) ; (b) `capture_method='automatic'` + Transfer API séparé (**capture immédiate côté plateforme + transfer programmé**, c'est ce que stripe.mdc & cahier v1.4 §4.3 décrivent déjà comme "separate charges and transfers"). **Reco senior-dev : (b) — pas d'expiration, treasury sur compte plateforme contrôlé, conforme à la rule existante**. À confirmer CTO. | CTO | `OPEN` | _en attente_ |
-| **Q2** | **Réconciliation rétention photos** : règle `.cursor/rules/photos-rgpd.mdc` dit **12 mois**, décision CTO PRD-003 dit **30 jours** post-completion. La nouvelle décision est plus courte donc plus protectrice RGPD ✅, mais il faut acter via un **ADR** + mettre à jour la règle Cursor. **Question** : la rétention `30j` s'applique-t-elle à la `mission.completedAt` ou à `mission.disputeResolvedAt` (si litige) ? Et **qui** déclenche le purge job (cron quotidien recommandé) ? | CTO | `OPEN` | _en attente_ |
-| **Q3** | **Géolocalisation des photos** — le CTO demande `lat/lng` dans la metadata photo. EXIF GPS Cloudinary doit être stripé (`exif=strip`) pour éviter fuite via signed URL. **Reco** : (a) strip EXIF Cloudinary, (b) le mobile envoie **séparément** `clientLat / clientLng / accuracy` dans le body POST `/photos/sign` (sources : `expo-location` au moment de la capture), (c) backend stocke en DB (jamais réinjecté dans Cloudinary). **Question** : si l'utilisateur refuse la permission GPS, on autorise quand même l'upload (et `clientLat/lng` = null) ou on bloque ? Reco MVP : autoriser, logger un warning. | CTO | `OPEN` | _en attente_ |
-| **Q4** | **Workflow paiement vs acceptation** — où s'insère `PAID` dans la machine d'état ? Variante A : **pré-paiement** (CLIENT paie avant publication, fonds bloqués dès création — friction client mais pas de no-show). Variante B : **post-acceptation** (`ACCEPTED → PENDING_PAYMENT → PAID`, le client paie une fois qu'un prestataire l'a accepté — moins de friction client mais risque de no-show paiement). **Reco senior-dev : variante B** (UX standard Uber/Doctolib + cohérent avec lock optimiste prestataire PRD-002). À confirmer CTO. | CTO | `OPEN` | _en attente_ |
-| **Q5** | **Bouton "Valider et débloquer"** — message CTO : *"Validation manuelle par le prestataire (bouton « Valider et débloquer ») ou auto-déblocage après T+48h"*. Mais c'est étrange : c'est le **prestataire** qui demanderait son propre déblocage de fonds ? Le workflow proposé en §7 du message CTO dit `AFTER_UPLOADED → CLIENT_VALIDATION_PENDING → AUTO_RELEASE_PENDING → COMPLETED`, ce qui implique que c'est le **client** qui valide (ou silence ⇒ auto-release). **Reco** : c'est bien le **CLIENT** qui valide (cf. cahier v1.4 §4.3). Demande de confirmation explicite CTO. | CTO | `OPEN` | _en attente_ |
-| **Q6** | **Marchand de record sur le reçu Stripe** — avec "plateforme absorbe les frais" + Stripe Connect + commission 18 %, on est en pratique en **Destination charges** ou **Separate charges and transfers**. Dans les deux cas, le **marchand de record est Clean Connect**, le reçu mentionne Clean Connect (pas le prestataire). Le prestataire n'est qu'un **bénéficiaire de transfert**. C'est l'architecture la plus simple MVP. **Question** : le prestataire doit-il pouvoir voir son propre reçu / dashboard Stripe Express (Stripe propose un dashboard prestataire natif) ou on gère tout côté admin Clean Connect MVP ? Reco : activer le dashboard Stripe Express prestataire (gratuit, Stripe-hébergé, conforme). | CTO | `OPEN` | _en attente_ |
-| **Q7** | **Onboarding strict vs souple** — un prestataire dont `transfers !== 'active'` doit-il : (a) être exclu du matching (le client ne le voit pas, pas de no-show paiement), ou (b) apparaître mais bloqué à l'`accept` ? **Reco senior-dev : (a) — strict**. Cohérent avec exclusions PRD-002 §5. À confirmer CTO. | CTO | `OPEN` | _en attente_ |
-| **Q8** | **Paiement carte non-3DS** — Stripe Radar peut rejeter, ou demander 3DS dynamique. Faut-il **forcer 3DS** sur tous les paiements MVP (réduit fraude mais friction +5 % drop-off conversion observé industrie) ou laisser Stripe choisir (`request_three_d_secure='automatic'`) ? Reco MVP : **automatique** (Stripe optimise le risk vs friction). À confirmer. | CTO | `OPEN` | _en attente_ |
-| **Q9** | **Notifications rappel auto-release** (T+24h/36h/47h) — FCM push **ou** email **ou** les deux ? FCM nécessite le module notifications complet (PRD-005 prévu après). **Reco MVP** : email seulement (SendGrid/Postmark) + 1 banner persistant in-app sur l'écran mission. Push FCM = PRD-005. À confirmer CTO. | CTO | `OPEN` | _en attente_ |
-| **Q10** | **Provider email transactionnel** — SendGrid ou Postmark (cf. CLAUDE.md mentions les deux) ? **Reco senior-dev : Postmark** (DX meilleure, IP dédiées par défaut, parsing inbound facile pour les disputes futures, prix raisonnable < 500k mails/mois). À confirmer CTO. | CTO | `OPEN` | _en attente_ |
-| **Q11** | **Currency MVP** — confirmé EUR seulement ? Tous les `Mission.estimatedPriceCents` sont déjà en euros (PRD-002). Devises multiples = backlog v2. | CTO | `OPEN` | _en attente_ |
-| **Q12** | **Stripe API version pinnée** — doit-on pin une version Stripe (`apiVersion: '2025-06-30.basil'` ou similaire) au boot pour garantir reproductibilité ? **Reco** : oui, pin une version explicite + ADR pour tracer les bumps. | CTO | `OPEN` | _en attente_ |
-| **Q13** | **Géofencing soft des photos** — si la lat/lng de la photo AFTER est à > 500m de l'adresse mission, on log un warning ou on bloque ? **Reco MVP** : log + flag `photo.geoOutlier=true` pour audit, **pas de blocage** (le prestataire peut prendre une photo dans un local technique ou en sortant). À confirmer. | CTO | `OPEN` | _en attente_ |
-| **Q14** | **Tax / TVA** — Clean Connect facture **TTC** au client, transfère **HT moins commission** au prestataire ? Ou bien le prestataire reçoit son net après commission, et la TVA reste un sujet entre lui et l'État (auto-entrepreneur sous franchise) ? **Question** : le `application_fee_amount` est calculé sur le HT ou TTC ? **Reco** : MVP = on assume que tous les prestataires sont auto-entrepreneurs sous franchise TVA, donc on facture TTC = HT, commission 18 % du TTC. À confirmer (sera affiné PRD-006 disputes / facturation). | CTO + référent compta | `OPEN` | _en attente_ |
-| **Q15** | **Soft-launch / feature flag** — on déploie PRD-003 derrière un `FF_PAYMENTS_ENABLED` (env var simple, pas de service feature flags MVP) qui permet de couper toute la chaîne paiement si problème détecté en prod ? Reco : oui, flag simple. | CTO | `OPEN` | _en attente_ |
+| # | Question | Décision CTO finale | Statut | Note Design |
+|---|---|---|:-:|---|
+| **Q1** | Mécanique escrow exacte | **`capture_method='manual'` + delayed transfer**. Pas d'escrow légal, **wording produit à adapter**. Pas de destination charges immédiates, pas d'automatic transfer, pas de payout synchrone. **ADR-008 obligatoire**. | ✅ `RESOLVED` | ⚠️ Garde-fou Design : autorisation Stripe Visa/MC expire ~7 jours. Auto-release T+48h ouvrées tient (~5j calendaires max ponts longs). À documenter en limite produit ADR-008. |
+| **Q2** | Rétention photos | **30 jours par défaut** (`defaultRetentionDays = 30`). Exceptions : litige, fraude, obligation légale/comptable. **ADR-010 + maj `.cursor/rules/photos-rgpd.mdc`**. | ✅ `RESOLVED` | Rétention basée sur `mission.completedAt` ; reset si `dispute.openedAt` actif (cron skip si litige). |
+| **Q3** | GPS obligatoire ? | **Oui mais tolérance contrôlée** : photos BEFORE/AFTER → GPS fortement recommandé. Si absent : mission possible mais `gpsMissing = true` + flag review interne potentiel. **Pas de hard-block MVP** (Android perms, parking souterrain, edge cases). | ✅ `RESOLVED` | DB : champs `clientLat/Lng` nullable, `gpsMissing` boolean dérivé. |
+| **Q4** | Placement de PAID dans le workflow | **PAID AVANT intervention/publication** : `DRAFT → PENDING_PAYMENT → PAID → MISSION_PUBLISHED`. Jamais de mission publiée sans paiement autorisé. **Très important business**. | ✅ `RESOLVED` | ⚠️ **Refonte machine d'état mission** vs §3.5 v0.1. Voir §3.5 v0.2 ci-dessous. |
+| **Q5** | Qui valide la mission ? | **Le CLIENT valide**. Flow : `AFTER_UPLOADED → CLIENT_VALIDATION_PENDING → COMPLETED` (validation manuelle), ou sinon `AUTO_RELEASE_PENDING → AUTO_RELEASED → COMPLETED` (T+48h ouvrées). | ✅ `RESOLVED` | UI mobile : bouton "Valider la mission" côté CLIENT. Côté prestataire : pas de bouton de release. |
+| **Q6** | Merchant of record | **MVP : la plateforme est merchant of record**. Simplifie Stripe / UX / remboursements / support. | ✅ `RESOLVED` | Reçu Stripe = Clean Connect. Le prestataire reçoit ses fonds via Transfer Connect uniquement. |
+| **Q7** | Onboarding strict prestataire | **Oui : strict**. Le provider ne peut PAS accepter de mission si Connect onboarding incomplet, payouts disabled, charges disabled, identity pending. **Créer enum `ProviderPayoutStatus`**. | ✅ `RESOLVED` | Cf. AC-A.2 / AC-A.3 / AC-A.4. Filtre matching dénormalisé pour perf. |
+| **Q8** | 3DS | **Stripe automatique**. Aucune logique custom MVP. Utiliser **`automatic_payment_methods.enabled = true`**. | ✅ `RESOLVED` | Inclus dans la création PaymentIntent (AC-B.2). |
+| **Q9** | Notifications | **Push mobile + email transactionnel minimal**. Pas SMS MVP. | ✅ `RESOLVED` | ⚠️ Le scope MVP intègre **FCM + email** dès PRD-003 (au lieu de différer FCM en PRD-004 comme proposé Discover). À planifier en Build : module `notifications` minimal au moins pour les rappels auto-release. |
+| **Q10** | Email provider | **Resend** ([resend.com](https://resend.com)) — DX excellente, React Email, setup rapide. | ✅ `RESOLVED` | ADR-011 ajusté : tracer choix Resend + comparer Postmark/SendGrid en alternative refusée §8.2. |
+| **Q11** | Currency | **EUR uniquement MVP**. Stockage : **integer cents** (toujours). | ✅ `RESOLVED` | Aligné PRD-002 (`estimatedPriceCents`). |
+| **Q12** | Stripe API version | **Version figée**. Jamais `latest`. **Créer `STRIPE_API_VERSION` dans config**. **ADR-011 (Stripe API pinning)** recommandé. | ✅ `RESOLVED` | ⚠️ Ajustement ADR : ADR-011 traite **Stripe API pinning**, ADR-012 traite **Email provider Resend** (réorganisation §4 ci-dessous). |
+| **Q13** | Geofencing photos | **Soft geofencing MVP** : comparer photo gps vs mission gps ; si distance > seuil → `flagSuspicious = true`. **Ne pas bloquer automatiquement**. | ✅ `RESOLVED` | Seuil par défaut à fixer Design (proposition senior-dev : 500 m). |
+| **Q14** | TVA | **Hors scope MVP**. Stocker seulement **`vatRateSnapshot`** sur la mission/payment pour usage futur (facturation auto, exports compta). **Pas de moteur TVA MVP**. | ✅ `RESOLVED` | Champ `Payment.vatRateSnapshot Decimal?` ; pas de logique de répartition HT/TTC MVP. |
+| **Q15** | Feature flags | **Oui** au minimum sur : `auto release`, `disputes`, `payouts`, `GPS enforcement`. **Via env/config simple**. Pas LaunchDarkly MVP. | ✅ `RESOLVED` | Variables : `FF_AUTO_RELEASE_ENABLED`, `FF_DISPUTES_ENABLED`, `FF_PAYOUTS_ENABLED`, `FF_PHOTO_GPS_ENFORCEMENT`. Validées Zod boot. |
 
-> ⛔ **Règle dure** : aucune Open Question résiduelle ne peut rester `OPEN` à l'entrée en Design.
+> ✅ **Toutes les Open Questions sont `RESOLVED`** — sign-off CTO 2026-05-12. Discover validé, Design ouvert.
 
 ### 3.4 Décisions CTO déjà tranchées (consolidées du message d'ouverture)
 
@@ -252,91 +256,120 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 | D12 | Suppression photos | ❌ **Aucune suppression manuelle** par client ni prestataire avant expiration de la rétention. |
 | D13 | Source de vérité paiement | ✅ **Webhook Stripe = vérité**. Jamais `frontend says payment success` → side effect serveur. |
 | D14 | Idempotency keys Stripe | ✅ Obligatoires sur **toutes** les mutations : capture, transfer, refund, payout. Format déterministe `<action>-<missionId>-<attempt>`. |
-| D15 | Mission completion workflow | ✅ États : `DRAFT / PUBLISHED / ACCEPTED / PENDING_PAYMENT / PAID / IN_PROGRESS / CLIENT_VALIDATION_PENDING / COMPLETED / DISPUTE_OPEN / REFUNDED / CANCELLED / EXPIRED` (extension PRD-002). Voir §3.5 schéma. |
+| D15 | Mission completion workflow | ✅ États : `DRAFT / PENDING_PAYMENT / PAID / PUBLISHED / ACCEPTED / IN_PROGRESS / CLIENT_VALIDATION_PENDING / AUTO_RELEASE_PENDING / AUTO_RELEASED / COMPLETED / DISPUTE_OPEN / REFUNDED / CANCELLED / EXPIRED`. **Important** : `PAID` intervient **avant** `PUBLISHED` (cf. décision Q4 — corrige la version v0.1 du PRD qui plaçait `PAID` après `ACCEPTED`). Voir §3.5 schéma v0.2. |
+| **D16** | Uploads photos | ✅ **Interdiction des base64 uploads**. Uniquement **multipart direct signed upload** mobile → Cloudinary. |
+| **D17** | Conservation des images | ✅ Toujours conserver **2 versions** : (a) **original sécurisé** (sans transformation, audit/litige), (b) **version compressée** (display, partagée via signed URL). Enum `PhotoVariant: ORIGINAL | DISPLAY`. |
+| **D18** | Idempotence renforcée | ✅ Idempotency keys **obligatoires** sur : `capture`, `refund`, `transfer`, **traitement webhook** (job BullMQ `jobId` déterministe). |
+| **D19** | Table StripeWebhookEvent | ✅ Table dédiée **`StripeWebhookEvent`** avec colonnes : `stripeEventId UNIQUE`, `type`, `payloadHash` (sha256), `processedAt`, `status`. **Critique anti-replay**. |
+| **D20** | Enums photo stricts | ✅ Enum Prisma stricts pour `PhotoPhase` (`BEFORE | AFTER`) — **pas de string libre**. Idem pour `PhotoVariant`, `PhotoStatus`, `PaymentStatus`, `ProviderPayoutStatus`. |
+| **D21** | Verify renforcé — 11 scénarios obligatoires | ✅ PRD-003 doit **inclure** ces tests Verify : (1) replay webhook, (2) double capture, (3) double payout, (4) upload sans auth, (5) upload cross-mission, (6) upload AFTER sans BEFORE, (7) payout disabled provider, (8) expired PaymentIntent, (9) spoofed webhook, (10) concurrent auto-release, (11) concurrent refund/capture. Cf. §6.1. |
 
-### 3.5 Machine d'état mission étendue (proposition Discover)
+### 3.5 Machine d'état mission étendue v0.2 (PAID avant PUBLISHED — décision CTO Q4)
 
 > Extension du `mission-state.machine.ts` PRD-002. Le détail typing + assertions sera figé en Design.
+> ⚠️ **v0.2 corrige v0.1** suite à la décision CTO Q4 : PAID intervient **avant** publication, jamais de mission visible sans paiement autorisé.
 
 ```
-                  ┌─────────────────────────────────────────────────────────┐
-                  │                                                         │
-                  ▼                                                         │
-    DRAFT ──publish──→ PUBLISHED ──accept──→ ACCEPTED ──pay-intent--→  PENDING_PAYMENT
-      │                  │ │                    │                              │
-      │                  │ │                    │                              ▼
-      │                  │ │                    │                  payment_intent.succeeded
-      │                  │ │                    │                              │
-      │                  │ │                    │                              ▼
-      └─────────────cancel/expire───────────────┘                            PAID
-                                                                              │
-                                                                  start (3+ photos BEFORE)
-                                                                              │
-                                                                              ▼
-                                                                       IN_PROGRESS
-                                                                              │
-                                                                  finish (5+ photos AFTER)
-                                                                              │
-                                                                              ▼
-                                                              CLIENT_VALIDATION_PENDING
-                                                                  │           │
-                                                          validate            (silence T+48h ouvrées)
-                                                          (CLIENT)            │
-                                                                  │           ▼
-                                                                  │   AUTO_RELEASE_PENDING
-                                                                  │           │
-                                                                  │  escrow.auto-release job
-                                                                  │           │
-                                                                  ▼           ▼
-                                                                  COMPLETED ◀┘
-                                                                  │
-                                                                  └──── (rare) ── REFUNDED
+   DRAFT ──submit──→ PENDING_PAYMENT ──payment_intent.amount_capturable_updated──→ PAID
+                          │                                                            │
+                          │                                                  publish (auto)
+                          ▼ payment_intent.payment_failed (reste PENDING_PAYMENT)      ▼
+                          │                                                       PUBLISHED
+                          └── retry (nouveau attempt)                                  │
+                                                                                accept (PRESTATAIRE READY)
+                                                                                       ▼
+                                                                                   ACCEPTED
+                                                                                       │
+                                                                            start (≥ 3 BEFORE syncées)
+                                                                                       ▼
+                                                                                IN_PROGRESS
+                                                                                       │
+                                                                            finish (≥ 5 AFTER syncées)
+                                                                                       ▼
+                                                                       CLIENT_VALIDATION_PENDING
+                                                                            │              │
+                                                                  validate (CLIENT)        silence T+48h ouvrées
+                                                                            │              ▼
+                                                                            │     AUTO_RELEASE_PENDING
+                                                                            │              │
+                                                                            │     escrow.auto-release job
+                                                                            │     (capture + transfer)
+                                                                            │              ▼
+                                                                            │       AUTO_RELEASED
+                                                                            ▼              │
+                                                                       COMPLETED ◀─────────┘
+                                                                            │
+                                                                            └── (rare) ── REFUNDED
 
-                  À tout moment depuis CLIENT_VALIDATION_PENDING (T+48h max) :
-                  ──── dispute (CLIENT) ────→ DISPUTE_OPEN (process PRD-006)
+   À tout moment depuis CLIENT_VALIDATION_PENDING (fenêtre T+48h ouvrées max) :
+   ──── dispute (CLIENT) ────→ DISPUTE_OPEN (process PRD-005)
+
+   À tout moment avant ACCEPTED :
+   ──── cancel (CLIENT) ────→ CANCELLED (refund auto si paiement déjà autorisé)
+
+   À tout moment depuis PUBLISHED (avant ACCEPTED) :
+   ──── expire (TTL listing dépassé) ────→ EXPIRED (refund auto)
 ```
 
 **Règles dures associées** :
-- Aucune transition non listée n'est autorisée (continue PRD-002 `assertMissionTransition` étendu).
-- Tout passage par `payments.transferToProvider()` est **idempotent** (key = `transfer-mission-${missionId}`).
-- Tout passage en `COMPLETED` doit avoir `paymentStatus = RELEASED` ET `≥ 5 photos AFTER syncées` ET `≥ 3 photos BEFORE syncées` ET pas de `DISPUTE_OPEN`.
+- Aucune transition non listée n'est autorisée (extension PRD-002 `assertMissionTransition`).
+- Une mission ne devient `PUBLISHED` (= visible matching) que si `paymentStatus = AUTHORIZED` (Stripe a autorisé la carte).
+- Tout `cancel` ou `expire` après `PAID` déclenche un `paymentIntents.cancel()` (libère l'autorisation Stripe avant capture) — pas de capture, pas de refund nécessaire.
+- Tout passage par `payments.captureAndTransfer()` est **idempotent** (keys déterministes `capture-mission-${id}` + `transfer-mission-${id}`).
+- Tout passage en `COMPLETED` doit avoir `paymentStatus ∈ { RELEASED, AUTO_RELEASED }` ET `≥ 5 photos AFTER syncées` ET `≥ 3 photos BEFORE syncées` ET pas de `DISPUTE_OPEN`.
+- Une transition `CLIENT_VALIDATION_PENDING → DISPUTE_OPEN` annule le job BullMQ `escrow.auto-release` (jobId déterministe `auto-release-${missionId}`).
+- L'extension du matching PRD-002 ajoute **deux** filtres : `mission.status = 'PUBLISHED'` ET `prestataire.providerPayoutStatus = 'READY'`.
 
-### 3.6 Definition of Done — Discover
+### 3.6 Definition of Done — Discover ✅
 
-- [x] PRD instancié avec ID, slug, statut `DISCOVER_DRAFT`
+- [x] PRD instancié avec ID, slug, statut `DISCOVER_DONE`
 - [x] Lien explicite vers cahier v1.4 §4.3, §4.4, §5, §6.4, §6.5
 - [x] User stories couvrant **les 4 sous-systèmes** (A Onboarding Connect / B Payment Lifecycle / C Photos / D Completion Workflow) avec critères d'acceptance testables
 - [x] Risk assessment renseigné (3 domaines ≥ 4 ⇒ pré-revue sécu Design + Verify renforcée)
 - [x] Métriques de succès quantifiables
-- [x] Out of scope explicite (10+ items)
-- [x] Décisions CTO déjà tranchées consolidées (15 items)
-- [x] Machine d'état mission étendue proposée (à figer Design via ADR)
+- [x] Out of scope explicite (12 items)
+- [x] Décisions CTO déjà tranchées consolidées (**21 items** D1-D21, dont 6 ajoutées au sign-off)
+- [x] Machine d'état mission étendue v0.2 figée (PAID avant PUBLISHED — sera typée Design via ADR)
 - [x] T-shirt size estimé (XL)
-- [ ] Open questions résiduelles toutes résolues (`RESOLVED`) — **15 questions OPEN, en attente CTO**
-- [ ] **Validation humaine** (Owner produit) : nom + date
+- [x] **15 Open Questions résiduelles toutes `RESOLVED`** (sign-off CTO 2026-05-12)
+- [x] **Validation humaine (Owner produit CTO)** : 2026-05-12
 
-> ⏳ Validé Discover par `<CTO>` le `YYYY-MM-DD`.
+> ✍️ **Validé Discover par CTO le 2026-05-12.** Statut → `DISCOVER_DONE`. Passage autorisé en Design (cf. message CTO `Décision CTO finale ✅ Discover PRD-003 validé. ✅ Open questions résolues. ✅ PR #5 approuvée pour merge. ✅ Passage autorisé au Design Sprint 3.`).
 
 ---
 
-## 4. Phase DESIGN
+## 4. Phase DESIGN — ouverte (sign-off CTO Discover 2026-05-12)
 
-⛔ Bloquée tant que les 15 Open Questions §3.3 ne sont pas `RESOLVED` + sign-off CTO Discover.
+**Branche** : `design/prd-003-photos-paiements`.
 
-**Livrables prévus** :
-1. **Schéma Prisma** complet pour `Payment`, `StripeEvent`, `WebhookDeadLetter`, `Photo`, extension `User` (`stripeAccountId`, `stripeChargesEnabled`, `stripeTransfersEnabled`, `stripePayoutsEnabled`, `stripeRequirementsCurrentlyDue`), extension `Mission` (nouveaux états).
-2. **Schémas Zod** dans `packages/shared-types/src/zod/`.
-3. **Contrat API** complet (chaque route, rate limit, idempotence, codes HTTP).
-4. **State machine paiement** + extension state machine mission, avec assertions strictes.
-5. **ADRs prévus** :
-   - ADR-008 — Mécanique escrow Stripe (separate charges & transfers vs destination vs manual capture). **À écrire après réponse Q1**.
-   - ADR-009 — Cloudinary signed upload + EXIF strip + lat/lng séparé.
-   - ADR-010 — Politique rétention photos 30j (remplace mention 12 mois `photos-rgpd.mdc`).
-   - ADR-011 — Email transactionnel provider (SendGrid vs Postmark). **À écrire après réponse Q10**.
-6. **Mise à jour règles Cursor** : `.cursor/rules/photos-rgpd.mdc` (rétention 30j), `.cursor/rules/stripe.mdc` (mécanique exact escrow finale).
-7. **Plan de tests** détaillé (unit / intégration / E2E mobile / sécu / perf / smoke paiement).
-8. **Rollout** : feature flag `FF_PAYMENTS_ENABLED` + plan de rollback (revert webhooks, désactivation flag, mais migrations gardées additivement).
-9. **Pré-revue `reviewer-securite-code` OBLIGATOIRE** (risque ≥ 4 sur sécu/finance/RGPD).
+**Livrables attendus** :
+
+1. **Schéma Prisma** complet :
+   - `Payment` (relations Mission, lifecycle `PaymentStatus`, `vatRateSnapshot Decimal?`)
+   - `StripeWebhookEvent` (cf. D19 : `stripeEventId UNIQUE`, `type`, `payloadHash`, `processedAt`, `status`)
+   - `WebhookDeadLetter` (jobs en échec après 5 retries)
+   - `Photo` (UUID v4, `PhotoPhase`, `PhotoVariant ORIGINAL | DISPLAY` cf. D17, `PhotoStatus`, metadata GPS nullable + `gpsMissing`, `flagSuspicious`, checksum sha256, retention)
+   - Extension `User` : `stripeAccountId`, `stripeChargesEnabled`, `stripeTransfersEnabled`, `stripePayoutsEnabled`, `stripeRequirementsCurrentlyDue Json`, **`providerPayoutStatus ProviderPayoutStatus`** (D7+Q7)
+   - Extension `Mission` : nouveaux états (cf. §3.5 v0.2), index sur `(status, providerPayoutStatus)` pour matching extension, `paymentId` FK
+   - Tous les enums Prisma stricts (D20)
+2. **Schémas Zod** dans `packages/shared-types/src/zod/payment.ts`, `photo.ts`, états mission étendus, validation env vars (`STRIPE_API_VERSION`, secrets Cloudinary, Resend, FCM, FF_*).
+3. **Contrat API** complet : chaque route avec verbe / auth / RBAC / ownership / idempotency-key / rate limit / codes HTTP.
+4. **State machine paiement** dédiée (`payment-state.machine.ts`) + extension `mission-state.machine.ts`, assertions strictes (pattern PRD-002).
+5. **ADRs à rédiger** :
+   - **ADR-008** — Mécanique « escrow » : `capture_method='manual'` + delayed transfer Stripe Connect Express. Limites (autorisation expire ~7j Visa/MC), trade-offs vs destination/separate charges, wording produit. ✅ tranché Q1.
+   - **ADR-009** — Cloudinary signed upload (multipart direct, pas de base64) + EXIF strip + lat/lng séparé en DB + dual variant (ORIGINAL + DISPLAY). ✅ tranché D2+D16+D17+Q3.
+   - **ADR-010** — Politique rétention photos 30 jours (remplace mention 12 mois `photos-rgpd.mdc`) + exceptions litige/fraude/légal. ✅ tranché Q2.
+   - **ADR-011** — Stripe API pinning (`STRIPE_API_VERSION` config-driven, jamais `latest`). ✅ tranché Q12.
+   - **ADR-012** — Email provider Resend (vs SendGrid/Postmark, alternatives refusées dans §8.2). ✅ tranché Q10.
+   - **ADR-013** — Notifications minimales MVP : push FCM + email Resend (pas SMS). ✅ tranché Q9.
+6. **Mise à jour règles Cursor** :
+   - `.cursor/rules/photos-rgpd.mdc` : rétention 12 mois → 30 jours + dual variant ORIGINAL/DISPLAY + interdiction base64.
+   - `.cursor/rules/stripe.mdc` : remplacer `transfer_data.destination` (Destination charges) par `capture_method='manual'` + delayed transfer + idempotence renforcée + table `StripeWebhookEvent` (au lieu de `stripeEvent`).
+7. **Plan de tests** détaillé (unit / intégration / E2E mobile / sécu / perf / smoke paiement avec cartes test 3DS / non-3DS / refusée).
+8. **Rollout** : feature flags D15+Q15 (`FF_AUTO_RELEASE_ENABLED`, `FF_DISPUTES_ENABLED`, `FF_PAYOUTS_ENABLED`, `FF_PHOTO_GPS_ENFORCEMENT`) + plan de rollback (désactivation flag → coupure chaîne sans rollback migration).
+9. **Pré-revue `reviewer-securite-code` OBLIGATOIRE** sur le Design (risque ≥ 4 sur sécu/finance/RGPD) avant validation CTO Design.
+
+**DoD Design** : cf. template PRD §4.9 + sign-off CTO + rapport pré-revue sécurité joint.
 
 ---
 
@@ -362,20 +395,47 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 
 ### 6.1 Audits CTO obligatoires anticipés (à figer Design / Build)
 
+> **23 audits** au total : 12 audits techniques de base (A-L) + **11 scénarios supplémentaires CTO obligatoires (V1-V11)** mandatés au sign-off Discover (D21).
+
+#### 6.1.1 Audits techniques de base (A-L)
+
 | # | Audit | Risque cible |
 |---|---|---|
-| **A** | Idempotence webhook Stripe (replay 10× même `stripe_events.id`) | Pas de double mutation, pas de double transfer |
+| **A** | Idempotence webhook Stripe (replay 10× même `stripeEventId`) | Pas de double mutation, pas de double transfer |
 | **B** | Idempotence Stripe API mutations (capture, transfer, refund) — replay même `idempotencyKey` | Stripe garantit pas de duplication |
-| **C** | Race validate vs auto-release (CLIENT POST `/validate` simultané au job BullMQ) | Un seul transfer Stripe créé |
+| **C** | Race validate vs auto-release (CLIENT POST `/validate` simultané au job BullMQ) | Un seul couple capture+transfer Stripe créé |
 | **D** | Webhook Stripe signature invalide (forge HMAC) → rejet 400 | Aucun event traité |
 | **E** | Cohérence env (event `livemode=true` reçu sur DB test) → rejet | Pas de pollution croisée |
-| **F** | Photos count validation (4 BEFORE, 5 AFTER → 409 INSUFFICIENT) | Pas de bypass |
+| **F** | Photos count validation (2 BEFORE / 4 AFTER → 409 INSUFFICIENT) | Pas de bypass |
 | **G** | Suppression photo manuelle pré-rétention → 403 | Pas de purge prématurée |
 | **H** | Signed URL Cloudinary expire bien à 5min | Pas d'URL longue |
 | **I** | Webhook Cloudinary signature invalide → rejet | Pas de mutation depuis source non vérifiée |
-| **J** | DLQ webhook (échec 5 retries) → alerte admin + entry en `webhook_dead_letter` | Pas de perte silencieuse |
+| **J** | DLQ webhook (échec 5 retries) → alerte admin + entry en `WebhookDeadLetter` | Pas de perte silencieuse |
 | **K** | Pino redactor étendu vérifie absence de `cardNumber`, `cvv`, `stripeAccountId`, `bankAccount.*` dans tous les logs | Pas de PII finance |
 | **L** | RGPD : DELETE `/users/me` purge bien les photos uploadées (sauf litige actif) à T+30j | Droit à l'effacement respecté |
+
+#### 6.1.2 Scénarios supplémentaires CTO mandatés (V1-V11) — décision D21
+
+| # | Scénario | Couverture attendue |
+|---|---|---|
+| **V1** | **Replay webhook** : injecter 5× le même payload Stripe avec `stripeEventId` identique | 1 seule mutation, 4 réponses idempotentes 200, table `StripeWebhookEvent` ne contient qu'une seule entrée |
+| **V2** | **Double capture** : POST `/missions/:id/validate` 2× simultanés du CLIENT | 1 seul `paymentIntents.capture()` Stripe (idempotency-key déterministe), pas de double prélèvement |
+| **V3** | **Double payout** : trigger 2× le job BullMQ `escrow.auto-release` pour la même mission | 1 seul Transfer Stripe créé (idempotency-key + lock optimiste DB) |
+| **V4** | **Upload sans auth** : POST `/photos/sign` sans JWT | 401 |
+| **V5** | **Upload cross-mission** : prestataire X tente d'uploader sur mission acceptée par prestataire Y | 403 `PHOTO_NOT_OWNED_MISSION` |
+| **V6** | **Upload AFTER sans BEFORE** : tenter `POST /missions/:id/finish` avec 5 AFTER mais 0 BEFORE | 409 `MISSION_PHOTOS_INSUFFICIENT { required: { before: 3, after: 5 }, got: { before: 0, after: 5 } }` |
+| **V7** | **Payout disabled provider** : `providerPayoutStatus` redevient `PAYOUTS_DISABLED` entre accept et auto-release | Job `escrow.auto-release` bloque (audit `AUTO_RELEASE_BLOCKED { reason: 'payouts_disabled' }`) + alerte admin |
+| **V8** | **Expired PaymentIntent** : autorisation Stripe expirée (>7j sans capture) au moment du job auto-release | Détecté côté `paymentIntents.capture()` (Stripe renvoie erreur), audit `CAPTURE_FAILED { reason: 'authorization_expired' }`, mission reste `CLIENT_VALIDATION_PENDING`, alerte admin pour intervention manuelle |
+| **V9** | **Spoofed webhook** : POST `/payments/webhooks/stripe` avec body forgé + signature aléatoire | 400 `Invalid signature`, aucune mutation, aucun event persisté |
+| **V10** | **Concurrent auto-release** : déclencher manuellement le cron de sécurité `escrow.safety-net` pendant que le job BullMQ delayed s'exécute | 1 seul couple capture+transfer (idempotency-key + lock SQL `WHERE status = 'AUTO_RELEASE_PENDING' AND processedAt IS NULL`) |
+| **V11** | **Concurrent refund/capture** : un refund est déclenché (admin) en même temps que le job auto-release tente de capturer | Refund prioritaire ; capture détecte le statut `REFUNDED` et abandonne sans erreur, audit `CAPTURE_SKIPPED { reason: 'refunded' }` |
+
+#### 6.1.3 Méthodologie
+
+- Tous ces tests doivent être implémentés en **tests d'intégration** (pas unit) avec un container Postgres + Redis + Stripe CLI mock + Cloudinary mock.
+- Aucun de ces tests ne doit pouvoir être skip via `it.skip` ou `describe.skip`.
+- Job CI dédié `verify-prd-003` (similaire à `integration` actuel) qui les exécute.
+- Rapport `reviewer-securite-code` final doit citer chaque scénario A-L + V1-V11 avec son test Jest correspondant (path:line).
 
 ### 6.2 Smoke test paiement obligatoire (recette + preprod)
 
@@ -402,13 +462,13 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 ### 6.5 Definition of Done — Verify (release-ready)
 
 - [ ] Rapport `reviewer-securite-code` joint, **0 Critical / 0 Important non traité**
-- [ ] **12 audits CTO** (A → L) tous passants
-- [ ] Smoke test paiement OK en recette ET en preprod
-- [ ] DLQ + alertes admin fonctionnels (test manuel : webhook 5xx forcé → entrée DLQ)
+- [ ] **23 audits CTO** : 12 audits techniques (A → L) **+** 11 scénarios D21 (V1 → V11) tous passants
+- [ ] Smoke test paiement OK en recette ET en preprod (cartes 4242, 3220, 9995)
+- [ ] DLQ + alertes admin fonctionnels (test manuel : webhook 5xx forcé → entrée `WebhookDeadLetter`)
 - [ ] Métriques succès instrumentées (events Pino + dashboard admin)
-- [ ] Plan de rollback validé (FF_PAYMENTS_ENABLED=false coupe la chaîne sans migration down)
+- [ ] Plan de rollback validé : `FF_AUTO_RELEASE_ENABLED=false`, `FF_PAYOUTS_ENABLED=false`, `FF_DISPUTES_ENABLED=false` coupent les chaînes sans migration down
 - [ ] Changelog rédigé
-- [ ] Sign-off CTO + référent RGPD
+- [ ] Sign-off **CTO + référent RGPD**
 
 ---
 
@@ -437,17 +497,24 @@ Post-mortems systématiques sur tout incident finance (perte cash, double payout
 - Test latence Cloudinary signed upload depuis 4G FR (mobile).
 - Étude RGPD courte : photo intérieure d'un domicile = "donnée à caractère personnel" classification — confirmer rétention 30j conforme.
 
-### 8.2 Refusés / alternatives (à arbitrer Design)
+### 8.2 Refusés / alternatives (acté sign-off CTO 2026-05-12)
 
-| Alternative | Pourquoi probablement non retenue |
+| Alternative | Pourquoi non retenue |
 |---|---|
-| **Stripe Connect Custom** au lieu d'Express | Custom = on prend la responsabilité KYC/AML + UI = 5x plus complexe. Express = Stripe gère, idéal MVP (cf. décision CTO D8). |
-| **S3 brut** au lieu de Cloudinary | S3 = pas de transformation native (compression, CDN, EXIF strip), DX moins bonne, ré-implémentation de la moitié de Cloudinary (cf. décision CTO D2). |
-| **Capture immédiate avec `transfer_data.destination`** (Destination charges) | Capture sur compte plateforme + transfer auto Stripe = correspond moins au pattern "escrow puis libération conditionnelle" car Stripe transfère immédiatement. **Separate charges and transfers** offre plus de contrôle. |
-| **Charges directes** (Direct charges) | Marchand de record = prestataire = chacun doit avoir un compte Stripe complet et sa propre page de checkout. Incompatible avec "plateforme absorbe les frais" + casse l'UX unifiée. |
-| **Authentification 3DS forcée** | +5 % drop-off conversion observé industrie. Stripe `automatic` optimise risk vs friction (cf. Q8). |
-| **Push FCM rappels MVP** | Module notifications pas encore livré, scope creep. Email + banner in-app suffisent MVP (cf. Q9). |
-| **Suppression photos par utilisateur** | Catastrophique pour les disputes (preuve disparait). Suppression uniquement via job purge à T+30j. |
+| **Stripe Connect Custom** au lieu d'Express | Custom = on prend la responsabilité KYC/AML + UI = 5x plus complexe. Express = Stripe gère, idéal MVP (cf. D8). |
+| **S3 brut** au lieu de Cloudinary | S3 = pas de transformation native (compression, CDN, EXIF strip), DX moins bonne, ré-implémentation de la moitié de Cloudinary (cf. D2). |
+| **Capture automatique + `transfer_data.destination`** (Destination charges) | Stripe transfère trop tôt côté compte Connect prestataire. Le CTO veut le contrôle complet du moment du transfer (Q1). Refusé. |
+| **Separate charges and transfers** (capture immédiate + transfer séparé) | Capture immédiate = fonds prélevés au client tout de suite, treasury sur compte plateforme. Refusé au profit de **`capture_method='manual'`** (Q1) qui ne prélève qu'à validation, plus juste pour le client. Trade-off accepté : autorisation Visa/MC expire ~7j (mais auto-release T+48h ouvrées tient ≤ 5j calendaires max ponts longs). |
+| **Charges directes** (Direct charges) | Marchand de record = prestataire = chacun doit avoir un compte Stripe complet et sa propre page de checkout. Incompatible avec "plateforme absorbe les frais" + casse l'UX unifiée. Refusé (Q6). |
+| **Authentification 3DS forcée** | +5 % drop-off conversion observé industrie. Stripe `automatic_payment_methods` optimise risk vs friction (Q8). |
+| **Push FCM repoussé en PRD-004** | Le CTO impose **push FCM + email** dès PRD-003 (Q9). Module `notifications` minimal sera intégré au scope Sprint 3. |
+| **SMS notifications** | Hors scope MVP (Q9). |
+| **Postmark / SendGrid** comme provider email | **Resend** retenu pour DX (React Email native), setup rapide MVP (Q10). Postmark/SendGrid restent éligibles si Resend ne tient pas la charge en prod (révision PRD-004). |
+| **Suppression photos par utilisateur** | Catastrophique pour les disputes (preuve disparait). Suppression uniquement via job purge à T+30j (D12). |
+| **Base64 uploads** | Mémoire mobile + bande passante + charge serveur. **Multipart direct signed upload uniquement** (D16). |
+| **Une seule version Cloudinary par photo** | On garde **2 versions** : original sécurisé pour audit + version compressée display (D17). |
+| **LaunchDarkly** ou autre service feature flags MVP | Env vars suffisantes MVP (Q15). Service externe = backlog v2 si besoin de targeting fin. |
+| **Moteur TVA MVP** | Hors scope, hypothèse auto-entrepreneurs sous franchise. Stocker `vatRateSnapshot` pour usage futur (Q14). |
 
 ### 8.3 Glossaire
 
@@ -468,12 +535,12 @@ Post-mortems systématiques sur tout incident finance (perte cash, double payout
 
 ## 9. Checklist BMAD globale
 
-- [x] **Discover** : PRD instancié, stories rédigées, risk assessment fait — **en attente Open Questions résolues + sign-off CTO**
-- [ ] **Design** : Schémas Prisma + Zod + contrat API + ADRs + pré-revue sécu (bloqué tant que Discover non validé)
-- [ ] **Build** : code + tests + migration (bloqué tant que Design non validé)
-- [ ] **Verify** : 12 audits CTO + smoke paiement + sign-off CTO + référent RGPD (bloqué tant que Build non validé)
+- [x] **Discover** : PRD instancié, stories rédigées, risk assessment fait, 15 Open Questions résolues, 21 décisions CTO consolidées — **sign-off CTO 2026-05-12** ✅
+- [ ] **Design** : Schémas Prisma + Zod + contrat API + ADRs 008-013 + pré-revue sécu (en cours sur `design/prd-003-photos-paiements`)
+- [ ] **Build** : code + tests + migration (bloqué tant que Design non validé CTO)
+- [ ] **Verify** : 23 audits CTO (12 base A-L + 11 supplémentaires V1-V11) + smoke paiement + sign-off CTO + référent RGPD (bloqué tant que Build non validé)
 - [ ] PRD archivé, statut `DONE`, version finale taguée
 
 ---
 
-*PRD-003 v0.1 — Discover draft — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md). Réponse aux 15 Open Questions §3.3 attendue avant validation Discover.*
+*PRD-003 v0.2 — Discover validé — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md). Sign-off CTO sur les 15 Open Questions + 6 décisions supplémentaires (D16-D21). Passage Design autorisé.*
