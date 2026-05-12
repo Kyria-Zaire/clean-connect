@@ -12,6 +12,93 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Design — PRD-004 Ticket 4.5 Monitoring financier — 2026-05-13
+
+🟢 **Phase Design (doc-only) du système de monitoring financier Clean Connect : reconciliation Stripe ↔ DB, stuck funds detector, payout anomalies, daily finance report, invariants comptables.**
+PRD : [`docs/prd/PRD-004-hardening-ops-compliance.md`](docs/prd/PRD-004-hardening-ops-compliance.md) §2.5 + §4.15.
+ADR : [`docs/adr/ADR-018-financial-monitoring-reconciliation.md`](docs/adr/ADR-018-financial-monitoring-reconciliation.md).
+Pré-revue sécurité : [`docs/security-reviews/2026-05-12-prd-004-financial-monitoring-design-prereview.md`](docs/security-reviews/2026-05-12-prd-004-financial-monitoring-design-prereview.md).
+Runbook ops : [`docs/ops/finance-reconciliation-runbook.md`](docs/ops/finance-reconciliation-runbook.md).
+
+#### Périmètre Design (scope strict CTO)
+
+- **Aucun code runtime**, **aucune migration Prisma**, **aucun endpoint implémenté** — doc-only.
+- 5 livrables documentaires :
+  - **ADR-018** — stratégie monitoring + 7 principes (Stripe = vérité externe, DB = vérité opérationnelle, reconciliation read-only, cardinalité bornée, audit obligatoire, pas de correction destructive MVP, quotas Stripe respectés).
+  - **PRD §4.15** — vision + 9 risques financiers (F-1..F-9) + 6 US raffinées + 4 tables conceptuelles (`FinanceReconciliationRun`, `FinanceMismatch`, `FinanceDailyReport`, `FinanceAlert`) + 11 invariants comptables + 12 métriques + 9 alerts + 7 OQ-10..OQ-16 + modules Nest préfigurés + risk assessment Design + DoD Design/Build/Verify.
+  - **Pré-revue sécurité** — 0 Critical / 0 Important / 6 Suggestions / 17 Conformes + 5 Conditions Build obligatoires.
+  - **Runbook ops** — 13 sections (lecture mismatch, vérif Stripe/DB, procédures par type de mismatch, stuck funds 3 sous-cas, payout anomaly, procédures admin, escalade, hygiène).
+  - **CHANGELOG** — cette entrée.
+
+#### Décisions techniques figées
+
+- **Pas de correction automatique destructive au MVP** (réévaluation T+90 j prod via ADR-019 si patterns reproductibles).
+- **DB + logs/metrics** (OQ-11 réponse RECO) : 4 tables Prisma dédiées (`Finance*`) pour traçabilité d'investigation > 30 j.
+- **5 crons distincts** : reconcile (03:30), stuck funds (horaire), invariants (04:15), payout anomaly (04:45), daily report (07:00) Europe/Paris.
+- **Quota Stripe préservé** : `p-limit(25 req/s)` + `AbortSignal.timeout(5s)`, < 1 % du quota Stripe MVP.
+- **AlertingService réutilisé** (ADR-017) avec 9 nouveaux `AlertKind` : `finance_mismatch`, `finance_stuck_funds`, `finance_stuck_authorization`, `finance_transfer_pending`, `finance_refund_mismatch`, `finance_invariant_break`, `finance_reconcile_failed`, `finance_report_missing`, `finance_payout_anomaly`.
+- **Cardinalité bornée** : 65 séries Prometheus pour 12 métriques `cleanconnect_finance_*` ; aucun label `userId/missionId/paymentId/transferId/refundId/stripeId/email/phone/prestataireId`.
+
+#### Métriques préfigurées (figées Design)
+
+| Métrique | Type | Labels |
+|---|---|---|
+| `cleanconnect_finance_reconciliation_runs_total` | counter | `type`, `status` |
+| `cleanconnect_finance_reconciliation_duration_seconds` | histogram | `type` |
+| `cleanconnect_finance_mismatches_total` | counter | `type`, `severity` |
+| `cleanconnect_finance_mismatches_open_count` | gauge | `severity` |
+| `cleanconnect_finance_stuck_funds_total` | counter | `kind` |
+| `cleanconnect_finance_stuck_funds_amount_cents` | gauge | `kind` |
+| `cleanconnect_finance_transfer_pending_total` | counter | — |
+| `cleanconnect_finance_refund_mismatch_total` | counter | `kind` |
+| `cleanconnect_finance_invariant_break_total` | counter | `invariant` |
+| `cleanconnect_finance_invariant_balance_cents` | gauge | `report_date_offset` |
+| `cleanconnect_finance_daily_report_generated_total` | counter | `status` |
+| `cleanconnect_finance_payout_anomaly_factor` | histogram | — |
+
+#### Alerts préfigurées (figées Design)
+
+| Alerte | Sévérité | Trigger | Cooldown |
+|---|---|---|---|
+| `finance_mismatch` | P1 | tout `FinanceMismatch.OPEN` | 15 min/`mismatchType` |
+| `finance_stuck_authorization` | P1 | `Payment.AUTHORIZED > 5 j` | 4 h/ressource |
+| `finance_stuck_captured_funds` | P1 | `Payment.CAPTURED > 24 h sans Transfer terminal` | 1 h/ressource |
+| `finance_transfer_pending` | P2 | `Transfer.PENDING > 2 h` | 30 min (batch) |
+| `finance_refund_mismatch` | P1 | I-8 rompu | 15 min/`kind` |
+| `finance_invariant_break` | P1 | J-1 ou I-3 rompu | 1 h/jour |
+| `finance_reconcile_failed` | P1 | cron run = FAILED | 30 min |
+| `finance_report_missing` | P2 | report J-1 non-généré 08:00 | 1 day |
+| `finance_payout_anomaly` | P2 | factor > 2× moyenne 30 j prestataire | 24 h/prestataire |
+
+#### Open Questions CTO (OQ-10..OQ-16) — RECO documentée, arbitrage formel requis avant Build
+
+- OQ-10 : daily report = email + dashboard (cohérent OQ-7)
+- OQ-11 : mismatches stockés en DB (4 tables dédiées) — décision Design retenue
+- OQ-12 : rétention `FinanceMismatch` 90 j RESOLVED + indéfinie OPEN ; `FinanceDailyReport` 5 ans
+- OQ-13 : manual run finance `ADMIN` (pas `SUPER_ADMIN`) + rate-limit 1/h + audit
+- OQ-14 : export CSV finance reporté Ticket 4.3 si besoin réel exprimé
+- OQ-15 : seuil `finance_stuck_captured_funds` 24 h ferme P1 (pas 12 h P2)
+- OQ-16 : pas de correction automatique au MVP (réévaluation T+90 j via ADR dédiée)
+
+#### TODO(debt) explicites (à arbitrer Build / Ticket 4.3)
+
+- `debt-prd004-finance-admin-ui` — UI `/admin/finance/*` Ticket 4.3 (mismatches CRUD, daily report viewer, payout anomalies list).
+- `debt-prd004-finance-import-from-stripe` — endpoints `POST /v1/admin/transfers/import-from-stripe` + `POST /v1/admin/refunds/import-from-stripe` (cas MISSING_DB Stripe Dashboard).
+- `debt-prd004-finance-csv-export` — export CSV daily report — si OQ-14 = oui.
+
+#### Risques résiduels Design
+
+7 risques `RD-4.5-1..7` documentés PRD §4.15.12 — tous `Low` / `Medium`, mitigations Build identifiées. Aucun risque ne bloque le passage en Build.
+
+#### Gates Design
+
+- ✅ Aucun code runtime ajouté (PR doc-only)
+- ✅ Aucune migration Prisma lancée
+- ✅ Cohérence ADR-018 ↔ PRD §4.15 ↔ runbook vérifiée
+- ⏳ **Sign-off CTO Design Ticket 4.5** (STOP avant Build) + arbitrage OQ-10..OQ-16
+
+---
+
 ### Build — PRD-004 Ticket 4.1 A3-bis Metrics wiring (Sprint 4) — 2026-05-12
 
 🟢 **Instrumentation runtime des métriques Prometheus posées en A3.**
