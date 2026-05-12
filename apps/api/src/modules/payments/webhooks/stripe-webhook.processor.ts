@@ -1,24 +1,27 @@
 /**
- * PRD-003 Ticket 3.1 — Processor BullMQ pour `STRIPE_WEBHOOK_QUEUE`.
+ * PRD-003 Ticket 3.1 (étendu Ticket 3.2) — Processor BullMQ pour
+ * `STRIPE_WEBHOOK_QUEUE`.
  *
- * Scope strict 3.1 :
- *  1. Verrou applicatif transactionnel (anti double traitement concurrent)
- *  2. Marquer `processingStatus = PROCESSED` + `processedAt`
- *  3. Aucun routing métier (Tickets 3.2 → 3.5 ajouteront le dispatch domain events)
+ * Pipeline :
+ *  1. Verrou applicatif (`UPDATE … WHERE processingStartedAt IS NULL`).
+ *  2. Si l'event a un handler métier (`PaymentDomainHandler.shouldHandle`) →
+ *     `stripe.events.retrieve(eventId)` pour récupérer le payload AUTHENTIFIÉ
+ *     côté Stripe (jamais sourcé depuis Redis — rule securite + audit V1).
+ *  3. Routing → handler métier (transitions Payment/Mission + audit + matching).
+ *  4. Marquer `processingStatus = PROCESSED`. Events sans handler en 3.2
+ *     (transfer.*, charge.refunded, account.updated, etc.) sont marqués
+ *     `PROCESSED` sans action métier — leur routing arrive Tickets 3.3 → 3.5.
  *
- * DLQ : sur `failed` (épuisement des `attempts`), une ligne est insérée dans
- * `WebhookDeadLetter`. La ré-exécution manuelle (admin) viendra Ticket 3.5.
- *
- * Idempotence forte :
- * - PK `stripeEventId` → `findUnique` retourne null si event purgé entre-temps.
- * - `UPDATE … WHERE processingStartedAt IS NULL` = lock atomique (race-safe).
+ * DLQ : sur `failed` (épuisement des `attempts`), insert dans
+ * `WebhookDeadLetter`. Ré-exécution admin = Ticket 3.5.
  */
 
 import { hostname } from 'node:os'
 
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq'
-import { Logger } from '@nestjs/common'
+import { Inject, Logger } from '@nestjs/common'
 import type { Job } from 'bullmq'
+import type Stripe from 'stripe'
 
 import { PrismaService } from '../../../common/prisma/prisma.service'
 import {
@@ -26,7 +29,9 @@ import {
   STRIPE_WEBHOOK_PROCESS_JOB,
   STRIPE_WEBHOOK_QUEUE,
 } from '../payments.constants'
+import { STRIPE_CLIENT_TOKEN } from '../stripe/stripe.client'
 
+import { PaymentDomainHandler } from './payment-domain.handler'
 import type { StripeWebhookJobPayload } from './payments-webhook.service'
 
 const WORKER_ID = `${hostname()}#${process.pid}`
@@ -35,7 +40,11 @@ const WORKER_ID = `${hostname()}#${process.pid}`
 export class StripeWebhookProcessor extends WorkerHost {
   private readonly logger = new Logger(StripeWebhookProcessor.name)
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly domainHandler: PaymentDomainHandler,
+    @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
+  ) {
     super()
   }
 
@@ -58,9 +67,20 @@ export class StripeWebhookProcessor extends WorkerHost {
     }
 
     try {
+      if (this.domainHandler.shouldHandle(type)) {
+        // Fetch payload AUTHENTIFIÉ — never sourced from Redis (rule securite).
+        const event = await this.stripe.events.retrieve(stripeEventId)
+        await this.domainHandler.handle(event)
+      }
       await this.markProcessed(stripeEventId)
       this.logger.log(
-        { stripeEventId, type, payloadHash: `${payloadHash.slice(0, 12)}…`, worker: WORKER_ID },
+        {
+          stripeEventId,
+          type,
+          payloadHash: `${payloadHash.slice(0, 12)}…`,
+          worker: WORKER_ID,
+          routed: this.domainHandler.shouldHandle(type),
+        },
         'stripe.webhook.processor.processed',
       )
     } catch (err) {
