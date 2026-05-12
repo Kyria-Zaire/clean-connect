@@ -357,8 +357,12 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 4. **State machine paiement** dédiée (`payment-state.machine.ts`) + extension `mission-state.machine.ts`, assertions strictes (pattern PRD-002).
 5. **ADRs à rédiger** :
    - **ADR-008** — Mécanique « escrow » : `capture_method='manual'` + delayed transfer Stripe Connect Express. Limites (autorisation expire ~7j Visa/MC), trade-offs vs destination/separate charges, wording produit. ✅ tranché Q1.
+     - **Doit aussi documenter** (ajustements revue CTO 2026-05-12, livrable 1/5 Prisma) :
+       - `TransferStatus.REVERSED` : alimenté par webhook Stripe `transfer.reversed` (reversal / fonds repris / compte prestataire fermé / fraude). Effet métier : mission bascule en `DISPUTE_OPEN`, re-transfert manuel **hors MVP**.
+       - Fallback `authorization_expired` au moment de la capture : DeadLetter + alerte ops + retry idempotent ; option produit non-MVP : re-authorize flow ou capture immédiate + delayed transfer.
    - **ADR-009** — Cloudinary signed upload (multipart direct, pas de base64) + EXIF strip + lat/lng séparé en DB + dual variant (ORIGINAL + DISPLAY). ✅ tranché D2+D16+D17+Q3.
    - **ADR-010** — Politique rétention photos 30 jours (remplace mention 12 mois `photos-rgpd.mdc`) + exceptions litige/fraude/légal. ✅ tranché Q2.
+     - **Doit explicitement traiter** (ajustement revue CTO 2026-05-12, livrable 1/5 Prisma) : la suppression **physique Cloudinary** (`uploader.destroy` sur public_id, type=private) en plus du tombstone DB (`photos.deleted_at` + `photo_deletion_logs`). Stratégie : (a) batch quotidien cron à 03:00 Europe/Paris, (b) idempotent par `batch_id`, (c) tolère 404 Cloudinary (asset déjà supprimé), (d) audit `PhotoDeletionLog` même en cas d'échec partiel.
    - **ADR-011** — Stripe API pinning (`STRIPE_API_VERSION` config-driven, jamais `latest`). ✅ tranché Q12.
    - **ADR-012** — Email provider Resend (vs SendGrid/Postmark, alternatives refusées dans §8.2). ✅ tranché Q10.
    - **ADR-013** — Notifications minimales MVP : push FCM + email Resend (pas SMS). ✅ tranché Q9.

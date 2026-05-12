@@ -96,6 +96,9 @@ enum PaymentStatus {
 }
 
 /// Transfert vers compte Connect Express — état distinct du paiement.
+/// `REVERSED` = alimenté par webhook Stripe `transfer.reversed` (reversal / fonds repris /
+/// correction post-transfer, p. ex. compte prestataire fermé ou fraude détectée).
+/// Effet métier (à figer dans ADR-008) : mission bascule en `DISPUTE_OPEN`, re-transfert manuel hors MVP.
 enum TransferStatus {
   PENDING
   SENT
@@ -367,13 +370,30 @@ model Payment {
   mission               Mission       @relation(fields: [missionId], references: [id], onDelete: Restrict)
 
   stripePaymentIntentId String        @unique @map("stripe_payment_intent_id") @db.VarChar(255)
-  /// Montant autorisé (centimes) — `amount` capturable côté Stripe après webhook autorisation.
+
+  // ---------------------------------------------------------------------------
+  // Snapshots IMMUTABLES posés à la création du PaymentIntent.
+  // Aucune mutation hors webhook Stripe correspondant (autorisation / capture).
+  // Toute évolution tarifaire / commission doit créer un nouveau Payment.
+  // ---------------------------------------------------------------------------
+
+  /// Montant autorisé (centimes) — `amount` capturable côté Stripe après webhook autorisation. Snapshot immutable.
   amountAuthorizedCents Int           @map("amount_authorized_cents")
-  /// Montant effectivement capturé (centimes), renseigné après `capture`.
+  /// Montant effectivement capturé (centimes), renseigné après `capture` (webhook `payment_intent.amount_capturable_updated` → succès capture).
   amountCapturedCents   Int?          @map("amount_captured_cents")
+  /// Devise ISO-4217 (lowercase, alignement Stripe). EUR uniquement MVP (décision CTO Q11). Snapshot immutable.
   currency              String        @default("eur") @db.VarChar(3)
-  applicationFeeCents   Int?          @map("application_fee_cents")
-  /// Snapshot TVA future (hors moteur TVA MVP — décision CTO Q14).
+
+  /// Commission plateforme snapshotée au moment du paiement (centimes).
+  /// Cette commission sera appliquée lors du Transfer différé vers le prestataire.
+  /// Elle ne change pas après la création du Payment.
+  applicationFeeCents Int? @map("application_fee_cents")
+
+  /// Montant net prestataire snapshoté (centimes) = `amountAuthorizedCents - applicationFeeCents` (lock-in au paiement).
+  /// Utilisé tel quel à la création du Transfer Connect — aucun recalcul runtime, évite tout drift commission.
+  providerPayoutCents Int? @map("provider_payout_cents")
+
+  /// Snapshot TVA future (hors moteur TVA MVP — décision CTO Q14). Pas de logique TVA active en MVP.
   vatRateSnapshot       Decimal?      @map("vat_rate_snapshot") @db.Decimal(5, 4)
   status                PaymentStatus
 
@@ -399,8 +419,14 @@ model Transfer {
   /// Clé idempotence Stripe — **déterministe** côté service (ex. `transfer-mission-{missionId}`).
   idempotencyKey String @unique @map("idempotency_key") @db.VarChar(255)
 
-  failureCode    String? @map("failure_code") @db.VarChar(120)
-  failureMessage String? @map("failure_message") @db.Text
+  /// Compteur de tentatives — incrémenté à chaque retry (max 5 avant DLQ, cf. règle `stripe`).
+  retryCount     Int       @default(0) @map("retry_count")
+  /// Horodatage de la dernière tentative — null tant qu'aucun retry n'a été déclenché.
+  lastRetryAt    DateTime? @map("last_retry_at")
+  /// Code d'erreur Stripe (`balance_insufficient`, `account_closed`, etc.) — `null` si succès ou erreur réseau interne.
+  failureCode    String?   @map("failure_code") @db.VarChar(120)
+  /// Raison détaillée (message Stripe ou erreur interne) — utilisé pour audit + alerte ops.
+  failureReason  String?   @map("failure_reason") @db.Text
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -409,20 +435,22 @@ model Transfer {
   @@map("transfers")
 }
 
-/// Événement Stripe entrant — anti-replay via `stripe_event_id` UNIQUE + `payload_hash` (ADR-008 / ADR-011).
+/// Événement Stripe entrant — anti-replay via `stripe_event_id` UNIQUE (PK) + `payload_hash` (ADR-008 / ADR-011).
+/// `stripe_event_id` est PK ⇒ contrainte d'unicité implicite (idempotence stricte).
 model StripeWebhookEvent {
   stripeEventId       String                        @id @map("stripe_event_id") @db.VarChar(255)
   type                String                        @db.VarChar(120)
   payloadHash         String                        @map("payload_hash") @db.VarChar(64)
   livemode            Boolean
   processingStatus    StripeWebhookProcessingStatus @default(PENDING) @map("processing_status")
-  receivedAt          DateTime                      @default(now()) @map("received_at")
+  /// Horodatage d'arrivée du webhook (= `created_at` au sens projet — convention `createdAt`).
+  createdAt           DateTime                      @default(now()) @map("created_at")
   /// Horodatage pris lors du verrou transactionnel (`SELECT … FOR UPDATE`) — évite double traitement concurrent.
   processingStartedAt DateTime?                     @map("processing_started_at")
   processedAt         DateTime?                     @map("processed_at")
-  lastError             String?                       @map("last_error") @db.Text
+  lastError           String?                       @map("last_error") @db.Text
 
-  @@index([processingStatus, receivedAt])
+  @@index([processingStatus, createdAt])
   @@map("stripe_webhook_events")
 }
 
@@ -453,6 +481,13 @@ model AutoReleaseJob {
   idempotencyKey String?              @unique @map("idempotency_key") @db.VarChar(255)
   cancelReason   String?              @map("cancel_reason") @db.VarChar(255)
   lastError      String?              @map("last_error") @db.Text
+
+  /// Verrou applicatif : pris par le worker via `UPDATE … WHERE locked_at IS NULL` (anti double exécution simultanée
+  /// même en cas de race BullMQ ↔ cron safety-net horaire — audit Verify V10).
+  lockedAt DateTime? @map("locked_at")
+  /// Identifiant du worker / pod qui détient le verrou (hostname, container id, ou worker uuid) — debugging + observabilité.
+  lockedBy String?   @map("locked_by") @db.VarChar(255)
+
   startedAt      DateTime?            @map("started_at")
   finishedAt     DateTime?            @map("finished_at")
 
@@ -461,6 +496,7 @@ model AutoReleaseJob {
 
   @@index([missionId, status])
   @@index([scheduledFor, status])
+  @@index([lockedAt])
   @@map("auto_release_jobs")
 }
 
@@ -514,8 +550,11 @@ model Photo {
   /// Variante Cloudinary — DISPLAY = strip EXIF + optimisé ; ORIGINAL = conservé sécurisé (ADR-009).
   variant PhotoVariant @default(DISPLAY) @map("variant")
 
-  /// UUID logique « capture » côté mobile (même valeur pour la paire ORIGINAL+DISPLAY).
-  captureClientUuid String? @map("capture_client_uuid") @db.Uuid
+  /// UUID v4 logique de la capture mobile — **OBLIGATOIRE** pour ORIGINAL et DISPLAY.
+  /// Relie la paire ORIGINAL/DISPLAY (même valeur pour les deux variants d'une même capture).
+  /// Garantit l'idempotence d'upload côté serveur : PostgreSQL n'accepterait pas plusieurs NULL
+  /// malgré la contrainte `@@unique([missionId, captureClientUuid, variant])` (NULLs distincts par défaut).
+  captureClientUuid String @map("capture_client_uuid") @db.Uuid
 
   photoUploadSessionId String?             @map("photo_upload_session_id") @db.Uuid
   photoUploadSession   PhotoUploadSession? @relation(fields: [photoUploadSessionId], references: [id], onDelete: SetNull)
