@@ -8,7 +8,14 @@
  * - JAMAIS de message Stripe brut dans le `message` exposé (cf. rule securite).
  */
 
-import { BadRequestException, ServiceUnavailableException } from '@nestjs/common'
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+  ServiceUnavailableException,
+  UnprocessableEntityException,
+} from '@nestjs/common'
 
 export const PAYMENTS_WEBHOOK_ERROR_CODES = {
   INVALID_SIGNATURE: 'WEBHOOK_INVALID_SIGNATURE',
@@ -61,5 +68,79 @@ export class PaymentsDisabledException extends ServiceUnavailableException {
       error: 'PAYMENTS_DISABLED',
       reason: 'Le module Payments est désactivé sur cet environnement (FF_PAYMENTS_ENABLED=false).',
     })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PRD-003 Ticket 3.2 — erreurs métier `POST /v1/payments/intent` + listings.
+// Codes alignés `paymentErrorCodeSchema` (`@cc/shared-types`).
+// ---------------------------------------------------------------------------
+
+export class MissionNotFoundException extends NotFoundException {
+  constructor() {
+    super({ error: 'MISSION_NOT_FOUND' })
+  }
+}
+
+export class MissionForbiddenException extends ForbiddenException {
+  constructor() {
+    super({ error: 'MISSION_FORBIDDEN' })
+  }
+}
+
+/**
+ * Mission n'est pas en `DRAFT` (ou déjà en `PENDING_PAYMENT` via un autre
+ * intent vivant) — le client ne doit pas pouvoir initier un PaymentIntent
+ * sur une mission déjà publiée / annulée / acceptée.
+ */
+export class PaymentInvalidStateException extends ConflictException {
+  constructor(reason: string) {
+    super({ error: 'PAYMENT_INVALID_STATE', reason })
+  }
+}
+
+/**
+ * Replay avec même `Idempotency-Key` mais une `missionId` différente — Stripe
+ * interdit (le serveur AUSSI : on garantit que la clé idempotence est liée à
+ * une SEULE intention métier).
+ */
+export class PaymentIdempotencyConflictException extends ConflictException {
+  constructor(reason: string) {
+    super({ error: 'PAYMENT_IDEMPOTENCY_CONFLICT', reason })
+  }
+}
+
+export class PaymentMissingIdempotencyKeyException extends BadRequestException {
+  constructor(reason?: string) {
+    super({
+      error: 'PAYMENT_MISSING_IDEMPOTENCY_KEY',
+      reason: reason ?? 'Le header `Idempotency-Key` est obligatoire (PRD-003 OpenAPI).',
+    })
+  }
+}
+
+/**
+ * Mission sans `estimatedPriceCents` → impossible de créer un PaymentIntent
+ * (la mission doit avoir été chiffrée à la création). 422 distinct du 409
+ * `PAYMENT_INVALID_STATE` pour clarifier côté client.
+ */
+export class PaymentAmountRequiredException extends UnprocessableEntityException {
+  constructor() {
+    super({
+      error: 'PAYMENT_AMOUNT_REQUIRED',
+      reason:
+        "La mission n'a pas de montant chiffré (estimatedPriceCents requis pour le paiement).",
+    })
+  }
+}
+
+/**
+ * Erreur générique Stripe lors de la création du PaymentIntent (réseau /
+ * configuration / quotas). On expose un code stable mais on **NE log PAS** le
+ * message brut Stripe côté réponse API (rule securite + audit Verify V8).
+ */
+export class PaymentStripeException extends UnprocessableEntityException {
+  constructor(reason: string) {
+    super({ error: 'PAYMENT_STRIPE_ERROR', reason })
   }
 }
