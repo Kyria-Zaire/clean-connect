@@ -220,6 +220,12 @@ export class CloudinaryClient {
    * mentir sur le `public_id` qu'il prétend avoir uploadé. On re-fetch côté
    * Cloudinary pour valider l'existence + récupérer width/height/bytes
    * (source de vérité serveur).
+   *
+   * **Timeouts / retries (doc CTO post-Ticket 3.3)** : l'appel SDK peut échouer
+   * (timeout réseau, 5xx). Le **mobile** peut rejouer `POST /photos/confirm` avec le
+   * même corps : après succès, la réponse repasse en `idempotent: true` (pas de double
+   * `Photo`). Un retry HTTP avec backoff côté **serveur** reste hors-scope MVP
+   * (Ticket 3.5).
    */
   async getResource(publicId: string): Promise<CloudinaryResource> {
     this.requireConfig()

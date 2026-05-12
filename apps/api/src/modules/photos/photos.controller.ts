@@ -72,8 +72,12 @@ export class PhotosController {
   @ApiOperation({
     summary: 'Confirmer un upload Cloudinary (consume PhotoUploadSession)',
   })
-  @ApiResponse({ status: 201, description: 'ConfirmPhotoUploadResponse' })
-  @ApiResponse({ status: 403, description: 'PHOTO_FORBIDDEN' })
+  @ApiResponse({ status: 201, description: 'ConfirmPhotoUploadResponse (idempotent false|true)' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Validation Zod ou PHOTO_MAX_BYTES_EXCEEDED (octets Cloudinary > session.maxBytes ou > 10 MiB)',
+  })
   @ApiResponse({ status: 404, description: 'PHOTO_NOT_FOUND' })
   @ApiResponse({
     status: 409,

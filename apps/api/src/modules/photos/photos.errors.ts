@@ -120,10 +120,10 @@ export class PhotoMimeNotAllowedException extends BadRequestException {
   }
 }
 
-/** 400 — taille > 10 MiB (Zod l'attrape, garde-fou côté service). */
+/** 400 — taille > plafond ADR-009 ou > `PhotoUploadSession.maxBytes` scellé au presign. */
 export class PhotoMaxBytesExceededException extends BadRequestException {
-  constructor() {
-    super(payload('PHOTO_MAX_BYTES_EXCEEDED', 'Taille fichier > 10 MiB (ADR-009).'))
+  constructor(reason = 'Taille fichier > 10 MiB (ADR-009).') {
+    super(payload('PHOTO_MAX_BYTES_EXCEEDED', reason))
   }
 }
 

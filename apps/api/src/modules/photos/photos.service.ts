@@ -12,6 +12,7 @@
  *      • Idempotence : si Photo (missionId, captureClientUuid, variant) existe déjà
  *        → réponse `idempotent: true` (200 OK).
  *      • Vérifier côté Cloudinary que l'asset existe (anti-spoof mobile).
+ *      • Vérifier `resource.bytes <= session.maxBytes` (plafond scellé au presign, CTO merge).
  *      • Insertion atomique : marque session consumed + create Photo + audit event.
  *
  * Sécurité :
@@ -236,9 +237,14 @@ export class PhotosService {
       throw err
     }
 
-    // Re-vérifier cohérence bytes/mimeType (le mobile peut mentir).
+    // Re-vérifier cohérence bytes : plafond global ADR-009 + plafond scellé sur la session (CTO).
     if (resource.bytes > PHOTO_MAX_BYTES) {
       throw new PhotoMaxBytesExceededException()
+    }
+    if (resource.bytes > session.maxBytes) {
+      throw new PhotoMaxBytesExceededException(
+        "Taille asset Cloudinary supérieure au plafond scellé dans la session d'upload (presign).",
+      )
     }
     const reportedFormat = input.mimeType.split('/')[1]
     if (!reportedFormat || resource.format.toLowerCase() !== reportedFormat.toLowerCase()) {

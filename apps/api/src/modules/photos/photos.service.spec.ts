@@ -6,8 +6,8 @@
  *  - confirm : FF off → 503 / session not found ou ID forgé → 409 /
  *    mission mismatch → 409 / capture UUID mismatch → 409 / cloudinary public_id
  *    mismatch → 409 / cloudinary asset missing → 422 / session expirée → 410 /
- *    session consumed (race) → 409 / replay idempotent → 200 idempotent:true /
- *    happy path → 201 idempotent:false.
+ *    session consumed (race) → 409 / replay idempotent → 201 idempotent:true /
+ *    happy path → 201 idempotent:false / Cloudinary bytes > session.maxBytes → 400.
  */
 
 import type { Mission, Photo, PhotoUploadSession, Prisma, Role } from '@prisma/client'
@@ -23,6 +23,7 @@ import {
   PhotoCloudinaryAssetMissingException,
   PhotoCloudinaryPublicIdMismatchException,
   PhotoForbiddenException,
+  PhotoMaxBytesExceededException,
   PhotoUploadSessionAlreadyConsumedException,
   PhotoUploadSessionExpiredException,
   PhotoUploadSessionMissionMismatchException,
@@ -442,6 +443,15 @@ describe('PhotosService.confirm (PRD-003 Ticket 3.3)', () => {
     )
   })
 
+  it('400 PHOTO_MAX_BYTES_EXCEEDED si bytes Cloudinary > session.maxBytes (CTO merge)', async () => {
+    const { service } = buildHarness({
+      session: buildSession({ maxBytes: 100_000 }),
+    })
+    await expect(service.confirm(MISSION_ID, actor, confirmInput())).rejects.toBeInstanceOf(
+      PhotoMaxBytesExceededException,
+    )
+  })
+
   it('happy path : crée Photo + audit + idempotent: false', async () => {
     const { service, photosRepo } = buildHarness({ session: buildSession() })
     const res = await service.confirm(MISSION_ID, actor, confirmInput())
@@ -454,7 +464,7 @@ describe('PhotosService.confirm (PRD-003 Ticket 3.3)', () => {
     expect(photosRepo.createPhotoTx).toHaveBeenCalledTimes(1)
   })
 
-  it('replay : Photo existante (missionId, captureClientUuid, variant) → idempotent: true (200 OK)', async () => {
+  it('replay : Photo existante (missionId, captureClientUuid, variant) → 201 idempotent: true', async () => {
     const existingPhoto = buildPhoto()
     const { service, photosRepo } = buildHarness({
       session: buildSession(),

@@ -24,7 +24,7 @@ openapi: 3.1.0
 
 info:
   title: Clean Connect API
-  version: '1.0.5-prd003-build-ticket-3.3-photos-presign'
+  version: '1.0.6-prd003-photos-cto-merge-followup'
   description: |
     API publique Clean Connect — bloc **Photos & Paiements** (PRD-003).
 
@@ -55,7 +55,19 @@ info:
        `POST /v1/payments/intent` (réponse au client uniquement).
     3. **Signed URLs Cloudinary** : court-vivantes (5 min), régénérées à chaque GET.
        Le `cloudinaryPublicId` brut n'est jamais exposé en dehors du scope `ADMIN`.
-    4. **Logs** : `clientSecret`, `uploadToken`, `sessionToken`, `tokenDigest`,
+    4. **Variante `ORIGINAL` (anti-fuite — ajustement CTO post-Ticket 3.3)** :
+       jamais exposée **publiquement** au sens large : ni URL publique permanente,
+       ni `signedUrl` livrée au **CLIENT** ni au **PRESTATAIRE** dans les parcours
+       métier standard. Même une **signed URL** à durée limitée ne doit servir
+       l'`ORIGINAL` qu'aux rôles **ADMIN** (audit antifraude, **support**,
+       **litige** / instruction dossier). Les endpoints liste côté mission
+       (`GET /v1/missions/{id}/photos`) ne renvoient que **`DISPLAY`**.
+    5. **Timeouts / indisponibilité Cloudinary** : un `GET` métadonnées (`api.resource`)
+       peut échouer (timeout, 5xx). Le mobile peut **rejouer** `POST /photos/confirm`
+       avec le **même** corps : une fois la `Photo` créée, la réponse repasse en
+       **`201`** avec **`idempotent: true`** (aucune double insertion — contrainte
+       DB + logique service). Ticket 3.5 pourra ajouter retry HTTP serveur + backoff.
+    6. **Logs** : `clientSecret`, `uploadToken`, `sessionToken`, `tokenDigest`,
        `idempotencyKey`, `cardNumber`, `cvv`, `stripeAccountId`, `bankAccount.*`,
        `cloudinaryParams.signature`, `api_key`, `api_secret` sont redacted (filter Pino).
 
@@ -66,7 +78,7 @@ info:
     | 3.1 | Webhook Stripe (signature + idempotence DLQ) | ✅ Mergé | #7 |
     | 3.2 | PaymentIntent (`capture_method='manual'`) + lifecycle | ✅ Mergé | #8 |
     | 3.3 | Cloudinary signed upload + `PhotoUploadSession` (presign/confirm) | ✅ Livré | #9 |
-    | 3.4 | Capture `PaymentIntent` + validation mission (PRESTATAIRE → CLIENT) | ⏳ Backlog | — |
+    | 3.4 | Mission completion + validation CLIENT + capture PI (**sans transfer prestataire**) | ⏳ Backlog | — |
     | 3.5 | Transfer prestataire + auto-release T+48h + refund + DLQ | ⏳ Backlog | — |
 
     **Feature flags Build** :
@@ -343,8 +355,9 @@ components:
       type: string
       enum: [ORIGINAL, DISPLAY]
       description: |
-        `DISPLAY` : variante optimisée, EXIF strip (côté client/prestataire).
-        `ORIGINAL` : variante intègre sécurisée (admin only).
+        `DISPLAY` : variante optimisée, EXIF strip (côté client / prestataire avant upload).
+        `ORIGINAL` : variante intègre — **jamais** exposée au client ni au prestataire
+        (même via signed URL courte) ; réservée **ADMIN** (support, litige, audit).
 
     PhotoMimeType:
       type: string
@@ -922,10 +935,14 @@ components:
         idempotent:
           type: boolean
           description: |
-            - `false` : première confirmation (création `Photo`).
-            - `true` : replay confirm avec **mêmes** `(missionId, captureClientUuid, variant)` →
-              aucun side-effect, on renvoie la `Photo` initiale.
-            Sécurité offline-first : mobile peut rejouer `/confirm` après crash sans dupliquer.
+            **Sémantique HTTP** : la route répond toujours **`201 Created`** que ce soit
+            une première insertion (`false`) ou un **replay** (`true`).
+
+            - `false` : première confirmation — création `Photo` + `consumedAt` sur la session.
+            - `true` : une `Photo` existait déjà pour `(missionId, captureClientUuid, variant)` —
+              le serveur renvoie l'état déjà persisté **sans** second insert ni effet de bord.
+              Cas d'usage : crash app après succès, **timeout** lors du premier `confirm`,
+              double tap réseau. Aligné ajustement CTO post-Ticket 3.3 (doc explicite replay).
 
     # ----- Public views : Photos ------------------------------------------
 
@@ -1924,6 +1941,15 @@ paths:
 
         Idempotence : session active existante pour `(missionId, captureClientUuid, variant)`
         → `409 PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED`.
+
+        **Sessions abandonnées (ajustement CTO post-Ticket 3.3)** :
+        - Tant que `consumedAt` est **NULL** et `expiresAt` **non dépassé**, la session
+          reste « **presignée active** » (le mobile peut encore uploader puis confirmer).
+        - Si le mobile **n'upload pas** ou **ne confirme pas** avant `expiresAt`, la ligne
+          reste en base avec `consumedAt = NULL` : état **« expirée non consommée** »
+          (pas de statut enum dédié MVP). Un `POST /confirm` après expiration → **`410`**
+          `PHOTO_UPLOAD_SESSION_EXPIRED`. Le nettoyage Cloudinary + purge DB des orphelins
+          est planifié **Ticket 3.5** (`TODO(debt)` `photos-orphan-cleanup-job`).
       x-rbac: [PRESTATAIRE]
       x-rate-limit: { strategy: 'token-bucket', max: 60, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -1974,8 +2000,15 @@ paths:
         1. Vérifie la `PhotoUploadSession` (non consommée ; si `expiresAt` dépassé → **`410 UPLOAD_SESSION_EXPIRED`**).
         2. Vérifie que le `{id}` mission URL = `missionId` de la session (**cross-mission** → `409`).
         3. Vérifie que `captureClientUuid` du body = celui stocké sur la session (**cross-session** / replay → `409 PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH`).
-        4. Vérifie via Cloudinary que l'asset existe + `checksumSha256` cohérent.
+        4. Vérifie via Cloudinary que l'asset existe ; compare les octets réels Cloudinary au plafond **scellé** sur la session (`maxBytes` du presign) et au plafond ADR-009 10 MiB — dépassement → **`400 PHOTO_MAX_BYTES_EXCEEDED`**.
         5. Crée la ligne `Photo` ; marque la session `consumedAt = NOW()`.
+
+        **Replay `confirm` — `idempotent: true` (ajustement CTO post-Ticket 3.3)** :
+        - Dès qu'une `Photo` existe déjà pour `(missionId, captureClientUuid, variant)`,
+          tout nouvel appel `POST /confirm` (même session ou après crash réseau) renvoie
+          **`201 Created`** avec **`idempotent: true`** dans le corps (pas de second `Photo`,
+          pas de mutation si la photo était déjà persistée). Le mobile distingue première
+          création (`idempotent: false`) d'un **retry safe** (`idempotent: true`).
 
         **Important (revue CTO)** : cet appel est **uniquement** « prestataire signale fin upload ».
         Il **ne** valide **pas** la mission côté client (cf. `POST /v1/missions/{id}/validate`).
@@ -1996,12 +2029,22 @@ paths:
       responses:
         '201':
           description: |
-            Photo enregistrée. `idempotent: false` = première confirmation ;
-            `idempotent: true` = replay sans side-effect (mobile a rejoué après crash).
+            Photo enregistrée ou **replay idempotent** (ajustement CTO post-Ticket 3.3).
+            - **`201`** dans les deux cas (création et replay) — le corps porte la vérité :
+              `idempotent: false` = première confirmation (insertion `Photo` + session consommée) ;
+              `idempotent: true` = la `Photo` existait déjà pour `(missionId, captureClientUuid, variant)`
+              (retry après crash / timeout Cloudinary / double tap) — **aucun side-effect** supplémentaire.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ConfirmPhotoUploadResponse' }
-        '400': { $ref: '#/components/responses/ValidationError' }
+        '400':
+          description: |
+            Erreur de validation Zod **ou** `PHOTO_MAX_BYTES_EXCEEDED` : octets réels de l'asset
+            Cloudinary (`getResource`) supérieurs au plafond **scellé** dans `PhotoUploadSession.maxBytes`
+            (presign) ou au plafond global 10 MiB (ADR-009).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PhotoErrorBody' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -2036,8 +2079,9 @@ paths:
       operationId: listMissionPhotos
       summary: '[CLIENT | PRESTATAIRE] Lister les photos d''une mission'
       description: |
-        Retourne les `PublicPhoto` (variant `DISPLAY` uniquement). Signed URLs
-        régénérées à chaque GET (5 min de validité).
+        Retourne les `PublicPhoto` (variant **`DISPLAY` uniquement** — jamais `ORIGINAL`
+        au client ni au prestataire, même en signed URL courte ; ajustement CTO post-Ticket 3.3).
+        Signed URLs régénérées à chaque GET (5 min de validité).
 
         Ownership vérifié serveur : le client doit être propriétaire, le
         prestataire doit être ACCEPTED.

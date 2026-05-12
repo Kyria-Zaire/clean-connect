@@ -685,10 +685,10 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 - ✅ Pino logger : redaction étendue (`*.sessionToken`, `*.tokenDigest`, `*.cloudinaryParams.signature`, `*.cloudinaryParams.api_key`, `*.signature`, `*.api_secret`).
 - ✅ Tests :
   - **Unit** `cloudinary.client.spec.ts` (11) : factory off/on, parse URL invalide → crash boot, `signUploadParams` (signature + publicId), `digestToken` déterministe, `getResource` (404 / 5xx).
-  - **Unit** `photos.service.spec.ts` (~20) : presign happy, RBAC refusé (CLIENT, presta non-assigné), FF off, confirm happy, replay idempotent, cross-mission, captureClientUuid mismatch, sessionToken mismatch, expiration, cloudinaryPublicId mismatch, asset Cloudinary missing.
+  - **Unit** `photos.service.spec.ts` (~20) : presign happy, RBAC refusé (CLIENT, presta non-assigné), FF off, confirm happy, replay idempotent, cross-mission, captureClientUuid mismatch, sessionToken mismatch, expiration, cloudinaryPublicId mismatch, asset Cloudinary missing, **Cloudinary bytes > session.maxBytes → 400**.
   - **Intégration** `photos.integration.spec.ts` (8/8 verts) : presign happy + persistance DB (`tokenDigest` ≠ `sessionToken`), 403 non-assigné, confirm happy (Photo persistée + audit `PHOTO_CONFIRMED`), replay idempotent, **409 cross-mission** (même presta assigné aux 2 missions — sinon RBAC bloque avant), 409 sessionToken forgé, 410 expired, 422 asset Cloudinary missing.
-  - Total : **158 unit** + **77 intégration** verts.
-- ✅ OpenAPI bump `1.0.5-prd003-build-ticket-3.3-photos-presign` :
+  - Total : **159 unit** + **78 intégration** verts (post bump merge PR #9).
+- ✅ OpenAPI bump `1.0.5-prd003-build-ticket-3.3-photos-presign` puis **`1.0.6-prd003-photos-cto-merge-followup`** (5 ajustements CTO merge PR #9) :
   - `PresignPhotoUploadInput` enrichi (`missionId`).
   - `PhotoUploadSignatureResponse` enrichi (`sessionToken` + doc one-shot).
   - `ConfirmPhotoUploadInput` enrichi (`sessionToken` + `photoId` + doc idempotence offline).
@@ -696,11 +696,12 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
   - `PhotoErrorCode` + `PHOTOS_DISABLED`.
   - `503 PHOTOS_DISABLED` documenté sur presign + confirm.
   - Build status matrix actualisée (3.3 ✅).
+  - **1.0.6** : replay `confirm` (`201` + `idempotent: true`), `ORIGINAL` / signed URLs (règle anti-fuite), sessions abandonnées, timeouts Cloudinary + retry idempotent, `400` confirm `PHOTO_MAX_BYTES_EXCEEDED` vs `session.maxBytes`, `PhotoVariant` doc.
   - Redocly lint 0 erreur.
 
 **Hors-scope 3.3** (confirmé CTO — à traiter dans tickets suivants) :
 - ❌ Capture `PaymentIntent` (`stripe.paymentIntents.capture`) → **3.4**.
-- ❌ Transfer prestataire (`stripe.transfers.create`) → **3.4** + **3.5**.
+- ❌ Transfer prestataire (`stripe.transfers.create`) → **3.5** uniquement (correction CTO : **pas** en 3.4).
 - ❌ Validation mission finale (`POST /missions/:id/validate`) → **3.4**.
 - ❌ Auto-release T+48h ouvrées + BullMQ delayed job → **3.4** + **3.5**.
 - ❌ Refund / payout / DLQ alerting → **3.5**.
@@ -713,6 +714,17 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 - `photos-cloudinary-signature-sha1` : le SDK Cloudinary signe en SHA-1. C'est une contrainte fournisseur. Documenté dans `cloudinaryParams.signatureAlgorithm='sha1'`. Pas de migration possible côté Cloudinary à court terme.
 - `photos-captureclientuuid-unique-per-mission` : on a UNIQUE `(missionId, captureClientUuid, variant)` sur `Photo`, mais pas sur `PhotoUploadSession` (deux presigns successifs avec même UUID restent autorisés tant que la précédente expire). À évaluer Verify (faut-il forcer UNIQUE sur session active ?).
 - `photos-bytes-decimal-zod-money` : le champ `bytes` côté `photoInternalSchema` réutilise `moneyCentsSchema` (entier ≥ 0). C'est un raccourci, à scinder en `nonNegativeIntSchema` dédié.
+
+**Ajustements CTO merge final PR #9** (Ticket 3.3 — intégrés avant merge `main`, 2026-05-12) :
+1. **OpenAPI** : `POST /photos/confirm` — replay documenté : réponse **`201`** avec **`idempotent: true`** (retry safe sans double `Photo`).
+2. **`PhotosService.confirm`** : garde-fou `bytes` asset Cloudinary **`<= PhotoUploadSession.maxBytes`** (plafond scellé au presign), en plus du plafond global 10 MiB — `400 PHOTO_MAX_BYTES_EXCEEDED`.
+3. **OpenAPI + schéma `PhotoVariant`** : `ORIGINAL` **jamais** exposé publiquement (ni au client ni au prestataire, y compris signed URL courte) ; réservé **ADMIN** (support, litige, audit). `GET /missions/{id}/photos` = **`DISPLAY` only**.
+4. **OpenAPI presign** : cycle de vie sessions **abandonnées** (`consumedAt` NULL jusqu'à confirm ou expiration ; après `expiresAt` sans confirm → `410` ; purge/orphans → **3.5** `photos-orphan-cleanup-job`).
+5. **OpenAPI + `CloudinaryClient`** : timeouts / 5xx sur `getResource` — retry **mobile** sur `confirm` safe grâce à l'idempotence (`idempotent: true` après premier succès).
+
+**Backlog Ticket 3.4** (démarrage après merge PR #9 sur `main` — correction CTO **sans** `stripe.transfers.create`) :
+- `POST /v1/missions/:id/complete`, `POST /v1/missions/:id/validate`, quotas photos BEFORE/AFTER, fenêtre litige, planification auto-release (BullMQ), **`stripe.paymentIntents.capture`** après validation client ou auto-release, webhook `payment_intent.succeeded` → `Payment CAPTURED`, mission `COMPLETED` / `DISPUTED`, ownership capture **SYSTEM / ADMIN exceptionnel** uniquement, tests de course validation vs auto-release.
+- **Hors 3.4** : transfer vers prestataire, webhooks `transfer.*`, refund orchestration, retry transfer, DLQ replay UI, orphan cleanup final → **3.5**.
 
 ### 5.2 Garde-fous transverses (rappel — actifs sur tous les tickets Build)
 
