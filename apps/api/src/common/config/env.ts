@@ -147,6 +147,25 @@ const envSchema = z
     SENTRY_RELEASE: z.string().min(1).max(128).optional(),
     SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0.1),
 
+    /**
+     * PRD-004 Ticket 4.1 (A3) — métriques Prometheus.
+     *
+     * `METRICS_ENABLED` : feature flag global de l'endpoint `/api/internal/metrics`.
+     * En prod, valeur `true` recommandée (sinon Prometheus ne scrape rien).
+     * En tests intégration : `false` par défaut pour éviter pollution registry
+     * entre suites parallèles.
+     *
+     * `METRICS_BEARER_TOKEN` : token statique opaque (≥ 32 chars, hex/base64)
+     * partagé avec l'agent Prometheus. Vérifié en `timingSafeEqual` côté guard.
+     * Crash boot si `METRICS_ENABLED=true` en production sans token (cf.
+     * `superRefine` plus bas).
+     */
+    METRICS_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('true')
+      .transform((v) => v !== 'false'),
+    METRICS_BEARER_TOKEN: z.string().min(32).max(256).optional(),
+
     THROTTLE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(120),
 
@@ -229,6 +248,17 @@ const envSchema = z
           path: ['STRIPE_WEBHOOK_SECRET'],
         })
       }
+    }
+    // Garde-fou PRD-004 Ticket 4.1 (A3) : en production, l'endpoint /metrics
+    // doit obligatoirement être protégé par un token. Crash boot si le flag
+    // est activé sans token (sinon scraper anonyme = exposition labels infra).
+    if (data.METRICS_ENABLED && data.NODE_ENV === 'production' && !data.METRICS_BEARER_TOKEN) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'METRICS_BEARER_TOKEN obligatoire en production quand METRICS_ENABLED=true (PRD-004 A3).',
+        path: ['METRICS_BEARER_TOKEN'],
+      })
     }
     // Garde-fou PRD-003 Ticket 3.3 : si Photos activées, l'URL Cloudinary doit
     // être présente (sinon le module crash au démarrage faute de credentials).
