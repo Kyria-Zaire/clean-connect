@@ -8,6 +8,9 @@ import { ZodValidationPipe } from 'nestjs-zod'
 
 import { loadEnv } from './common/config/env'
 import { ConditionalThrottlerGuard } from './common/guards/conditional-throttler.guard'
+import { getCurrentTraceId } from './common/logger/correlation'
+import { pinoLogFormatter } from './common/logger/log-sanitizer'
+import { REDACTION_CENSOR, REDACTION_PATHS } from './common/logger/redaction'
 import { PrismaModule } from './common/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
@@ -24,6 +27,18 @@ import { UsersModule } from './modules/users/users.module'
       isGlobal: true,
       validate: () => loadEnv(),
     }),
+    /**
+     * Pino structured logging — PRD-004 Ticket 4.1 Build A2.
+     *
+     * - Production : JSON ligne par événement (LOG_LEVEL=info), pas de
+     *   `pino-pretty` (coûteux + couleurs inutiles en agrégation).
+     * - Development : `pino-pretty` lisible pour debug local.
+     * - Redaction exhaustive : voir `common/logger/redaction.ts` (classes
+     *   A/B/C — ADR-016). Toute clé sensible ajoutée doit y être listée.
+     * - Corrélation : `requestId` lu depuis `req.requestId` (posé par
+     *   `RequestIdMiddleware`, A1) ; `traceId` lu depuis le span Sentry/OTel
+     *   actif (`getCurrentTraceId`). Quand pas de span actif → champ omis.
+     */
     LoggerModule.forRootAsync({
       useFactory: () => {
         const env = loadEnv()
@@ -34,59 +49,29 @@ import { UsersModule } from './modules/users/users.module'
               env.NODE_ENV === 'development'
                 ? { target: 'pino-pretty', options: { singleLine: true, translateTime: 'HH:MM:ss' } }
                 : undefined,
-            // Redactor PII (rules securite + photos-rgpd + stripe + PRD-001 §4.3 + PRD-002 §4 + PRD-003 Ticket 3.1)
+            // Réutilise le `requestId` UUID posé par `RequestIdMiddleware`.
+            // Le typage `unknown` ici est une rustine `pino-http` : la
+            // signature attend `IncomingMessage`, et `req.requestId` est
+            // attaché via augmentation Express.
+            genReqId: (req: unknown): string => {
+              const r = req as { requestId?: string }
+              return r.requestId ?? 'unknown'
+            },
+            // Ajoute `traceId` à chaque ligne de log HTTP — `requestId` est
+            // déjà émis par Pino via `genReqId` (sous le champ `req.id`).
+            customProps: () => {
+              const traceId = getCurrentTraceId()
+              return traceId ? { traceId } : {}
+            },
             redact: {
-              paths: [
-                'req.headers.authorization',
-                'req.headers.cookie',
-                // PRD-003 : signature Stripe = secret HMAC, jamais en logs
-                'req.headers["stripe-signature"]',
-                'req.headers["idempotency-key"]',
-                'req.body.password',
-                'req.body.passwordHash',
-                'req.body.refreshToken',
-                'req.body.accessToken',
-                'req.body.cardNumber',
-                'req.body.cvv',
-                // PRD-002 : adresse complète interdite avant ACCEPT (logs / responses)
-                'req.body.address.street',
-                'req.body.address.location',
-                'res.headers["set-cookie"]',
-                '*.password',
-                '*.passwordHash',
-                '*.accessToken',
-                '*.refreshToken',
-                '*.tokenHash',
-                '*.email',
-                '*.street',
-                '*.location.lat',
-                '*.location.lng',
-                // PRD-003 Stripe : aucun secret / token Stripe en logs (ADR-008 + rule stripe)
-                '*.client_secret',
-                '*.clientSecret',
-                '*.stripeAccountId',
-                '*.stripeCustomerId',
-                '*.payment_method',
-                '*.paymentMethod',
-                '*.card.number',
-                '*.bankAccount',
-                '*.cardNumber',
-                '*.cvv',
-                // PRD-003 photos : captureClientUuid = clé idempotence privée + coords GPS
-                '*.captureClientUuid',
-                '*.gpsLat',
-                '*.gpsLng',
-                '*.gps.lat',
-                '*.gps.lng',
-                // PRD-003 Ticket 3.3 — secrets Cloudinary upload session.
-                '*.sessionToken',
-                '*.tokenDigest',
-                '*.cloudinaryParams.signature',
-                '*.cloudinaryParams.api_key',
-                '*.signature',
-                '*.api_secret',
-              ],
-              censor: '[REDACTED]',
+              paths: [...REDACTION_PATHS],
+              censor: REDACTION_CENSOR,
+            },
+            // Formatter dédié : traversée récursive (cycles + DoS bornés).
+            // Couvre tous les payloads profonds (BullMQ jobs, webhook Stripe)
+            // que `fast-redact` (paths plats) ne peut pas atteindre.
+            formatters: {
+              log: pinoLogFormatter,
             },
           },
         }
