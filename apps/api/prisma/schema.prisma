@@ -229,6 +229,7 @@ model User {
   missionProposals      MissionProposal[]
   missionEvents         MissionEvent[]
   photoUploadSessions   PhotoUploadSession[] @relation("PhotoUploadSessionUploader")
+  photosUploaded        Photo[]              @relation("PhotoUploadedBy")
 
   @@index([role])
   @@index([deletedAt])
@@ -593,6 +594,14 @@ model PhotoUploadSession {
 
   phase PhotoType @map("phase")
 
+  /// Variant ciblé : ORIGINAL ou DISPLAY (ADR-009 dual variant). Le mobile fait
+  /// 2 presigns + 2 uploads + 2 confirms (un par variant), avec le **même**
+  /// `captureClientUuid` pour relier ORIGINAL/DISPLAY côté backend.
+  variant PhotoVariant @default(ORIGINAL) @map("variant")
+
+  /// UUID v4 client — borne anti cross-session (`confirm` vérifie l'égalité).
+  captureClientUuid String @map("capture_client_uuid") @db.Uuid
+
   /// SHA-256 hex du jeton opaque — le secret n'est **jamais** stocké en clair.
   tokenDigest String    @unique @map("token_digest") @db.VarChar(64)
   expiresAt   DateTime  @map("expires_at")
@@ -601,11 +610,20 @@ model PhotoUploadSession {
   /// Taille max fichier (octets) — défaut 10 MiB (ADR-009).
   maxBytes Int @default(10485760) @map("max_bytes")
 
+  /// MIME annoncé par le mobile (whitelist Zod). Sert au confirm pour
+  /// re-vérifier la cohérence sans re-poser un index lourd.
+  mimeType String @map("mime_type") @db.VarChar(32)
+
+  /// Cloudinary public_id pré-calculé serveur — `${env}/missions/{missionId}/{phase}/{captureClientUuid}/{variant}`.
+  /// Le mobile NE peut PAS forger un autre public_id (signature Cloudinary scellée).
+  cloudinaryPublicId String @map("cloudinary_public_id") @db.VarChar(1024)
+
   createdAt DateTime @default(now()) @map("created_at")
 
   photos Photo[]
 
   @@index([missionId, phase])
+  @@index([expiresAt])
   @@map("photo_upload_sessions")
 }
 
@@ -619,6 +637,12 @@ model Photo {
   id        String  @id @db.Uuid
   missionId String  @map("mission_id") @db.Uuid
   mission   Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  /// PRD-003 Ticket 3.3 — uploader réel, pour audit RGPD (droit à l'effacement
+  /// scoped utilisateur) et RBAC lecture (le prestataire ne lit que ses
+  /// uploads). Renseigné côté `confirm` à partir de `photoUploadSession.uploaderUserId`.
+  uploadedByUserId String @map("uploaded_by_user_id") @db.Uuid
+  uploadedBy       User   @relation("PhotoUploadedBy", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
 
   type PhotoType
 
@@ -661,8 +685,10 @@ model Photo {
   photoDeletionLogs PhotoDeletionLog[]
 
   @@unique([missionId, captureClientUuid, variant])
+  @@unique([cloudinaryPublicId])
   @@index([missionId, type])
   @@index([photoUploadSessionId])
+  @@index([uploadedByUserId])
   @@map("photos")
 }
 

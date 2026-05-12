@@ -16,8 +16,8 @@
 | **ID** | `PRD-003` |
 | **Slug** | `photos-paiements` |
 | **Titre** | Photos AVANT/APRÈS + Stripe Connect Express (escrow) — sous-systèmes Media Evidence / Payment Lifecycle / Mission Completion / Stripe Connect Onboarding |
-| **Version PRD** | `0.5` (Design ✅ signé-off, Build Tickets 3.1 + 3.2 livrés 2026-05-12) |
-| **Statut** | `BUILD_IN_PROGRESS` (Tickets 3.1 + 3.2 livrés, en attente validation CTO avant Ticket 3.3) |
+| **Version PRD** | `0.6` (Design ✅ signé-off, Build Tickets 3.1 + 3.2 + 3.3 livrés 2026-05-12) |
+| **Statut** | `BUILD_IN_PROGRESS` (Tickets 3.1 + 3.2 + 3.3 livrés, en attente validation CTO avant Ticket 3.4) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` (cadrage) → `architecte-api` + `securite` + `stripe` + `photos-rgpd` (Design) |
 | **Persona pilote Discover** | `senior-dev` |
@@ -633,6 +633,86 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 **`TODO(debt)` ouverts Ticket 3.2** (à clore Verify ou ticket dédié) :
 - `payments-client-secret-replay-strict-vs-loose` : en replay idempotent, on régénère le `clientSecret` via `stripe.paymentIntents.retrieve(...)` (loose). Strict serait `null` côté replay pour forcer le mobile à conserver le secret initial. Décision CTO en Verify V2.
 - `payments-failed-mission-status-stay-pending` : sur `payment_intent.payment_failed`, la mission reste `PENDING_PAYMENT` (cf. AC-B.6). Le mobile doit relancer un nouveau `POST /payments/intent` avec une **nouvelle** `Idempotency-Key`. À documenter côté mobile API doc.
+
+**Ajustements CTO Ticket 3.2** (post-validation, intégrés Ticket 3.3) :
+1. ✅ **Idempotency replay** : doc OpenAPI explicite (mode `loose` → régénération `clientSecret` via `paymentIntents.retrieve`).
+2. ✅ **Retry après `payment_failed` / `payment_cancelled`** : doc OpenAPI + dette `payments-failed-mission-status-stay-pending`.
+3. ✅ **Livemode consistency** : `PaymentDomainHandler.assertEnvConsistency(event)` rejette `event.livemode !== (APP_ENV==='production')` AVANT toute mutation. Intégration test `payments-domain.integration.spec.ts` (`livemode=true` sur `APP_ENV=recette` → erreur, mission/payment intacts).
+4. ✅ **Capture endpoint futur** : doc OpenAPI explicite (ownership `SYSTEM` + `ADMIN exceptionnel` uniquement).
+
+### 5.1ter Ticket 3.3 — Cloudinary signed upload + PhotoUploadSession (livré 2026-05-12)
+
+**Périmètre livré** (gated `FF_PHOTOS_ENABLED`, défaut `false` ⇒ `503 PHOTOS_DISABLED`) :
+
+- ✅ Schéma Prisma : `PhotoUploadSession` étendue (`variant: PhotoVariant`, `captureClientUuid: UUID`, `mimeType: VARCHAR(32)`, `cloudinaryPublicId: VARCHAR(1024)`, `tokenDigest: VARCHAR(64) UNIQUE`, `expiresAt`, `consumedAt`, `maxBytes`), `Photo` étendue (`uploadedByUserId: UUID`, `variant: PhotoVariant`, `captureClientUuid: UUID`, `cloudinaryPublicId UNIQUE`, `checksumSha256`, `imageWidth/imageHeight`, `bytes`, `flagSuspicious`, `gpsMissing`). Migration `20260512250000_prd003_photos_3_3` (add columns + indices `expires_at`, `uploaded_by_user_id`, UNIQUE `cloudinary_public_id`).
+- ✅ Feature flag `FF_PHOTOS_ENABLED` strict (Zod superRefine — `CLOUDINARY_URL` devient obligatoire si `true`). Env vars Cloudinary + TTLs (`PHOTO_UPLOAD_SESSION_TTL_SECONDS=300`, `PHOTO_SIGNED_URL_TTL_SECONDS=300`).
+- ✅ `CloudinaryClient` :
+  - Parse `CLOUDINARY_URL` (cloud_name, api_key, api_secret) via util locale (pas de mutation `process.env`).
+  - `signUploadParams({ folder, publicId, mimeType, maxBytes })` : signature SHA-1 HMAC Cloudinary (algorithm imposé par le SDK), retourne `{ uploadUrl, cloudName, apiKey, publicId, folder, type='private', timestamp, signature, signatureAlgorithm='sha1', mimeType, maxBytes }`.
+  - `getResource(publicId)` : vérifie l'existence + métadonnées (width/height/bytes/format) — convertit 404 Cloudinary en `CloudinaryResourceNotFoundError`, 5xx en `CloudinaryApiError`.
+  - `signedReadUrl(publicId, ttlSec)` : signed URL courte (5 min) — utilisée Ticket 3.4 pour `GET /missions/:id/photos`.
+  - Token static `digestToken(token) → sha256 hex` (Pino redactor masque les deux).
+- ✅ `PhotosService` :
+  - `presign({ missionId, phase, variant, captureClientUuid, bytes, mimeType, gps }, actor)` :
+    - Vérifie `FF_PHOTOS_ENABLED` (sinon `503`).
+    - RBAC : `actor.role ∈ {PRESTATAIRE assigné, ADMIN}` (CLIENT refusé, prestataire non-assigné → `403 PHOTO_FORBIDDEN`).
+    - Génère `opaqueToken = randomBytes(32).toString('base64url')` (64 chars). Stocke uniquement `tokenDigest = sha256(opaqueToken)`.
+    - Crée `PhotoUploadSession` avec `captureClientUuid` scellé, `cloudinaryPublicId` figé serveur (path `<prefix>/missions/<missionId>/<phase>/<captureClientUuid>/<variant>`), `expiresAt = NOW() + TTL`.
+    - Demande signed upload Cloudinary (HMAC SHA-1 SDK).
+    - Audit `PHOTO_UPLOAD_PRESIGNED` (MissionEvent).
+    - Retourne `{ photoUploadSessionId, sessionToken (one-shot), uploadUrl, cloudinaryParams, expiresAt, maxBytes, allowedMimeTypes }`.
+  - `confirm({ photoUploadSessionId, sessionToken, photoId, captureClientUuid, cloudinaryPublicId, checksumSha256, imageWidth, imageHeight, bytes, mimeType, gps }, missionIdParam, actor)` :
+    - Vérifie `FF_PHOTOS_ENABLED` + RBAC mission.
+    - Auth session : `findSessionByTokenDigest(sha256(sessionToken))` — mismatch ou `null` → `409 PHOTO_UPLOAD_SESSION_ALREADY_CONSUMED` (sémantique "session non trouvée").
+    - Vérifie `session.missionId === missionIdParam` (anti cross-mission → `409 PHOTO_UPLOAD_SESSION_MISSION_MISMATCH`).
+    - Vérifie `session.uploaderUserId === actor.id` (anti cross-user → `409`).
+    - Vérifie `session.captureClientUuid === body.captureClientUuid` (anti cross-session → `409 PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH`).
+    - Vérifie `session.cloudinaryPublicId === body.cloudinaryPublicId` (anti redirection → `422 PHOTO_INVALID_STATE`).
+    - **Idempotence forte** : si `findPhotoByCapture(missionId, captureClientUuid, variant)` retourne déjà une `Photo` ET session déjà `consumedAt` → réponse `idempotent: true` (renvoie la photo initiale, pas de side-effect, pas d'appel Cloudinary).
+    - Vérifie expiration : `session.expiresAt < NOW()` → `410 PHOTO_UPLOAD_SESSION_EXPIRED`.
+    - Appelle `cloudinary.getResource(publicId)` (asset manquant → `422 PHOTO_INVALID_STATE`). Vérifie bytes/width/height/format reportés par Cloudinary (source de vérité).
+    - Transaction Prisma : `Photo` créée (`uploadedByUserId=actor.id`, `cloudinaryPublicId UNIQUE`, `gpsMissing` calculé), `PhotoUploadSession` marquée `consumedAt=NOW()`, audit `PHOTO_CONFIRMED` (MissionEvent).
+    - Retourne `ConfirmPhotoUploadResponse` (`idempotent: false`, `photoId`, `missionId`, `phase`, `variant`, `captureClientUuid`, `bytes` Cloudinary, `imageWidth/Height`, `gpsMissing`, `syncedAt`).
+- ✅ Contrôleur HTTP `PhotosController` :
+  - `POST /v1/missions/:id/photos/presign` — `@Roles(PRESTATAIRE, ADMIN)`, DTO `PresignPhotoUploadBodyDto` (nestjs-zod), erreurs typées (`PhotoForbiddenException` → 403, `PhotosDisabledException` → 503).
+  - `POST /v1/missions/:id/photos/confirm` — idem, mappe tous les codes `PhotoErrorCode` aux bons statuts HTTP (`401/403/404/409/410/422/503`).
+  - Body `missionId` doit égaler le `{id}` du path (anti cross-mission depuis le body).
+- ✅ Zod shared-types étendus :
+  - `photoUploadSessionInternalSchema` enrichi (variant, captureClientUuid, mimeType, cloudinaryPublicId).
+  - `presignPhotoUploadInputSchema` (avec `missionId`), `photoUploadSignatureResponseSchema` (avec `sessionToken`), `confirmPhotoUploadInputSchema` (avec `sessionToken` + `photoId`), `confirmPhotoUploadResponseSchema` (nouveau).
+  - `photoErrorCodeSchema` + `'PHOTOS_DISABLED'`.
+  - `missionEventTypeSchema` + `'PHOTO_UPLOAD_PRESIGNED'` + `'PHOTO_CONFIRMED'`.
+- ✅ Pino logger : redaction étendue (`*.sessionToken`, `*.tokenDigest`, `*.cloudinaryParams.signature`, `*.cloudinaryParams.api_key`, `*.signature`, `*.api_secret`).
+- ✅ Tests :
+  - **Unit** `cloudinary.client.spec.ts` (11) : factory off/on, parse URL invalide → crash boot, `signUploadParams` (signature + publicId), `digestToken` déterministe, `getResource` (404 / 5xx).
+  - **Unit** `photos.service.spec.ts` (~20) : presign happy, RBAC refusé (CLIENT, presta non-assigné), FF off, confirm happy, replay idempotent, cross-mission, captureClientUuid mismatch, sessionToken mismatch, expiration, cloudinaryPublicId mismatch, asset Cloudinary missing.
+  - **Intégration** `photos.integration.spec.ts` (8/8 verts) : presign happy + persistance DB (`tokenDigest` ≠ `sessionToken`), 403 non-assigné, confirm happy (Photo persistée + audit `PHOTO_CONFIRMED`), replay idempotent, **409 cross-mission** (même presta assigné aux 2 missions — sinon RBAC bloque avant), 409 sessionToken forgé, 410 expired, 422 asset Cloudinary missing.
+  - Total : **158 unit** + **77 intégration** verts.
+- ✅ OpenAPI bump `1.0.5-prd003-build-ticket-3.3-photos-presign` :
+  - `PresignPhotoUploadInput` enrichi (`missionId`).
+  - `PhotoUploadSignatureResponse` enrichi (`sessionToken` + doc one-shot).
+  - `ConfirmPhotoUploadInput` enrichi (`sessionToken` + `photoId` + doc idempotence offline).
+  - `ConfirmPhotoUploadResponse` ajouté (avec `idempotent: boolean`).
+  - `PhotoErrorCode` + `PHOTOS_DISABLED`.
+  - `503 PHOTOS_DISABLED` documenté sur presign + confirm.
+  - Build status matrix actualisée (3.3 ✅).
+  - Redocly lint 0 erreur.
+
+**Hors-scope 3.3** (confirmé CTO — à traiter dans tickets suivants) :
+- ❌ Capture `PaymentIntent` (`stripe.paymentIntents.capture`) → **3.4**.
+- ❌ Transfer prestataire (`stripe.transfers.create`) → **3.4** + **3.5**.
+- ❌ Validation mission finale (`POST /missions/:id/validate`) → **3.4**.
+- ❌ Auto-release T+48h ouvrées + BullMQ delayed job → **3.4** + **3.5**.
+- ❌ Refund / payout / DLQ alerting → **3.5**.
+- ❌ EXIF strip serveur (DISPLAY) + GPS extraction depuis EXIF → **différé Ticket 3.5** (mobile compresse déjà 1600px JPEG 75 → EXIF retiré côté client ; serveur ne re-traite pas le binaire MVP). GPS arrive en clair via `gps` du body presign/confirm (mobile envoie via API Géolocalisation device).
+- ❌ Job BullMQ orphan-cleanup (sessions `expiresAt < NOW()` + assets Cloudinary orphelins) → **3.5** (schéma prêt côté DB, exécution planifiée).
+
+**`TODO(debt)` ouverts Ticket 3.3** (à clore Verify ou ticket dédié) :
+- `photos-orphan-cleanup-job` : sessions `PhotoUploadSession.consumedAt IS NULL AND expiresAt < NOW()` ne sont pas purgées (et l'éventuel asset Cloudinary uploaded reste). Scaffolding du job BullMQ non livré en 3.3 (gated FF, planifié 3.5).
+- `photos-exif-strip-server-side` : on fait confiance au mobile pour strip EXIF avant upload (compression 1600px JPEG 75). Pas de re-traitement serveur du binaire. À auditer Verify (`Audit H` — signed URL 5min suffit-il pour la photo `DISPLAY` ? Confirmer absence EXIF résiduel).
+- `photos-cloudinary-signature-sha1` : le SDK Cloudinary signe en SHA-1. C'est une contrainte fournisseur. Documenté dans `cloudinaryParams.signatureAlgorithm='sha1'`. Pas de migration possible côté Cloudinary à court terme.
+- `photos-captureclientuuid-unique-per-mission` : on a UNIQUE `(missionId, captureClientUuid, variant)` sur `Photo`, mais pas sur `PhotoUploadSession` (deux presigns successifs avec même UUID restent autorisés tant que la précédente expire). À évaluer Verify (faut-il forcer UNIQUE sur session active ?).
+- `photos-bytes-decimal-zod-money` : le champ `bytes` côté `photoInternalSchema` réutilise `moneyCentsSchema` (entier ≥ 0). C'est un raccourci, à scinder en `nonNegativeIntSchema` dédié.
 
 ### 5.2 Garde-fous transverses (rappel — actifs sur tous les tickets Build)
 

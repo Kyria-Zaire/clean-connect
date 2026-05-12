@@ -35,5 +35,16 @@ process.env['FF_PAYMENTS_ENABLED'] = process.env['FF_PAYMENTS_ENABLED'] ?? 'fals
 process.env['APP_VERSION'] = process.env['APP_VERSION'] ?? '0.0.0-test'
 process.env['PAYMENT_PLATFORM_FEE_RATE'] = process.env['PAYMENT_PLATFORM_FEE_RATE'] ?? '0.18'
 
+// PRD-003 Ticket 3.3 — feature flag Photos + Cloudinary placeholders.
+// La suite photos.integration override `FF_PHOTOS_ENABLED='true'` + override
+// le provider Cloudinary (stub). Cette config ne crée donc aucun appel réseau
+// même quand le flag est activé.
+process.env['FF_PHOTOS_ENABLED'] = process.env['FF_PHOTOS_ENABLED'] ?? 'false'
+process.env['CLOUDINARY_URL'] =
+  process.env['CLOUDINARY_URL'] ?? 'cloudinary://ci_key:ci_secret@ci_cloud'
+process.env['CLOUDINARY_FOLDER_PREFIX'] = process.env['CLOUDINARY_FOLDER_PREFIX'] ?? 'ci'
+process.env['PHOTO_UPLOAD_SESSION_TTL_SECONDS'] = process.env['PHOTO_UPLOAD_SESSION_TTL_SECONDS'] ?? '300'
+process.env['PHOTO_SIGNED_URL_TTL_SECONDS'] = process.env['PHOTO_SIGNED_URL_TTL_SECONDS'] ?? '300'
+
 process.env['THROTTLE_LIMIT'] = process.env['THROTTLE_LIMIT'] ?? '10000'
 process.env['THROTTLE_TTL_SECONDS'] = process.env['THROTTLE_TTL_SECONDS'] ?? '60'

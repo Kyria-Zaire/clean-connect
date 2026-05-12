@@ -13,6 +13,7 @@ import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
 import { MissionsModule } from './modules/missions/missions.module'
 import { PaymentsModule } from './modules/payments/payments.module'
+import { PhotosModule } from './modules/photos/photos.module'
 import { UsersModule } from './modules/users/users.module'
 
 @Module({
@@ -75,6 +76,13 @@ import { UsersModule } from './modules/users/users.module'
                 '*.gpsLng',
                 '*.gps.lat',
                 '*.gps.lng',
+                // PRD-003 Ticket 3.3 — secrets Cloudinary upload session.
+                '*.sessionToken',
+                '*.tokenDigest',
+                '*.cloudinaryParams.signature',
+                '*.cloudinaryParams.api_key',
+                '*.signature',
+                '*.api_secret',
               ],
               censor: '[REDACTED]',
             },
@@ -130,6 +138,11 @@ import { UsersModule } from './modules/users/users.module'
      * (cf. `PaymentsModule.register()`).
      */
     PaymentsModule,
+    /**
+     * PRD-003 Ticket 3.3 — module Photos (Cloudinary signed upload +
+     * PhotoUploadSession). Gated par `FF_PHOTOS_ENABLED` au niveau service.
+     */
+    PhotosModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ConditionalThrottlerGuard },
