@@ -26,6 +26,7 @@ import { MissionsModule } from '../missions/missions.module'
 import { PaymentsModule } from '../payments/payments.module'
 
 import { AutoReleaseCoreModule } from './auto-release/auto-release-core.module'
+import { AutoReleaseSafetyNetScheduler } from './auto-release/auto-release-safety-net.scheduler'
 import { AutoReleaseExecutor } from './auto-release/auto-release.executor'
 import { AutoReleaseProcessor } from './auto-release/auto-release.processor'
 import { MissionCompletionController } from './mission-completion.controller'
@@ -43,6 +44,7 @@ import { MissionPhotoQuotaService } from './photo-quota.service'
   providers: [
     AutoReleaseExecutor,
     AutoReleaseProcessor,
+    AutoReleaseSafetyNetScheduler,
     MissionPhotoQuotaService,
     MissionCompletionService,
   ],

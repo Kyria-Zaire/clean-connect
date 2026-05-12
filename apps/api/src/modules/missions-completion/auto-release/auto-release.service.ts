@@ -33,6 +33,9 @@ import {
   AUTO_RELEASE_MAX_ATTEMPTS,
   AUTO_RELEASE_PROCESS_JOB,
   AUTO_RELEASE_QUEUE,
+  AUTO_RELEASE_SAFETY_GRACE_MS,
+  AUTO_RELEASE_SAFETY_LIMIT,
+  AUTO_RELEASE_STUCK_LOCK_MS,
   buildAutoReleaseBullJobId,
   buildCaptureIdempotencyKey,
 } from './auto-release.constants'
@@ -190,5 +193,88 @@ export class AutoReleaseService {
       'auto-release.queue.cancelled',
     )
     return { cancelled: true }
+  }
+
+  /**
+   * PRD-004 Ticket 4.2 — Safety-net cron (AC-4.2.4.1 + AC-4.2.2.1).
+   *
+   * Appelé par `AutoReleaseSafetyNetScheduler` toutes les heures.
+   *
+   * Pour chaque job stuck (SCHEDULED dépassé OU RUNNING avec lock orphelin) :
+   *  1. Si RUNNING → relâche le lock applicatif (`releaseStuckLockTx`).
+   *  2. Calcule un `delay` court (~10s) pour replanifier vite — on a déjà
+   *     dépassé `scheduledFor`, plus la peine de re-attendre 48h.
+   *  3. Poste un job BullMQ avec le `jobId` déterministe. BullMQ déduplique :
+   *     si un job avec le même `jobId` existe encore en Redis (cas rare), le
+   *     second `add()` est un no-op silencieux.
+   *
+   * Retourne un récap pour observabilité.
+   *
+   * Idempotence forte :
+   *  - L'`AutoReleaseExecutor` revalide les invariants
+   *    (`canReleaseEscrow` + `tryAcquireLockTx`) avant tout side-effect.
+   *  - Si une mission est passée `COMPLETED` ou `DISPUTE_OPEN` entre-temps,
+   *    l'executor short-circuite et marque le job COMPLETED/CANCELLED.
+   */
+  async reenqueueStuck(opts: { now: Date }): Promise<{
+    scanned: number
+    relockReleased: number
+    reenqueued: number
+  }> {
+    const candidates = await this.jobs.findStuckJobs({
+      now: opts.now,
+      graceMs: AUTO_RELEASE_SAFETY_GRACE_MS,
+      stuckLockMs: AUTO_RELEASE_STUCK_LOCK_MS,
+      limit: AUTO_RELEASE_SAFETY_LIMIT,
+    })
+    let relockReleased = 0
+    let reenqueued = 0
+    const stuckLockCutoff = new Date(opts.now.getTime() - AUTO_RELEASE_STUCK_LOCK_MS)
+    for (const job of candidates) {
+      if (job.status === 'RUNNING') {
+        const r = await this.prisma.$transaction((tx) =>
+          this.jobs.releaseStuckLockTx(tx, { jobId: job.id, stuckLockCutoff }),
+        )
+        if (r === 0) {
+          // Le worker a relâché le lock entre `findStuckJobs` et la
+          // transaction → on saute, le job vit sa vie normale.
+          this.logger.log(
+            { autoReleaseJobId: job.id, missionId: job.missionId },
+            'auto-release.safety.skip_lock_race',
+          )
+          continue
+        }
+        relockReleased += 1
+      }
+      // Replanifie rapidement : on rebascule à ~10s après `now`. Le worker
+      // BullMQ ne traitera que si Redis prend bien le job — sinon le cron
+      // suivant rejouera. `jobId` déterministe = pas de doublon.
+      const delayedAt = new Date(opts.now.getTime() + 10_000)
+      try {
+        await this.enqueueDelayedJob({
+          autoReleaseJobId: job.id,
+          missionId: job.missionId,
+          scheduledFor: delayedAt,
+          bullJobId: buildAutoReleaseBullJobId(job.missionId),
+          now: opts.now,
+        })
+        reenqueued += 1
+      } catch (err) {
+        // Ne casse pas la boucle : on log et on continue, le cron rejouera.
+        this.logger.warn(
+          {
+            autoReleaseJobId: job.id,
+            missionId: job.missionId,
+            err: err instanceof Error ? err.message : 'unknown',
+          },
+          'auto-release.safety.reenqueue_failed',
+        )
+      }
+    }
+    this.logger.log(
+      { scanned: candidates.length, relockReleased, reenqueued },
+      'auto-release.safety.tick_done',
+    )
+    return { scanned: candidates.length, relockReleased, reenqueued }
   }
 }
