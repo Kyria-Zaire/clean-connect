@@ -229,5 +229,10 @@ export const missionEventTypeSchema = z.enum([
   'ACCEPTED',
   'EXPIRED',
   'CANCELLED',
+  // PRD-003 Ticket 3.2 — paiement carte (PaymentIntent) — audit minimal côté mission.
+  'PAYMENT_INTENT_CREATED',
+  'PAYMENT_AUTHORIZED',
+  'PAYMENT_FAILED',
+  'PAYMENT_CANCELLED',
 ])
 export type MissionEventType = z.infer<typeof missionEventTypeSchema>

@@ -23,9 +23,15 @@ import { BullModule } from '@nestjs/bullmq'
 import { Module } from '@nestjs/common'
 
 import { AuthModule } from '../auth/auth.module'
+import { MissionsModule } from '../missions/missions.module'
 
+import { AdminPaymentsController } from './admin-payments.controller'
 import { STRIPE_WEBHOOK_QUEUE } from './payments.constants'
-import { StripeClientFactory } from './stripe/stripe.client'
+import { PaymentsController } from './payments.controller'
+import { PaymentsRepository } from './payments.repository'
+import { PaymentsService } from './payments.service'
+import { StripeClientFactory, STRIPE_CLIENT_TOKEN } from './stripe/stripe.client'
+import { PaymentDomainHandler } from './webhooks/payment-domain.handler'
 import { PaymentsWebhookController } from './webhooks/payments-webhook.controller'
 import { PaymentsWebhookService } from './webhooks/payments-webhook.service'
 import { StripeWebhookProcessor } from './webhooks/stripe-webhook.processor'
@@ -33,6 +39,9 @@ import { StripeWebhookProcessor } from './webhooks/stripe-webhook.processor'
 @Module({
   imports: [
     AuthModule,
+    // PRD-003 Ticket 3.2 — réutilise `MissionsRepository` + `MissionEventService`
+    // + `MatchingService` (exposés via `MissionsModule.exports`).
+    MissionsModule,
     BullModule.registerQueue({
       name: STRIPE_WEBHOOK_QUEUE,
       defaultJobOptions: {
@@ -42,12 +51,27 @@ import { StripeWebhookProcessor } from './webhooks/stripe-webhook.processor'
       },
     }),
   ],
-  controllers: [PaymentsWebhookController],
+  controllers: [
+    PaymentsWebhookController,
+    PaymentsController,
+    AdminPaymentsController,
+  ],
   providers: [
     StripeClientFactory,
+    {
+      // PRD-003 Ticket 3.2 — singleton Stripe SDK injecté via token DI
+      // (`STRIPE_CLIENT_TOKEN`). Une seule instance partagée par tous les
+      // services payments (PaymentsService, PaymentDomainHandler, processor).
+      provide: STRIPE_CLIENT_TOKEN,
+      useFactory: (factory: StripeClientFactory) => factory.build(),
+      inject: [StripeClientFactory],
+    },
+    PaymentsRepository,
+    PaymentsService,
+    PaymentDomainHandler,
     PaymentsWebhookService,
     StripeWebhookProcessor,
   ],
-  exports: [PaymentsWebhookService, StripeClientFactory],
+  exports: [PaymentsWebhookService, StripeClientFactory, PaymentsService],
 })
 export class PaymentsModule {}
