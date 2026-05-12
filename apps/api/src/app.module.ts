@@ -10,6 +10,7 @@ import { ConditionalThrottlerGuard } from './common/guards/conditional-throttler
 import { PrismaModule } from './common/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
+import { MissionsModule } from './modules/missions/missions.module'
 import { UsersModule } from './modules/users/users.module'
 
 @Module({
@@ -28,7 +29,7 @@ import { UsersModule } from './modules/users/users.module'
               env.NODE_ENV === 'development'
                 ? { target: 'pino-pretty', options: { singleLine: true, translateTime: 'HH:MM:ss' } }
                 : undefined,
-            // Redactor PII (rules securite + photos-rgpd + PRD-001 §4.3 contrainte logs)
+            // Redactor PII (rules securite + photos-rgpd + PRD-001 §4.3 + PRD-002 §4 CTO Build)
             redact: {
               paths: [
                 'req.headers.authorization',
@@ -39,6 +40,9 @@ import { UsersModule } from './modules/users/users.module'
                 'req.body.accessToken',
                 'req.body.cardNumber',
                 'req.body.cvv',
+                // PRD-002 : adresse complète interdite avant ACCEPT (logs / responses)
+                'req.body.address.street',
+                'req.body.address.location',
                 'res.headers["set-cookie"]',
                 '*.password',
                 '*.passwordHash',
@@ -46,6 +50,9 @@ import { UsersModule } from './modules/users/users.module'
                 '*.refreshToken',
                 '*.tokenHash',
                 '*.email',
+                '*.street',
+                '*.location.lat',
+                '*.location.lng',
               ],
               censor: '[REDACTED]',
             },
@@ -68,6 +75,7 @@ import { UsersModule } from './modules/users/users.module'
     HealthModule,
     AuthModule,
     UsersModule,
+    MissionsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ConditionalThrottlerGuard },

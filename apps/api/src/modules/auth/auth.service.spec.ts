@@ -52,6 +52,8 @@ const baseUser = (): User => ({
   stripeAccountId: null,
   addressId: null,
   serviceRadiusKm: 15,
+  verifiedAt: new Date('2026-05-12T10:00:00Z'),
+  suspendedAt: null,
   deletedAt: null,
   createdAt: new Date('2026-05-12T10:00:00Z'),
   updatedAt: new Date('2026-05-12T10:00:00Z'),

@@ -22,7 +22,7 @@
 | ID | Slug | Titre | Statut | Sprint | Owner produit | Owner technique | Tag |
 |---|---|---|:-:|:-:|---|---|---|
 | [PRD-001](PRD-001-auth-jwt.md) | `auth-jwt` | Authentification JWT (signup / login / refresh / logout / me) | ✅ `DONE` | S1 | CTO | `senior-dev` + `architecte-api` + `mobile` | [`v0.1.0-auth-foundation`](../../CHANGELOG.md#v010-auth-foundation--2026-05-12) |
-| [PRD-002](PRD-002-missions-geolocalisation.md) | `missions-geolocalisation` | Missions & Géolocalisation (entity, états, scheduling, matching PostGIS) | 🟡 `DESIGN_REVIEW` (sign-off CTO Design requis) | S2 | CTO | `senior-dev` + `architecte-api` + `mobile` | — |
+| [PRD-002](PRD-002-missions-geolocalisation.md) | `missions-geolocalisation` | Missions & Géolocalisation (entity, états, scheduling, matching PostGIS) | ✅ `RELEASED` (Verify validé, merge PR #4 autorisé) | S2 | CTO | `senior-dev` + `architecte-api` + `mobile` | `v0.2.0-missions-foundation` (à tagger après merge) |
 
 ---
 
@@ -48,8 +48,8 @@ PRD-001 (Auth)
 |---|---|:-:|---|
 | **Sprint 0** | Bootstrap monorepo / Docker / Prisma / NestJS / Expo / CI / readyz | ✅ Terminé | [`docs/CAHIER-DES-CHARGES-v1.4.md`](../CAHIER-DES-CHARGES-v1.4.md) |
 | **Sprint 1** | PRD-001 Auth JWT (API + mobile bootstrap) | ✅ Terminé (`v0.1.0-auth-foundation`) | [PRD-001](PRD-001-auth-jwt.md) + [audit final](../security-reviews/2026-05-12-prd-001-auth-verify.md) |
-| **Sprint 2** | PRD-002 Missions & Géolocalisation | 🟡 Design `DESIGN_REVIEW` (Discover validé 2026-05-12) | [PRD-002](PRD-002-missions-geolocalisation.md) |
-| Sprint 3+ | PRD-003 Paiements Stripe / Escrow → bloqué tant que Sprint 2 non `DONE` | ⏳ Backlog | — |
+| **Sprint 2** | PRD-002 Missions & Géolocalisation | ✅ Terminé (Verify validé 2026-05-12 — sign-off CTO accordé) | [PRD-002](PRD-002-missions-geolocalisation.md) + [audit Verify](../security-reviews/2026-05-12-prd-002-missions-build-verify.md) |
+| Sprint 3 | PRD-003 Paiements Stripe Connect Express + Escrow + Photos AVANT/APRÈS | ⏳ À démarrer | — |
 
 ---
 

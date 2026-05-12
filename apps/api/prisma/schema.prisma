@@ -101,6 +101,15 @@ model User {
   // Soft delete RGPD — 30j puis purge (sauf obligations légales paiement = 10 ans, cf. cahier v1.4 §3.3)
   deletedAt         DateTime? @map("deleted_at")
 
+  /// Vérification compte (KYC, email, etc.). MVP PRD-002 : auto-set à la création
+  /// (CURRENT_TIMESTAMP) — workflow de vérification réel ouvert à un PRD ultérieur.
+  /// `null` ⇒ exclusion immédiate du matching (contrainte CTO Build §5).
+  verifiedAt        DateTime? @default(now()) @map("verified_at")
+
+  /// Suspension administrative (admin, anti-fraude). `null` = compte actif.
+  /// `<> null` ⇒ exclusion immédiate du matching + login refusé (PRD futur).
+  suspendedAt       DateTime? @map("suspended_at")
+
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt      @map("updated_at")
 
@@ -113,9 +122,12 @@ model User {
   missionsAsClient      Mission[] @relation("MissionClient")
   missionsAsPrestataire Mission[] @relation("MissionPrestataire")
   missionProposals      MissionProposal[]
+  missionEvents         MissionEvent[]
 
   @@index([role])
   @@index([deletedAt])
+  @@index([suspendedAt])
+  @@index([verifiedAt])
   @@map("users")
 }
 
@@ -209,6 +221,7 @@ model Mission {
   stripePaymentIntentId String? @unique @map("stripe_payment_intent_id")
 
   proposals MissionProposal[]
+  events    MissionEvent[]
   photos    Photo[]
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -220,6 +233,31 @@ model Mission {
   @@index([startAt])
   @@index([listingExpiresAt])
   @@map("missions")
+}
+
+/// Audit minimal du cycle de vie mission (PRD-002 Build, contrainte CTO §1).
+/// Une ligne par évènement métier (CREATED, PUBLISHED, MATCHING_DONE, ACCEPTED,
+/// CANCELLED, EXPIRED, …). Schéma volontairement minimal — détail dans `payload`.
+model MissionEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  missionId    String   @map("mission_id") @db.Uuid
+  mission      Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  /// Type d'évènement métier — string libre côté Prisma (validé Zod côté service).
+  type         String   @db.VarChar(64)
+
+  /// Acteur ayant déclenché l'évènement (null pour les jobs système).
+  actorUserId  String?  @map("actor_user_id") @db.Uuid
+  actor        User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  /// Payload technique additionnel — **sans PII / adresse complète**.
+  payload      Json?
+
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([missionId, createdAt])
+  @@index([type])
+  @@map("mission_events")
 }
 
 /// Prestataires matchés pour une mission en statut `PROPOSED` (marketplace first-accept-wins — ADR-005).

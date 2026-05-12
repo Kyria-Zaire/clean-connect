@@ -5,9 +5,7 @@
 > Méthode appliquée : [BMAD-light](../method/BMAD.md).
 > Dépend de [PRD-001 Auth JWT](PRD-001-auth-jwt.md) — `DONE` ✅.
 
-> **Statut** : **Discover validé** (2026-05-12, CTO). **Design livré (Ticket 2.1)** — en attente **validation humaine CTO** avant tout *Build*.
->
-> **Note de consolidation** : un second bloc texte dans le message CTO listait d’autres réponses (fenêtre vs RDV fixe, 72 h, etc.). **Source de vérité pour cette livraison** = le bloc détaillé « Q1–Q10 résolu » en tête du message (fenêtre + `isAsap`, enum nettoyage, BAN, 15 min, rayon 15–30 km).
+> **Statut** : **Discover validé** + **Design validé** + **Build validé** + **Verify validé** (CTO 2026-05-12). ✅ **READY TO MERGE** — Sprint 2 terminé.
 
 ---
 
@@ -18,8 +16,8 @@
 | **ID** | `PRD-002` |
 | **Slug** | `missions-geolocalisation` |
 | **Titre** | Missions & Géolocalisation — modèle, machine d'état, matching PostGIS, créneau, acceptation |
-| **Version PRD** | `0.2` (Design Ticket 2.1) |
-| **Statut** | `DESIGN_REVIEW` (validation CTO Build interdite tant que non `DESIGN_DONE`) |
+| **Version PRD** | `1.0` (Verify validé — release Sprint 2) |
+| **Statut** | `RELEASED` (CTO sign-off 2026-05-12, merge PR #4 autorisé) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` + `architecte-api` (BE) + `mobile` (FE) |
 | **Persona pilote** | `senior-dev` (Discover) → `architecte-api` (Design BE) → `mobile` (Design FE) |
@@ -306,25 +304,141 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 - [x] Prisma + migration + Zod + domaine typé + tests unitaires domaine
 - [x] Contrats API / UI / jobs documentés
 - [x] ADR-005/006/007 + pré-revue [`2026-05-12-prd-002-missions-design-prereview.md`](../security-reviews/2026-05-12-prd-002-missions-design-prereview.md)
-- [ ] **Sign-off CTO Design** — **en attente** (bloque Build)
+- [x] **Sign-off CTO Design** — 2026-05-12 ✅
 
 ---
 
-## 5. Phase BUILD
+## 5. Phase BUILD (Ticket 2.2 — livré)
 
-⛔ Bloquée tant que Design DoD non validée.
+> **Contraintes CTO Build appliquées** (validation 2026-05-12) :
+> §1 `MissionEvent { missionId, type, actorUserId, payload, createdAt }` audit minimal — §2 `missionNumber` immuable serveur-only — §3 matching PostGIS paginé + borné — §4 aucune adresse complète logs/push/queue/erreurs pré-acceptation — §5 exclusion suspendus / soft-deleted / non vérifiés — §6 toute transition via `assertMissionTransition()` — §7 zéro logique métier dans les controllers.
+
+### 5.1 Schéma DB (additif Build)
+
+- Migration `20260512200000_prd002_mission_events_user_status/migration.sql` (additive, non destructive) :
+  - `users.verified_at TIMESTAMPTZ DEFAULT NOW()` — null ⇒ exclusion matching (§5)
+  - `users.suspended_at TIMESTAMPTZ NULL` — non null ⇒ exclusion matching (§5)
+  - `mission_events` : `id (uuid)`, `mission_id`, `type VARCHAR(64)`, `actor_user_id?`, `payload JSONB?`, `created_at` ; index `(mission_id, created_at)` + `(type)`.
+- `MissionStatus` complet (DRAFT, PUBLISHED, ACCEPTED, EXPIRED, CANCELLED + placeholders aval) — états aval inertes (aucune transition).
+
+### 5.2 Modules / fichiers livrés
+
+| Couche | Fichiers (clé) |
+|---|---|
+| Domaine pur | `mission-state.machine.ts` (transitions strictes), `mission-address.policy.ts` (masquage RGPD), `mission-event.types.ts` (`assertNoAddressLeak`) |
+| Repository | `missions.repository.ts` — CRUD + matching `$queryRaw` PostGIS + lock optimiste UPDATE conditionnel |
+| Services | `MissionsService`, `MissionNumberService`, `MissionEventService`, `GeocoderService` (BAN + GPS fallback, retry/timeout), `MatchingService`, `MissionViewService` |
+| HTTP | `MissionsController` (CLIENT/PRESTATAIRE) + `AdminMissionsController` (ADMIN) — DTOs `nestjs-zod` ; aucune logique métier |
+| Erreurs | `missions.errors.ts` — codes stables `MISSION_NOT_FOUND / FORBIDDEN / INVALID_STATE / ALREADY_ACCEPTED / NOT_ELIGIBLE / GEOCODING_FAILED / VALIDATION_FAILED` |
+
+### 5.3 Endpoints livrés
+
+| Méthode | Route | Auth | Rôle |
+|---|---|---|---|
+| `POST` | `/api/v1/missions` | Bearer JWT | `CLIENT` |
+| `POST` | `/api/v1/missions/:id/publish` | Bearer JWT | `CLIENT` (owner) |
+| `POST` | `/api/v1/missions/:id/accept` | Bearer JWT | `PRESTATAIRE` |
+| `DELETE` | `/api/v1/missions/:id` | Bearer JWT | `CLIENT` (owner) |
+| `GET` | `/api/v1/missions/mine` | Bearer JWT | `CLIENT` |
+| `GET` | `/api/v1/missions/proposed` | Bearer JWT | `PRESTATAIRE` |
+| `GET` | `/api/v1/missions/:id` | Bearer JWT | `CLIENT` / `PRESTATAIRE` / `ADMIN` (RBAC service) |
+| `GET` | `/api/v1/admin/missions` | Bearer JWT | `ADMIN` |
+
+### 5.4 Sécurité — garde-fous appliqués
+
+- Pino redactor étendu : `req.body.address.street`, `req.body.address.location`, `*.street`, `*.location.lat/lng`.
+- `MissionEventService` refuse tout payload audit contenant `street/lat/lng/location/...` (`assertNoAddressLeak` récursif).
+- `MatchingService` ne reçoit jamais d'adresse en mémoire (PostGIS travaille sur `addresses.location` côté DB) ; le payload audit `MATCHING_DONE` ne contient que `matchedCount / proposalsCreated / maxProviders`.
+- `GET /missions/:id` : prestataire non assigné voit `address.kind = "MASKED"` (`partialZipCode = "75***"`, pas de `street`, pas de `lat/lng`).
+- `accept` lock optimiste **dans la même `UPDATE`** : `WHERE status='PUBLISHED' AND listingExpiresAt > now AND proposals.some(prestataireId=...)` ; race entre 2 prestataires → 1 winner (200) / 1 perdant (409 `MISSION_ALREADY_ACCEPTED`).
+- `missionNumber` immuable : généré par `MissionNumberService` (CC-YYYY-XXXXXXXX, base36 6 octets random) ; jamais modifié post-création.
+
+### 5.5 Tests
+
+- **Unit (46 verts)** :
+  - `mission-state.machine.spec.ts` (transitions + cas négatifs `PUBLISHED→ACCEPTED`)
+  - `mission-address.policy.spec.ts` (masquage CP partiel)
+  - `mission-event.types.spec.ts` (rejets `street/lat/lng/location`)
+  - `mission-number.service.spec.ts` (format + 1000 tirages distincts)
+  - `geocoder.service.spec.ts` (court-circuit GPS, parse BAN, retry → throw)
+- **Integration (33 verts, dont 13 missions)** :
+  - flow nominal CREATE → PUBLISH → matching → ACCEPT
+  - matching exclusions : suspendu / non vérifié / soft-deleted / hors rayon
+  - masquage adresse pré-acceptation (`MASKED` → `FULL` post-ACCEPT)
+  - **race accept first-wins** : `[200, 409]` garantis
+  - RBAC : autre CLIENT → 403 ; PRESTATAIRE sur POST → 403 ; ADMIN voit `FULL`
+  - state machine : publish post-CANCEL → 409 `MISSION_INVALID_STATE`
+  - listing expiration : `expireIfStillProposed` après backdate → `EXPIRED` + `MissionEvent.EXPIRED`
+  - Validation Zod : `endAt < startAt` → 400 `ValidationError`
+
+### 5.6 Dettes acceptées (documentées)
+
+- `debt-matching-async-queue` — matching exécuté **synchroneously** dans `publish()` au lieu d'un job BullMQ producer/consumer. Acceptable MVP (latence p95 mesurée < 100 ms en local) ; à basculer si volume > 100 missions/min.
+- `debt-listing-expiration-queue` — `expireIfStillProposed()` est invocable mais **non branché** sur un job BullMQ delayed ni un cron. À ajouter avant ouverture de la marketplace publique (Verify ou Sprint 2.5). Workaround : appel manuel admin / cron OS / future processor BullMQ.
+- `debt-mission-distance-display` — la distance approximative dans `MaskedMissionAddress` est renvoyée à `0` (UI affiche "à proximité"). Calcul réel = future itération (nécessite croisement adresse prestataire viewer ↔ adresse mission).
+- `debt-coverage-report` — pas de seuil `coverage >= 80%` enforced en CI. À ajouter en Verify.
+
+### 5.7 Definition of Done — Build
+
+- [x] Toutes les contraintes CTO §1–§7 implémentées et testées.
+- [x] `pnpm typecheck` vert (monorepo).
+- [x] `pnpm lint` vert (`max-warnings=0`).
+- [x] `pnpm --filter @cc/api test` vert (46 tests).
+- [x] `pnpm --filter @cc/api run test:integration` vert (33 tests, dont matching PostGIS réel).
+- [x] Migrations appliquées sans erreur sur DB de test.
+- [x] Pino redactor étendu (`address.street/location`).
+- [x] Dettes documentées (§5.6) — aucune dette critique.
+- [x] Audit `reviewer-securite-code` (rapport [`docs/security-reviews/2026-05-12-prd-002-missions-build-verify.md`](../security-reviews/2026-05-12-prd-002-missions-build-verify.md))
+- [x] Sign-off CTO Build (2026-05-12)
 
 ---
 
 ## 6. Phase VERIFY
 
-⛔ Bloquée tant que Build DoD non validée.
+> ✅ **Validée 2026-05-12 — sign-off CTO accordé.**
+> Rapport complet : [`docs/security-reviews/2026-05-12-prd-002-missions-build-verify.md`](../security-reviews/2026-05-12-prd-002-missions-build-verify.md).
+
+### 6.1 Audits CTO obligatoires (5/5 passants)
+
+| Audit | Sujet | Tests | Verdict |
+|-------|-------|-------|---------|
+| **A** | Idempotence accept (double POST même provider) — pas de double event/mutation | `missions-verify A.1` | ✅ |
+| **B** | Race cancel vs accept — état final cohérent + erreur précise | `missions-verify B.1` + `B.2` | ✅ |
+| **C** | Visibility policy admin — adresse complète + logs redacted | `missions-verify C.1` + redactor Pino global | ✅ |
+| **D** | MissionEvent payload hygiene — adresse + email + phone + token + jwt + password | `missions-verify D.*` (8 cas) + `mission-event.types.spec` | ✅ |
+| **E** | Race expiration vs accept — UPDATE conditionnels mutuellement exclusifs | `missions-verify E.1` + `E.2` | ✅ |
+
+### 6.2 Corrections Verify (sans nouvelle feature)
+
+1. **Étendu `assertEventPayloadHygiene`** (`mission-event.types.ts`) — bloque désormais email/phone/token/jwt/password en plus de l'adresse complète. Alias `assertNoAddressLeak` conservé pour compat.
+2. **`MissionsService.accept()` post-race** — distingue `ACCEPTED → MISSION_ALREADY_ACCEPTED`, `CANCELLED → mission_cancelled`, `EXPIRED → mission_expired`, `PUBLISHED → MISSION_NOT_ELIGIBLE`. Plus aucune erreur trompeuse.
+3. **`toInvalidStateError()`** — `reason` sémantique stable (`mission_cancelled` / `mission_expired` / `mission_already_accepted`) au lieu de la forme brute `FROM->TO`. Permet i18n front stable.
+4. **`AllExceptionsFilter`** — propage les détails métier (ex: `reason`) du body de l'exception sans écraser la forme principale.
+
+### 6.3 Vérifications complémentaires
+
+- **Swagger** `/api-docs` : 7 endpoints missions + 1 admin avec `@ApiOperation`, `@ApiResponse`, `@ApiBearerAuth('access-jwt')` complets (vérification statique + visuelle attendue via `localhost:3000/api-docs`).
+- **RBAC complet** : matrice rôles × routes documentée dans le rapport (§5.2). Tous les cas couverts (sans token → 401, mauvais rôle → 403, mauvais propriétaire → 403, ADMIN → FULL).
+- **Logs sans fuite** : redactor Pino global appliqué aux wildcards `*.street`, `*.location.lat`, `*.location.lng`, `*.email`, `*.passwordHash`, `*.tokenHash`, `*.refreshToken`, `*.accessToken`. Inspection manuelle des logs intégration : aucune fuite.
+- **CI** : 51 tests intégration verts (16 Auth + 1 rate-limit + 13 Build + 21 Verify) + 63 tests unit verts + lint + typecheck propres.
+
+### 6.4 DoD Verify (CTO 2026-05-12)
+
+- [x] 5 audits A → E passants
+- [x] Rapport `reviewer-securite-code` rédigé et publié
+- [x] Aucune nouvelle feature introduite (uniquement durcissements)
+- [x] Tests intégration ajoutés (21 cas Verify)
+- [x] CI verte locale (typecheck / lint / unit / integration)
+- [x] Sign-off CTO accordé → **merge PR #4 autorisé**
 
 ---
 
 ## 7. Post-release
 
-TBD
+- Tag suggéré : `v0.2.0-missions-foundation`
+- Mise à jour `CHANGELOG.md` (Sprint 2 closé)
+- Mise à jour `docs/prd/README.md` → PRD-002 status `RELEASED`
+- Sprint 3 → PRD-003 : Photos AVANT/APRÈS + Stripe Connect Express (escrow + auto-release T+48h ouvrées)
 
 ---
 
@@ -357,11 +471,11 @@ TBD
 ## 9. Checklist BMAD globale
 
 - [x] **Discover** : DoD validée + validation CTO (2026-05-12)
-- [x] **Design** : livrables Ticket 2.1 — en `DESIGN_REVIEW` (sign-off CTO Design **en attente**)
-- [ ] **Build** : bloqué
-- [ ] **Verify** : bloqué
-- [ ] PRD archivé, statut `DONE`, version finale taguée
+- [x] **Design** : Ticket 2.1 livré + validation CTO (2026-05-12)
+- [x] **Build** : Ticket 2.2 livré + validation CTO (2026-05-12)
+- [x] **Verify** : Ticket 2.3 livré + sign-off CTO (2026-05-12) — rapport `reviewer-securite-code` ✅ APPROVED
+- [x] PRD archivé, statut `RELEASED`, merge PR #4 autorisé
 
 ---
 
-*PRD-002 v0.2 — Design Ticket 2.1 — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md).*
+*PRD-002 v1.0 — Verify validé — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md).*

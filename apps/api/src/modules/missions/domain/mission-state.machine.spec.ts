@@ -19,6 +19,15 @@ describe('mission-state.machine (PRD-002)', () => {
     expect(canTransitionMissionStatus('PROPOSED', 'ACCEPTED')).toBe(true)
   })
 
+  it('autorise PUBLISHED → ACCEPTED (marketplace first-accept-wins)', () => {
+    expect(canTransitionMissionStatus('PUBLISHED', 'ACCEPTED')).toBe(true)
+    expect(() => assertMissionTransition('PUBLISHED', 'ACCEPTED')).not.toThrow()
+  })
+
+  it('autorise PUBLISHED → EXPIRED', () => {
+    expect(canTransitionMissionStatus('PUBLISHED', 'EXPIRED')).toBe(true)
+  })
+
   it('refuse toute transition depuis ACCEPTED (MVP)', () => {
     expect(canTransitionMissionStatus('ACCEPTED', 'IN_PROGRESS')).toBe(false)
   })
