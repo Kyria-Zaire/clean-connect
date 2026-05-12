@@ -1,25 +1,21 @@
 /**
- * Enums partagés — DOIVENT rester alignés avec `apps/api/prisma/schema.prisma`.
+ * Enums partagés — **réexportés depuis** `zod-prisma-types` (`./generated/inputTypeSchemas/*`).
  *
- * À terme, ces enums seront générés automatiquement via `zod-prisma-types`
- * (cf. générateur configuré dans schema.prisma). Tant que ce générateur n'est
- * pas câblé, on les déclare ici à la main comme source de vérité partagée.
+ * Source de vérité unique : `apps/api/prisma/schema.prisma`.
+ * Imports **fichier par fichier** (pas le barrel `index.ts`) pour éviter de tirer
+ * les schémas Prisma JSON auxquels `tsc` strict reproche des incompatibilités Zod.
  */
 
 import { z } from 'zod'
 
-export const RoleSchema = z.enum(['CLIENT', 'PRESTATAIRE', 'ADMIN'])
+import { MissionServiceTypeSchema } from './generated/inputTypeSchemas/MissionServiceTypeSchema'
+import { MissionStatusSchema } from './generated/inputTypeSchemas/MissionStatusSchema'
+import { PhotoTypeSchema } from './generated/inputTypeSchemas/PhotoTypeSchema'
+import { RoleSchema } from './generated/inputTypeSchemas/RoleSchema'
+
+export { MissionServiceTypeSchema, MissionStatusSchema, PhotoTypeSchema, RoleSchema }
+
 export type Role = z.infer<typeof RoleSchema>
-
-export const MissionStatusSchema = z.enum([
-  'DRAFT',
-  'REQUESTED',
-  'ACCEPTED',
-  'IN_PROGRESS',
-  'COMPLETED',
-  'CANCELLED',
-])
 export type MissionStatus = z.infer<typeof MissionStatusSchema>
-
-export const PhotoTypeSchema = z.enum(['BEFORE', 'AFTER'])
+export type MissionServiceType = z.infer<typeof MissionServiceTypeSchema>
 export type PhotoType = z.infer<typeof PhotoTypeSchema>

@@ -12,9 +12,15 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
-### Sprint 2 — Missions & Géolocalisation (en cadrage)
+### Design — PRD-002 Missions & Géolocalisation (Ticket 2.1)
 
-- [`docs/prd/PRD-002-missions-geolocalisation.md`](docs/prd/PRD-002-missions-geolocalisation.md) — **Discover en cours** (cadrage, attente validation CTO avant Design).
+- **Prisma** : modèle `Mission` refondu (`missionNumber`, `serviceType`, fenêtre temporelle, `estimatedPriceCents`, statuts lifecycle + états réservés PRD aval), table `mission_proposals`, `users.service_radius_km` (15–30 km).
+- **Migration** `20260512190000_prd002_mission_lifecycle_design` : **breaking** pré-prod (truncate missions/photos).
+- **Shared types** : `MissionStatusSchema`, `MissionServiceTypeSchema`, `createMissionDraftBodySchema` (`packages/shared-types/src/zod/mission.ts`).
+- **Domaine API** : `mission-state.machine.ts`, `mission-address.policy.ts` + tests unitaires.
+- **ADR** : [ADR-005](docs/adr/ADR-005-missions-matching-marketplace.md), [ADR-006](docs/adr/ADR-006-geocoding-ban-mobile-fallback.md), [ADR-007](docs/adr/ADR-007-mission-pricing-placeholder.md).
+- **Pré-revue sécu Design** : [`docs/security-reviews/2026-05-12-prd-002-missions-design-prereview.md`](docs/security-reviews/2026-05-12-prd-002-missions-design-prereview.md).
+- **PRD** : [`docs/prd/PRD-002-missions-geolocalisation.md`](docs/prd/PRD-002-missions-geolocalisation.md) v0.2 — **Build interdit** sans sign-off CTO Design.
 
 ---
 

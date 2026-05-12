@@ -46,13 +46,31 @@ enum Role {
   ADMIN
 }
 
+/// Statuts mission — alignés avec `MissionStatusSchema` (`@cc/shared-types`).
+/// Seules les transitions listées dans `mission-state.machine.ts` sont autorisées en MVP PRD-002.
 enum MissionStatus {
   DRAFT
-  REQUESTED
+  PUBLISHED
+  PROPOSED
   ACCEPTED
-  IN_PROGRESS
-  COMPLETED
+  EXPIRED
   CANCELLED
+  // États réservés aux PRD aval (aucune transition implémentée en PRD-002 Build)
+  IN_PROGRESS
+  AWAITING_CLIENT_VALIDATION
+  COMPLETED
+  DISPUTE_OPEN
+  REFUNDED
+}
+
+/// Types de prestation — alignés avec `MissionServiceTypeSchema` (`@cc/shared-types`).
+enum MissionServiceType {
+  SOFA
+  MATTRESS
+  TERRACE
+  TRASH_BINS
+  CARPET
+  OTHER
 }
 
 enum PhotoType {
@@ -88,9 +106,13 @@ model User {
 
   refreshTokens     RefreshToken[]
 
+  /// Rayon d'intervention prestataire (km) — défaut 15, plafond 30 (PRD-002 Discover CTO).
+  serviceRadiusKm Int @default(15) @map("service_radius_km")
+
   // Relations missions
   missionsAsClient      Mission[] @relation("MissionClient")
   missionsAsPrestataire Mission[] @relation("MissionPrestataire")
+  missionProposals      MissionProposal[]
 
   @@index([role])
   @@index([deletedAt])
@@ -152,43 +174,68 @@ model Address {
 // -----------------------------------------------------------------------------
 
 model Mission {
-  id              String        @id @default(uuid()) @db.Uuid
-  status          MissionStatus @default(DRAFT)
+  id        String @id @default(uuid()) @db.Uuid
+  /// Numéro lisible support / facturation (ex. `CC-2026-000123`) — unique métier.
+  missionNumber String @unique @map("mission_number") @db.VarChar(32)
+
+  status       MissionStatus       @default(DRAFT)
+  serviceType  MissionServiceType  @map("service_type")
 
   // Acteurs
-  clientId        String        @map("client_id") @db.Uuid
-  client          User          @relation("MissionClient", fields: [clientId], references: [id], onDelete: Restrict)
+  clientId String @map("client_id") @db.Uuid
+  client   User   @relation("MissionClient", fields: [clientId], references: [id], onDelete: Restrict)
 
-  prestataireId   String?       @map("prestataire_id") @db.Uuid
-  prestataire     User?         @relation("MissionPrestataire", fields: [prestataireId], references: [id], onDelete: Restrict)
+  prestataireId String? @map("prestataire_id") @db.Uuid
+  prestataire   User?   @relation("MissionPrestataire", fields: [prestataireId], references: [id], onDelete: Restrict)
 
-  // Lieu de la mission
-  addressId       String        @map("address_id") @db.Uuid
-  address         Address       @relation(fields: [addressId], references: [id], onDelete: Restrict)
+  // Lieu de la mission (coords PostGIS sur `addresses.location` — cf. ADR-003)
+  addressId String  @map("address_id") @db.Uuid
+  address   Address @relation(fields: [addressId], references: [id], onDelete: Restrict)
 
-  // Montants — TOUS en centimes (Int) — cf. ADR-002
-  amountCents     Int           @map("amount_cents")
-  commissionCents Int           @map("commission_cents")
-  payoutCents     Int           @map("payout_cents")
+  /// Fenêtre d'intervention (UTC en DB). Si `isAsap`, valeurs recalculées côté serveur à la publication.
+  startAt   DateTime @map("start_at")
+  endAt     DateTime @map("end_at")
+  timeZone  String   @map("time_zone") @db.VarChar(64)
+  isAsap    Boolean  @default(false) @map("is_asap")
 
-  // Planification
-  scheduledAt     DateTime      @map("scheduled_at")
-  durationMinutes Int           @map("duration_minutes")
+  /// Estimation prix client — hors périmètre tarifaire PRD-002 (cf. ADR-007). Nullable.
+  estimatedPriceCents Int? @map("estimated_price_cents")
 
-  // Stripe (séquestre)
+  publishedAt        DateTime? @map("published_at")
+  /// Après publication : expiration liste marketplace si aucun accept (15 min MVP, configurable Build).
+  listingExpiresAt DateTime? @map("listing_expires_at")
+
+  // Stripe (séquestre) — PRD-003
   stripePaymentIntentId String? @unique @map("stripe_payment_intent_id")
 
-  // Photos
-  photos          Photo[]
+  proposals MissionProposal[]
+  photos    Photo[]
 
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt      @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([clientId])
   @@index([prestataireId])
-  @@index([scheduledAt])
+  @@index([startAt])
+  @@index([listingExpiresAt])
   @@map("missions")
+}
+
+/// Prestataires matchés pour une mission en statut `PROPOSED` (marketplace first-accept-wins — ADR-005).
+model MissionProposal {
+  id            String @id @default(uuid()) @db.Uuid
+  missionId     String @map("mission_id") @db.Uuid
+  mission       Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  prestataireId String @map("prestataire_id") @db.Uuid
+  prestataire   User   @relation(fields: [prestataireId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([missionId, prestataireId])
+  @@index([missionId])
+  @@index([prestataireId])
+  @@map("mission_proposals")
 }
 
 // -----------------------------------------------------------------------------

@@ -5,7 +5,9 @@
 > Méthode appliquée : [BMAD-light](../method/BMAD.md).
 > Dépend de [PRD-001 Auth JWT](PRD-001-auth-jwt.md) — `DONE` ✅.
 
-> **⚠️ Statut** : Phase **DISCOVER en cours**. Ne pas démarrer le Design tant que les Open Questions §3.3 ne sont pas toutes `RESOLVED` et que la DoD Discover §3.4 n'est pas validée humainement par le CTO.
+> **Statut** : **Discover validé** (2026-05-12, CTO). **Design livré (Ticket 2.1)** — en attente **validation humaine CTO** avant tout *Build*.
+>
+> **Note de consolidation** : un second bloc texte dans le message CTO listait d’autres réponses (fenêtre vs RDV fixe, 72 h, etc.). **Source de vérité pour cette livraison** = le bloc détaillé « Q1–Q10 résolu » en tête du message (fenêtre + `isAsap`, enum nettoyage, BAN, 15 min, rayon 15–30 km).
 
 ---
 
@@ -16,8 +18,8 @@
 | **ID** | `PRD-002` |
 | **Slug** | `missions-geolocalisation` |
 | **Titre** | Missions & Géolocalisation — modèle, machine d'état, matching PostGIS, créneau, acceptation |
-| **Version PRD** | `0.1` (Discover initial) |
-| **Statut** | `DRAFT` (Discover en cours) |
+| **Version PRD** | `0.2` (Design Ticket 2.1) |
+| **Statut** | `DESIGN_REVIEW` (validation CTO Build interdite tant que non `DESIGN_DONE`) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` + `architecte-api` (BE) + `mobile` (FE) |
 | **Persona pilote** | `senior-dev` (Discover) → `architecte-api` (Design BE) → `mobile` (Design FE) |
@@ -47,7 +49,7 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 - [x] **Client** — crée une mission, choisit créneau, voit le prestataire matché, paie (paiement = PRD-003)
 - [x] **Prestataire** — voit les missions éligibles dans sa zone, accepte / refuse, organise sa journée
 - [x] **Admin** — lecture seule MVP : tableau des missions par statut + recherche par ID (CRUD complet = PRD-007)
-- [ ] Système (job, cron, webhook) — *partiellement concerné* : expiration créneau (`PROPOSE` → `EXPIRED`) côté BullMQ, cron de sécurité (cf. cahier §6) — détail en Design
+- [ ] Système (job, cron, webhook) — *partiellement concerné* : expiration liste (`PROPOSED` → `EXPIRED`) côté BullMQ, cron de sécurité (cf. cahier §6) — détail en Design
 
 ### 1.3 Métriques de succès
 
@@ -96,20 +98,31 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 
 ### 2.1bis Machine d'état — scope MVP PRD-002
 
+> **Lexique** : les AC rédigés en français utilisent les noms « métier » ; l’implémentation utilise les enums **anglais** Prisma / `@cc/shared-types` :
+>
+> | FR (PRD) | Enum |
+> |---|---|
+> | BROUILLON | `DRAFT` |
+> | PUBLIEE | `PUBLISHED` |
+> | PROPOSEE | `PROPOSED` |
+> | ACCEPTEE | `ACCEPTED` |
+> | ANNULEE | `CANCELLED` |
+> | EXPIREE | `EXPIRED` |
+
 ```
-[BROUILLON] ──publish──> [PUBLIEE] ──matching OK──> [PROPOSEE] ──accept (prestataire)──> [ACCEPTEE]
+[DRAFT] ──publish──> [PUBLISHED] ──matching OK──> [PROPOSED] ──accept (prestataire)──> [ACCEPTED]
      │                       │                          │                                       │
      │                       │                          │                                       │
-     │                  cancel client                cancel (timeout 30 min ou refus tous)     │  (cycle "réalisation/validation/paiement"
+     │                  cancel client                cancel (timeout 15 min liste — cf. Q5)     │  (cycle "réalisation/validation/paiement"
      │                       ▼                          ▼                                       │   = PRD-003/004 — placeholders)
-     │                  [ANNULEE]                  [EXPIREE]                                    │
+     │                  [CANCELLED]                  [EXPIRED]                                    │
      │                                                                                          │
      └──── delete (soft) ─────────────────────────────────────────────────────────────────────  │
                                                                                                 │
                                                                                   (transitions terminales scope MVP)
 ```
 
-> 🔵 **Scope strict PRD-002** : `BROUILLON / PUBLIEE / PROPOSEE / ACCEPTEE / ANNULEE / EXPIREE`. Les états `EN_COURS / TERMINEE / EN_ATTENTE_VALIDATION_CLIENT / VALIDEE / LITIGE_OUVERT / REMBOURSEE` sont **modélisés** (enum Prisma figé) mais **aucune transition vers ces états n'est implémentée** dans Sprint 2 — placeholders pour PRD-003/004/006.
+> 🔵 **Scope strict PRD-002** : `DRAFT / PUBLISHED / PROPOSED / ACCEPTED / CANCELLED / EXPIRED`. Les états `IN_PROGRESS / AWAITING_CLIENT_VALIDATION / COMPLETED / DISPUTE_OPEN / REFUNDED` sont **modélisés** (enum Prisma figé) mais **aucune transition MVP** ne les atteint — placeholders PRD-003/004/006.
 
 ### 2.2 Story 2 — Matching géographique automatique
 
@@ -118,8 +131,8 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 **Pour** proposer la mission à chacun (ou au plus proche — cf. Q3.4)
 
 **Critères d'acceptance** :
-- [ ] **AC-2.1** — Étant donné une mission en `PUBLIEE`, quand le job BullMQ `mission.matching` s'exécute, alors `MatchingService` retourne la liste des prestataires `ST_DWithin(prestataire.location, mission.location, prestataire.zoneInterventionKm * 1000)`, triés par distance ASC, **`LIMIT 50`**.
-- [ ] **AC-2.2** — L'`EXPLAIN ANALYZE` de la requête montre `Index Scan` sur `User_location_idx` (GIST), pas `Seq Scan` (cahier §11).
+- [ ] **AC-2.1** — Étant donné une mission en `PUBLISHED`, quand le job BullMQ `mission.matching` s'exécute, alors `MatchingService` retourne la liste des prestataires `ST_DWithin(prestataire.address.location, mission.address.location, prestataire.serviceRadiusKm * 1000)`, triés par distance ASC, **`LIMIT 50`**.
+- [ ] **AC-2.2** — L'`EXPLAIN ANALYZE` de la requête montre `Index Scan` sur `addresses_location_gist` (GIST), pas `Seq Scan` (cahier §11).
 - [ ] **AC-2.3** — Un prestataire sans `location` ou `deletedAt != null` est exclu.
 - [ ] **AC-2.4** — Un prestataire dont la zone d'intervention (km) **n'inclut pas** le point de la mission est exclu (même s'il est physiquement proche).
 - [ ] **AC-2.5** — Si **0 prestataire éligible**, la mission passe en `EXPIREE` après timeout (cf. Q3.4 timeout), pas de crash, log structuré `mission.matching.no_candidate`.
@@ -178,7 +191,7 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 |---|:-:|---|---|
 | **Sécurité (RBAC + ownership)** | **4** | RoleGuard à étendre, ownership check sur 5+ endpoints, visibilité conditionnelle de l'adresse (Story 4.4). | Pré-revue `reviewer-securite-code` obligatoire en Design + audit complet en Verify (focus `missions.controller`). |
 | **RGPD (adresse, géoloc)** | **4** | Coordonnées GPS + adresse client = données personnelles ; minimisation Article 5 RGPD (ne pas exposer l'adresse précise avant acceptation). | Lecture par référent RGPD ; documenter la rétention (cf. cahier 12 mois après fin de mission, mais ici scope = avant exécution donc rétention via PRD-004). |
-| **Financier** | 2 | Aucun paiement dans PRD-002. Placeholder enum `EN_ATTENTE_VALIDATION_CLIENT` figé mais non transactionnel. | — |
+| **Financier** | 2 | Aucun paiement dans PRD-002. Enum `AWAITING_CLIENT_VALIDATION` réservé PRD-003. | — |
 | **UX (régression)** | **4** | Le matching = parcours principal MVP. Une latence > 5 s ou un faux 0 prestataire tuent l'expérience. | Detox happy path obligatoire (cahier §11) + plan de charge sur `MatchingService`. |
 | **Performance** | **3** | `ST_DWithin` sur potentiellement N prestataires. Sans index GIST = catastrophe. | EXPLAIN ANALYZE en Verify ; benchmark sur seed 1k prestataires. |
 | **Disponibilité externe** | **3** | Géocodage adresse → coords via service externe (Nominatim / Google / Mapbox — cf. Q3.3). Service down = création mission impossible. | Pattern *integrate-external-service* obligatoire (timeout + retry + fallback), DLQ si géocodage échoue. |
@@ -194,26 +207,26 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 - [x] `apps/mobile/src/features/missions/` *(nouveau)* — création mission, recherche d'adresse, liste missions, écran détail
 - [x] `apps/mobile/src/features/matching/` *(nouveau ou intégré à missions)* — écran prestataire « missions proposées »
 - [x] `packages/shared-types/src/zod/` *(extension)* — `mission.ts`, `matching.ts`, types géo (`geoPointSchema` existe déjà)
-- [x] `apps/api/prisma/schema.prisma` *(modification structurante)* — modèle `Mission`, enum `MissionStatus`, FK `User.location` GEOGRAPHY + `zoneInterventionKm` (cf. cahier §5)
-- [x] BullMQ — file `matching` avec processor + DLQ + cron de sécurité (cahier §6)
-- [x] Configuration / infra — variable d'env pour la clé service de géocodage (Q3.3), index GIST sur `Mission.location`
+- [x] `apps/api/prisma/schema.prisma` *(modification structurante)* — `Mission`, `MissionProposal`, enums `MissionStatus` / `MissionServiceType`, `users.service_radius_km` ; matching via `addresses.location` (GIST — ADR-003)
+- [x] BullMQ — files `mission.matching`, `mission.listing_expired` + DLQ + cron (cahier §6)
+- [x] Configuration / infra — `MISSION_LISTING_TTL_MS` (défaut 15 min, Build) ; BAN sans clé API
 
-### 3.3 Open questions (à résoudre AVANT Design)
+### 3.3 Open questions — **RÉSOLUES** (Discover CTO 2026-05-12)
 
-> Toute question non résolue ici bloque le passage en Design. Réponses attendues du CTO.
+> Les décisions ci-dessous reprennent le **bloc détaillé** validé par le CTO. Un second tableau contradictoire dans le même message a été **écarté** au profit de ce cadrage.
 
-| # | Question | Owner | Statut | Réponse |
-|---|---|---|---|---|
-| **Q1** | **Création** : le client précise un **créneau précis** (date + heure début/fin) ou une **fenêtre large** (ex. « vendredi matin 8h-12h ») ? L'app supporte-t-elle « dès que possible » (ASAP) en MVP ? | CTO | `OPEN` | |
-| **Q2** | **Type de prestation** : enum fixe (cf. cahier — *fin de chantier / déchet sauvage / résidence saisonnière / autre*) ou champ libre + tag ? Impact sur les schémas Zod + admin filters. | CTO | `OPEN` | |
-| **Q3** | **Géocodage** : on utilise quelle source pour transformer une adresse en coordonnées GPS ? Options : (a) **Nominatim OSM** gratuit mais quota strict, (b) **Google Geocoding API** payant, (c) **adresse.data.gouv.fr** (BAN française, gratuit, illimité, **recommandation MVP**), (d) géocodage côté mobile via SDK natif. Cf. cahier §12 risque dispo externe. | CTO | `OPEN` | |
-| **Q4** | **Matching** : on propose la mission à **tous** les prestataires éligibles simultanément (premier accepteur gagne, type "marketplace"), ou **séquentiellement** au plus proche d'abord avec timeout (type "round-robin Uber") ? Impact UX prestataire + complexité backend. | CTO | `OPEN` | |
-| **Q5** | **Timeout création → expiration** : combien de temps entre `PUBLIEE` et `EXPIREE` si aucun prestataire n'accepte ? **30 min / 1 h / 4 h / 24 h / fonction de la date de prestation ?** | CTO | `OPEN` | |
-| **Q6** | **Visibilité adresse avant acceptation** : le prestataire voit **ville + CP** seulement (proposition par défaut, alignée RGPD §3.1), ou **adresse complète + distance précise depuis sa base** ? Impact : risque de no-show (s'il connaît le quartier exact) vs friction (s'il ne le connait pas). | CTO | `OPEN` | |
-| **Q7** | **Multi-acceptation** : un prestataire peut-il avoir plusieurs missions `ACCEPTEE` avec des créneaux qui se chevauchent ? On bloque l'acceptation en cas de conflit créneau ? | CTO | `OPEN` | |
-| **Q8** | **Tarification** : prix défini par **le client** à la création (« je propose 80 € »), par **un barème serveur** (€/m² × type), ou par **devis prestataire post-matching** ? MVP = quoi ? *Impact : PRD-003 ne peut pas démarrer sans cette décision.* | CTO | `OPEN` | |
-| **Q9** | **Zone d'intervention prestataire** : valeur par défaut **30 km** (cahier §5), modifiable par le prestataire dans son profil (à quel endroit en mobile ?). Faut-il une **borne max** (ex. 50 km) pour éviter qu'un prestataire couvre la France entière ? | CTO | `OPEN` | |
-| **Q10** | **Mission n° unique métier** : on garde uniquement l'`id` UUID, ou on génère aussi un **numéro court lisible humain** (ex. `CC-2026-04321`) pour les communications support/admin ? | CTO | `OPEN` | |
+| # | Décision |
+|---|----------|
+| **Q1** | Fenêtre obligatoire : `startAt`, `endAt`, `timeZone` (IANA). `isAsap=true` → **conversion en fenêtre côté serveur** à la publication. |
+| **Q2** | Enum `MissionServiceType` : `SOFA`, `MATTRESS`, `TERRACE`, `TRASH_BINS`, `CARPET`, `OTHER`. |
+| **Q3** | **BAN** (`api-adresse.data.gouv.fr`) provider principal ; **repli coordonnées GPS natives mobile** validées côté API. **ADR-006**. |
+| **Q4** | **Marketplace first-accepted-wins** ; pas de round-robin MVP. **ADR-005**. |
+| **Q5** | Timeout après publication liste : **15 minutes** → job BullMQ delayed `mission.listing_expired` → `EXPIRED`. |
+| **Q6** | Adresse masquée pour prestataire avant acceptation : **ville + CP partiel + distance approx km** ; adresse complète seulement après `ACCEPTED` + assignation. Politique : `mission-address.policy.ts`. |
+| **Q7** | **Lock optimiste transaction SQL** sur `accept` ; pas de Redis lock MVP. **Détection conflit de créneaux** entre missions acceptées pour un même prestataire : **hors MVP** (dette Build si besoin). |
+| **Q8** | Tarification **hors PRD-002** ; seul placeholder `estimatedPriceCents` (`Int?`). **ADR-007**. |
+| **Q9** | `serviceRadiusKm` sur `users` : **défaut 15 km**, **max 30 km** (contrainte SQL + Zod profil). |
+| **Q10** | `missionNumber` lisible unique `CC-2026-000123` ; UUID reste PK. Génération atomique **Build** (séquence / transaction). |
 
 ### 3.4 Definition of Done — Discover
 
@@ -223,47 +236,77 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 - [x] Risk assessment renseigné (3 domaines à 4 → pré-revue sécu requise)
 - [x] Métriques de succès quantifiables (p95 matching, taux acceptation, couverture, perf PostGIS)
 - [x] Out of scope listé (paiement, photos, notifs, disputes, admin CRUD)
-- [ ] **Open questions toutes résolues** (`RESOLVED`) — **10 questions ouvertes** ⏳
+- [x] **Open questions toutes résolues** (`RESOLVED`)
 - [x] T-shirt size estimé (**L**, ≈ 3–4 semaines)
-- [ ] **Validation humaine** (CTO) : nom + date — **en attente**
+- [x] **Validation humaine CTO Discover** — 2026-05-12
 
-> ✍️ *Validation Discover attendue du CTO une fois les Open Questions Q1–Q10 résolues.*
+> ✍️ Discover **validé** — Design Ticket **2.1** livré en `DESIGN_REVIEW` (sign-off CTO Design requis avant Build).
 
 ---
 
-## 4. Phase DESIGN
+## 4. Phase DESIGN (Ticket 2.1 — livré, `DESIGN_REVIEW`)
 
-> ⛔ **Bloquée tant que Discover §3.4 n'est pas validé**. Le squelette ci-dessous sera rempli en Ticket 2.2.
+> **Contraintes CTO** : machine d'état centralisée typée ; enum unique `@cc/shared-types` ↔ Prisma ; transitions impossibles hors `mission-state.machine.ts` ; visibilité adresse via `mission-address.policy.ts` ; géométrie métier PostGIS ; extensibilité enums futurs ; zéro logique métier dans controllers ; pré-revue sécu obligatoire avant Build ; **aucun Build** sans sign-off humain Design.
 
 ### 4.1 Schéma DB (Prisma)
-*À remplir en Design — diff `Mission` model + enum `MissionStatus` + index GIST + FK `User.location`.*
+
+- Fichiers : `apps/api/prisma/schema.prisma`, migration `20260512190000_prd002_mission_lifecycle_design/migration.sql`.
+- **`Mission`** : `missionNumber` unique, `status`, `serviceType`, acteurs, `addressId`, fenêtre `startAt`/`endAt`, `timeZone`, `isAsap`, `estimatedPriceCents?`, `publishedAt?`, `listingExpiresAt?`, `stripePaymentIntentId?` (PRD-003).
+- **`MissionProposal`** : `(missionId, prestataireId)` unique — éligibles matching.
+- **`User.serviceRadiusKm`** : défaut **15**, max **30** (CHECK SQL).
+- **PostGIS** : coords sur `addresses.location` + index GIST existant ; matching `ST_DWithin` entre adresse mission et adresse base prestataire, rayon `service_radius_km * 1000` m (**Build**).
+- Migration **destructrice** pré-prod : truncate `photos` + `missions` — documentée en SQL.
 
 ### 4.2 Schémas Zod (`packages/shared-types`)
-*À remplir — `missionSchema`, `createMissionRequestBodySchema`, `matchedPrestataireSchema`, etc.*
 
-### 4.3 Contrat API
-*À remplir — `POST /missions`, `POST /missions/:id/publish`, `POST /missions/:id/accept`, `GET /missions`, `GET /missions/:id`, `DELETE /missions/:id`, `POST /admin/missions/search` (lecture).*
+| Fichier | Rôle |
+|---|---|
+| `zod/enums.ts` | `MissionStatusSchema`, `MissionServiceTypeSchema` (alignés Prisma) |
+| `zod/mission.ts` | `createMissionDraftBodySchema`, DTOs adresse masquée / `eligiblePrestataireSchema` |
+
+### 4.3 Contrat API (spec — impl. Build)
+
+| Méthode | Route | Auth |
+|---|---|---|
+| `POST` | `/api/v1/missions` | JWT `CLIENT` |
+| `POST` | `/api/v1/missions/:id/publish` | JWT owner |
+| `POST` | `/api/v1/missions/:id/accept` | JWT `PRESTATAIRE` |
+| `GET` | `/api/v1/missions` | JWT (liste selon rôle) |
+| `GET` | `/api/v1/missions/proposed` | JWT `PRESTATAIRE` |
+| `GET` | `/api/v1/missions/:id` | JWT |
+| `DELETE` | `/api/v1/missions/:id` | JWT owner |
+| `GET` | `/api/v1/admin/missions` | JWT `ADMIN` |
 
 ### 4.4 Contrat UI
-*À remplir — flux mobile client (création), flux mobile prestataire (proposées), table admin (liste).*
 
-### 4.5 Effets de bord, jobs, webhooks
-*À remplir — BullMQ `mission.matching` (création), `mission.expire` (delayed Q5), DLQ, cron horaire.*
+- Client : création (RHF + Zod `@cc/shared-types`), publication, liste.
+- Prestataire : proposées, détail (adresse masquée), acceptation.
+- Admin : liste lecture seule + recherche `missionNumber` / UUID.
 
-### 4.6 ADR liées
-*Pré-listées* :
-- **ADR-005** — Stratégie de matching (marketplace vs round-robin) — déclenchée par Q4
-- **ADR-006** — Source géocodage adresse → coords — déclenchée par Q3
-- **ADR-007** — Modèle de tarification (Q8) — déclenchée par Q8
+### 4.5 Jobs BullMQ
+
+- `mission.matching` (post-publish) ; `mission.listing_expired` (delay **15 min**) ; cron filet (cahier §6) — détail impl. Build.
+
+### 4.6 ADR
+
+- [`ADR-005`](../adr/ADR-005-missions-matching-marketplace.md), [`ADR-006`](../adr/ADR-006-geocoding-ban-mobile-fallback.md), [`ADR-007`](../adr/ADR-007-mission-pricing-placeholder.md).
 
 ### 4.7 Plan de tests
-*À remplir — unit `MatchingService` ≥ 80 %, intégration `POST /missions` + race condition acceptation, Detox happy path mobile.*
+
+- Unit : `mission-state.machine`, `mission-address.policy`, `MatchingService` (≥80 % cible).
+- Intégration : création, publish, accept race, expire.
+- E2E Detox ; audit sécu Verify.
 
 ### 4.8 Rollout
-*À remplir — feature flag `FF_MISSIONS` (probablement `oui` pour rollback rapide), migration data (vide → MVP).*
+
+- Feature flag `FF_MISSIONS` recommandé ; `MISSION_LISTING_TTL_MS` défaut `900000` au Build.
 
 ### 4.9 Definition of Done — Design
-*À remplir — DoD §4.9 du template.*
+
+- [x] Prisma + migration + Zod + domaine typé + tests unitaires domaine
+- [x] Contrats API / UI / jobs documentés
+- [x] ADR-005/006/007 + pré-revue [`2026-05-12-prd-002-missions-design-prereview.md`](../security-reviews/2026-05-12-prd-002-missions-design-prereview.md)
+- [ ] **Sign-off CTO Design** — **en attente** (bloque Build)
 
 ---
 
@@ -313,12 +356,12 @@ TBD
 
 ## 9. Checklist BMAD globale
 
-- [ ] **Discover** : DoD ✅ + validation humaine — **en attente CTO** (Q1–Q10)
-- [ ] **Design** : bloqué
+- [x] **Discover** : DoD validée + validation CTO (2026-05-12)
+- [x] **Design** : livrables Ticket 2.1 — en `DESIGN_REVIEW` (sign-off CTO Design **en attente**)
 - [ ] **Build** : bloqué
 - [ ] **Verify** : bloqué
 - [ ] PRD archivé, statut `DONE`, version finale taguée
 
 ---
 
-*PRD-002 v0.1 — Discover ouvert le 2026-05-12 — méthode [BMAD-light](../method/BMAD.md).*
+*PRD-002 v0.2 — Design Ticket 2.1 — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md).*
