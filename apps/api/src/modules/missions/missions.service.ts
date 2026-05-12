@@ -58,6 +58,21 @@ const ASAP_WINDOW_MS = 4 * 60 * 60 * 1_000
 /** Tentatives max sur collision `missionNumber` (P2002). */
 const MISSION_NUMBER_RETRIES = 5
 
+/**
+ * Mapping `MissionStatus` source -> reason sémantique stable côté client API.
+ * Utilisé par `toInvalidStateError()` pour produire un body 409 lisible :
+ * `{ error: 'MISSION_INVALID_STATE', reason: 'mission_cancelled' }` plutôt que
+ * la forme brute `'CANCELLED->ACCEPTED'`.
+ *
+ * Convention : reason en snake_case, préfixé `mission_*` pour rester clair
+ * dans les logs et permettre un mapping i18n stable côté front/mobile.
+ */
+const STATE_TO_SEMANTIC_REASON: Partial<Record<Mission['status'], string>> = {
+  CANCELLED: 'mission_cancelled',
+  EXPIRED: 'mission_expired',
+  ACCEPTED: 'mission_already_accepted',
+}
+
 @Injectable()
 export class MissionsService {
   private readonly logger = new Logger(MissionsService.name)
@@ -236,12 +251,27 @@ export class MissionsService {
     })
 
     if (updatedCount !== 1) {
-      // Double cas : déjà acceptée par un autre OU pas dans les propositions.
+      // Le UPDATE conditionnel a échoué : on relit pour distinguer la cause exacte.
+      // Audits Verify CTO (B race cancel vs accept, E race expiration vs accept) :
+      // chaque résultat doit porter une erreur métier précise (pas de "ALREADY_ACCEPTED"
+      // trompeur quand la mission est en réalité CANCELLED ou EXPIRED).
       const fresh = await this.repo.findById(missionId)
-      if (fresh && fresh.status !== 'PUBLISHED') {
-        throw new MissionAlreadyAcceptedError()
+      if (!fresh) throw new MissionNotFoundError()
+
+      switch (fresh.status) {
+        case 'ACCEPTED':
+          throw new MissionAlreadyAcceptedError()
+        case 'CANCELLED':
+          throw new MissionInvalidStateError('mission_cancelled')
+        case 'EXPIRED':
+          throw new MissionInvalidStateError('mission_expired')
+        case 'PUBLISHED':
+          // Toujours PUBLISHED ⇒ le caller n'est pas dans `mission_proposals`,
+          // ou la fenêtre `listingExpiresAt` est dépassée juste à l'instant.
+          throw new MissionNotEligibleError()
+        default:
+          throw new MissionInvalidStateError('mission_state_changed_concurrently')
       }
-      throw new MissionNotEligibleError()
     }
 
     const accepted = await this.repo.findById(missionId)
@@ -468,7 +498,11 @@ export class MissionsService {
 
   private toInvalidStateError(err: unknown): MissionInvalidStateError {
     if (err instanceof MissionInvalidStatusTransitionError) {
-      return new MissionInvalidStateError(`${err.from}->${err.to}`)
+      // `reason` stable côté client API — préfère un libellé sémantique
+      // pour les états terminaux (cancelled/expired/accepted) plutôt que la
+      // forme brute `FROM->TO` (utilisée pour les autres transitions DRAFT/...).
+      const semantic = STATE_TO_SEMANTIC_REASON[err.from]
+      return new MissionInvalidStateError(semantic ?? `${err.from}->${err.to}`)
     }
     return new MissionInvalidStateError()
   }

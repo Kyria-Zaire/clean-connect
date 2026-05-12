@@ -5,7 +5,7 @@
 > Méthode appliquée : [BMAD-light](../method/BMAD.md).
 > Dépend de [PRD-001 Auth JWT](PRD-001-auth-jwt.md) — `DONE` ✅.
 
-> **Statut** : **Discover validé** + **Design validé** (CTO 2026-05-12) + **Build livré** (Ticket 2.2 — Sprint 2). **En attente Verify + validation CTO finale** avant merge.
+> **Statut** : **Discover validé** + **Design validé** + **Build validé** + **Verify validé** (CTO 2026-05-12). ✅ **READY TO MERGE** — Sprint 2 terminé.
 
 ---
 
@@ -16,8 +16,8 @@
 | **ID** | `PRD-002` |
 | **Slug** | `missions-geolocalisation` |
 | **Titre** | Missions & Géolocalisation — modèle, machine d'état, matching PostGIS, créneau, acceptation |
-| **Version PRD** | `0.3` (Build Ticket 2.2) |
-| **Statut** | `BUILD_REVIEW` (en attente Verify + sign-off CTO) |
+| **Version PRD** | `1.0` (Verify validé — release Sprint 2) |
+| **Statut** | `RELEASED` (CTO sign-off 2026-05-12, merge PR #4 autorisé) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` + `architecte-api` (BE) + `mobile` (FE) |
 | **Persona pilote** | `senior-dev` (Discover) → `architecte-api` (Design BE) → `mobile` (Design FE) |
@@ -388,20 +388,57 @@ Sans PRD-002 mergé, PRD-003/004/005/006 sont bloqués (règle dure CTO).
 - [x] Migrations appliquées sans erreur sur DB de test.
 - [x] Pino redactor étendu (`address.street/location`).
 - [x] Dettes documentées (§5.6) — aucune dette critique.
-- [ ] Audit `reviewer-securite-code` (Verify Sprint 2)
-- [ ] Sign-off CTO Build
+- [x] Audit `reviewer-securite-code` (rapport [`docs/security-reviews/2026-05-12-prd-002-missions-build-verify.md`](../security-reviews/2026-05-12-prd-002-missions-build-verify.md))
+- [x] Sign-off CTO Build (2026-05-12)
 
 ---
 
 ## 6. Phase VERIFY
 
-⛔ À démarrer après sign-off CTO Build (audit sécurité ciblé : RBAC mission, masquage adresse, payload audit, race accept, exclusions matching).
+> ✅ **Validée 2026-05-12 — sign-off CTO accordé.**
+> Rapport complet : [`docs/security-reviews/2026-05-12-prd-002-missions-build-verify.md`](../security-reviews/2026-05-12-prd-002-missions-build-verify.md).
+
+### 6.1 Audits CTO obligatoires (5/5 passants)
+
+| Audit | Sujet | Tests | Verdict |
+|-------|-------|-------|---------|
+| **A** | Idempotence accept (double POST même provider) — pas de double event/mutation | `missions-verify A.1` | ✅ |
+| **B** | Race cancel vs accept — état final cohérent + erreur précise | `missions-verify B.1` + `B.2` | ✅ |
+| **C** | Visibility policy admin — adresse complète + logs redacted | `missions-verify C.1` + redactor Pino global | ✅ |
+| **D** | MissionEvent payload hygiene — adresse + email + phone + token + jwt + password | `missions-verify D.*` (8 cas) + `mission-event.types.spec` | ✅ |
+| **E** | Race expiration vs accept — UPDATE conditionnels mutuellement exclusifs | `missions-verify E.1` + `E.2` | ✅ |
+
+### 6.2 Corrections Verify (sans nouvelle feature)
+
+1. **Étendu `assertEventPayloadHygiene`** (`mission-event.types.ts`) — bloque désormais email/phone/token/jwt/password en plus de l'adresse complète. Alias `assertNoAddressLeak` conservé pour compat.
+2. **`MissionsService.accept()` post-race** — distingue `ACCEPTED → MISSION_ALREADY_ACCEPTED`, `CANCELLED → mission_cancelled`, `EXPIRED → mission_expired`, `PUBLISHED → MISSION_NOT_ELIGIBLE`. Plus aucune erreur trompeuse.
+3. **`toInvalidStateError()`** — `reason` sémantique stable (`mission_cancelled` / `mission_expired` / `mission_already_accepted`) au lieu de la forme brute `FROM->TO`. Permet i18n front stable.
+4. **`AllExceptionsFilter`** — propage les détails métier (ex: `reason`) du body de l'exception sans écraser la forme principale.
+
+### 6.3 Vérifications complémentaires
+
+- **Swagger** `/api-docs` : 7 endpoints missions + 1 admin avec `@ApiOperation`, `@ApiResponse`, `@ApiBearerAuth('access-jwt')` complets (vérification statique + visuelle attendue via `localhost:3000/api-docs`).
+- **RBAC complet** : matrice rôles × routes documentée dans le rapport (§5.2). Tous les cas couverts (sans token → 401, mauvais rôle → 403, mauvais propriétaire → 403, ADMIN → FULL).
+- **Logs sans fuite** : redactor Pino global appliqué aux wildcards `*.street`, `*.location.lat`, `*.location.lng`, `*.email`, `*.passwordHash`, `*.tokenHash`, `*.refreshToken`, `*.accessToken`. Inspection manuelle des logs intégration : aucune fuite.
+- **CI** : 51 tests intégration verts (16 Auth + 1 rate-limit + 13 Build + 21 Verify) + 63 tests unit verts + lint + typecheck propres.
+
+### 6.4 DoD Verify (CTO 2026-05-12)
+
+- [x] 5 audits A → E passants
+- [x] Rapport `reviewer-securite-code` rédigé et publié
+- [x] Aucune nouvelle feature introduite (uniquement durcissements)
+- [x] Tests intégration ajoutés (21 cas Verify)
+- [x] CI verte locale (typecheck / lint / unit / integration)
+- [x] Sign-off CTO accordé → **merge PR #4 autorisé**
 
 ---
 
 ## 7. Post-release
 
-TBD
+- Tag suggéré : `v0.2.0-missions-foundation`
+- Mise à jour `CHANGELOG.md` (Sprint 2 closé)
+- Mise à jour `docs/prd/README.md` → PRD-002 status `RELEASED`
+- Sprint 3 → PRD-003 : Photos AVANT/APRÈS + Stripe Connect Express (escrow + auto-release T+48h ouvrées)
 
 ---
 
@@ -435,10 +472,10 @@ TBD
 
 - [x] **Discover** : DoD validée + validation CTO (2026-05-12)
 - [x] **Design** : Ticket 2.1 livré + validation CTO (2026-05-12)
-- [x] **Build** : Ticket 2.2 livré (Sprint 2) — DoD §5.7 cochée sauf audit reviewer + sign-off CTO
-- [ ] **Verify** : à démarrer (audit `reviewer-securite-code` + sign-off CTO final)
-- [ ] PRD archivé, statut `DONE`, version finale taguée
+- [x] **Build** : Ticket 2.2 livré + validation CTO (2026-05-12)
+- [x] **Verify** : Ticket 2.3 livré + sign-off CTO (2026-05-12) — rapport `reviewer-securite-code` ✅ APPROVED
+- [x] PRD archivé, statut `RELEASED`, merge PR #4 autorisé
 
 ---
 
-*PRD-002 v0.3 — Build Ticket 2.2 — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md).*
+*PRD-002 v1.0 — Verify validé — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md).*

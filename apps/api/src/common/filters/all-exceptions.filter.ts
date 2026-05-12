@@ -15,7 +15,23 @@ interface ErrorResponseBody {
   message: string | string[]
   path: string
   timestamp: string
+  // Détails métier optionnels (ex: `reason: 'mission_expired'`).
+  // Non typés car spécifiques à chaque domaine (mission, payment, …).
+  [extra: string]: unknown
 }
+
+/**
+ * Champs réservés à la forme principale — ne doivent pas être écrasés par
+ * un détail métier additionnel (`getResponse()` peut contenir n'importe
+ * quoi, on whiteliste pour éviter une fuite ou une collision).
+ */
+const RESERVED_FIELDS = new Set([
+  'statusCode',
+  'error',
+  'message',
+  'path',
+  'timestamp',
+])
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -29,6 +45,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     let status = HttpStatus.INTERNAL_SERVER_ERROR
     let error = 'Internal Server Error'
     let message: string | string[] = 'Une erreur est survenue.'
+    const extra: Record<string, unknown> = {}
 
     if (exception instanceof ZodValidationException) {
       status = HttpStatus.BAD_REQUEST
@@ -40,9 +57,17 @@ export class AllExceptionsFilter implements ExceptionFilter {
       if (typeof body === 'string') {
         message = body
       } else if (typeof body === 'object' && body !== null) {
-        const bodyObj = body as { message?: string | string[]; error?: string }
+        const bodyObj = body as { message?: string | string[]; error?: string } & Record<string, unknown>
         message = bodyObj.message ?? message
         error = bodyObj.error ?? exception.name
+        // Récupère les détails métier additionnels (ex: `reason`) sans
+        // jamais écraser les champs principaux ni laisser fuiter des trucs
+        // techniques (`statusCode` Nest interne).
+        for (const [key, value] of Object.entries(bodyObj)) {
+          if (RESERVED_FIELDS.has(key)) continue
+          if (key === 'message' || key === 'error') continue
+          extra[key] = value
+        }
       } else {
         error = exception.name
       }
@@ -56,6 +81,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       message,
       path: req.url,
       timestamp: new Date().toISOString(),
+      ...extra,
     }
 
     res.status(status).json(responseBody)
