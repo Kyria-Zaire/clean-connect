@@ -25,8 +25,8 @@ import { MissionStatusSchema, type MissionStatus } from '@cc/shared-types'
  *  - `IN_PROGRESS` reste réservé à un futur endpoint `/start` (mobile)
  *    dédié — non livré en 3.4 (cf. PRD §5.1quater, `TODO(debt)
  *    mission-start-endpoint`).
- *  - `REFUNDED` = Ticket 3.5. `COMPLETED → DISPUTE_OPEN` (fenêtre 7 j post
- *    completion) = PRD-005.
+ *  - `REFUNDED` = Ticket 3.5. `COMPLETED → DISPUTE_OPEN` : webhook
+ *    `transfer.reversed` (Ticket 3.5) **ou** fenêtre 7 j post completion (PRD-005).
  *
  * Règle produit : toute mutation de statut côté API DOIT passer par
  * `assertMissionTransition()` (contrainte CTO Build §6).
@@ -55,9 +55,9 @@ export const MISSION_TRANSITIONS_MVP: {
   //   → DISPUTE_OPEN : POST /report-problem (CLIENT) ou
   //                    `charge.dispute.created` (Ticket 3.5).
   CLIENT_VALIDATION_PENDING: ['COMPLETED', 'DISPUTE_OPEN', 'CANCELLED'],
-  // PRD-003 Ticket 3.4 — état terminal succès (transfer prestataire +
-  // fenêtre litige T+7j = Ticket 3.5 / PRD-005).
-  COMPLETED: [],
+  // PRD-003 Ticket 3.5 — `COMPLETED → DISPUTE_OPEN` si `transfer.reversed`
+  // (reversal Stripe / compte fermé). Fenêtre litige client T+7j = PRD-005.
+  COMPLETED: ['DISPUTE_OPEN'],
   // PRD-003 Ticket 3.4 — terminal MVP (workflow litige complet = PRD-005).
   DISPUTE_OPEN: [],
   REFUNDED: [],

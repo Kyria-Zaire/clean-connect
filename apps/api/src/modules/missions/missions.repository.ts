@@ -439,6 +439,21 @@ export class MissionsRepository {
     return result.count
   }
 
+  /**
+   * PRD-003 Ticket 3.5 — `transfer.reversed` (fonds repris) : mission repasse en
+   * `DISPUTE_OPEN` pour traitement ops (pas de re-transfer auto MVP).
+   */
+  async transitionCompletedToDisputeOpenTx(
+    tx: Prisma.TransactionClient,
+    opts: { missionId: string },
+  ): Promise<number> {
+    const result = await tx.mission.updateMany({
+      where: { id: opts.missionId, status: 'COMPLETED' },
+      data: { status: 'DISPUTE_OPEN' },
+    })
+    return result.count
+  }
+
   async findExpiredPublishedIds(opts: { now: Date; limit: number }): Promise<string[]> {
     const rows = await this.prisma.mission.findMany({
       where: {

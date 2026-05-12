@@ -187,7 +187,7 @@ describe('PaymentDomainHandler (PRD-003 Ticket 3.2)', () => {
     expect(handler.shouldHandle('payment_intent.succeeded')).toBe(true)
     expect(handler.shouldHandle('payment_intent.created')).toBe(false)
     expect(handler.shouldHandle('charge.succeeded')).toBe(false)
-    // Ticket 3.5 — transfer.* pas encore routé.
+    // Ticket 3.5 — `transfer.*` est routé par `TransferDomainHandler`, pas ici.
     expect(handler.shouldHandle('transfer.created')).toBe(false)
   })
 

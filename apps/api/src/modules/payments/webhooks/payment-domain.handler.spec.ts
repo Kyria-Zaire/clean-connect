@@ -25,6 +25,7 @@ import type { MatchingService } from '../../missions/services/matching.service'
 import type { MissionEventService } from '../../missions/services/mission-event.service'
 import type { AutoReleaseService } from '../../missions-completion/auto-release/auto-release.service'
 import type { PaymentsRepository } from '../payments.repository'
+import type { OutboundTransferService } from '../transfers/outbound-transfer.service'
 
 import { PaymentDomainHandler } from './payment-domain.handler'
 
@@ -71,6 +72,7 @@ interface Harness {
   missions: { transitionClientValidationPendingToCompletedTx: jest.Mock }
   events: { recordTx: jest.Mock }
   autoRelease: { cancel: jest.Mock }
+  outboundTransfer: { ensureOutboundTransferAfterCapture: jest.Mock }
 }
 
 function buildHarness(opts: {
@@ -78,10 +80,22 @@ function buildHarness(opts: {
   captureResult?: number
   missionTransitionResult?: number
 } = {}): Harness {
+  const seed = opts.payment === undefined ? buildPayment() : opts.payment
+  let findByPiCalls = 0
   const payments = {
-    findByStripePaymentIntentId: jest
-      .fn()
-      .mockResolvedValue(opts.payment === undefined ? buildPayment() : opts.payment),
+    findByStripePaymentIntentId: jest.fn().mockImplementation(async () => {
+      findByPiCalls += 1
+      if (seed === null) return null
+      if (seed.status === 'CAPTURED') return seed
+      if (findByPiCalls >= 2) {
+        return buildPayment({
+          ...seed,
+          status: 'CAPTURED',
+          amountCapturedCents: seed.amountCapturedCents ?? seed.amountAuthorizedCents ?? 12_000,
+        })
+      }
+      return seed
+    }),
     transitionAuthorizedToCapturedTx: jest.fn().mockResolvedValue(opts.captureResult ?? 1),
   }
   const missions = {
@@ -91,6 +105,7 @@ function buildHarness(opts: {
   }
   const events = { recordTx: jest.fn().mockResolvedValue(undefined) }
   const autoRelease = { cancel: jest.fn().mockResolvedValue({ cancelled: true }) }
+  const outboundTransfer = { ensureOutboundTransferAfterCapture: jest.fn().mockResolvedValue(undefined) }
   const matching = { runFor: jest.fn() }
 
   const prismaTransaction = jest
@@ -115,10 +130,11 @@ function buildHarness(opts: {
     events as unknown as MissionEventService,
     matching as unknown as MatchingService,
     autoRelease as unknown as AutoReleaseService,
+    outboundTransfer as unknown as OutboundTransferService,
     config,
   )
 
-  return { handler, payments, missions, events, autoRelease }
+  return { handler, payments, missions, events, autoRelease, outboundTransfer }
 }
 
 describe('PaymentDomainHandler.onCaptured (PRD-003 Ticket 3.4)', () => {
@@ -134,7 +150,7 @@ describe('PaymentDomainHandler.onCaptured (PRD-003 Ticket 3.4)', () => {
   })
 
   it('payment déjà CAPTURED → replay webhook no-op silencieux', async () => {
-    const { handler, payments, missions } = buildHarness({
+    const { handler, payments, missions, outboundTransfer } = buildHarness({
       payment: buildPayment({ status: 'CAPTURED', amountCapturedCents: 12_000 }),
     })
     await handler.handle({
@@ -145,10 +161,14 @@ describe('PaymentDomainHandler.onCaptured (PRD-003 Ticket 3.4)', () => {
     } as unknown as Stripe.Event)
     expect(payments.transitionAuthorizedToCapturedTx).not.toHaveBeenCalled()
     expect(missions.transitionClientValidationPendingToCompletedTx).not.toHaveBeenCalled()
+    expect(outboundTransfer.ensureOutboundTransferAfterCapture).toHaveBeenCalledWith(
+      PAYMENT_ID,
+      'PAYMENT_CAPTURE_WEBHOOK',
+    )
   })
 
-  it('happy path → Payment CAPTURED + Mission COMPLETED + autoRelease.cancel + audits', async () => {
-    const { handler, payments, missions, events, autoRelease } = buildHarness({})
+  it('happy path → Payment CAPTURED + Mission COMPLETED + autoRelease.cancel + audits + outbound transfer', async () => {
+    const { handler, payments, missions, events, autoRelease, outboundTransfer } = buildHarness({})
 
     await handler.handle({
       type: 'payment_intent.succeeded',
@@ -174,10 +194,14 @@ describe('PaymentDomainHandler.onCaptured (PRD-003 Ticket 3.4)', () => {
     const auditTypes = events.recordTx.mock.calls.map((c) => (c[1] as { type: string }).type)
     expect(auditTypes).toContain('PAYMENT_CAPTURED')
     expect(auditTypes).toContain('MISSION_COMPLETED')
+    expect(outboundTransfer.ensureOutboundTransferAfterCapture).toHaveBeenCalledWith(
+      PAYMENT_ID,
+      'PAYMENT_CAPTURE_WEBHOOK',
+    )
   })
 
   it('race : mission en DISPUTE_OPEN → Payment capturé mais mission NON transitionnée', async () => {
-    const { handler, payments, missions, events } = buildHarness({
+    const { handler, payments, missions, events, outboundTransfer } = buildHarness({
       missionTransitionResult: 0,
     })
 
@@ -194,10 +218,14 @@ describe('PaymentDomainHandler.onCaptured (PRD-003 Ticket 3.4)', () => {
     const auditTypes = events.recordTx.mock.calls.map((c) => (c[1] as { type: string }).type)
     expect(auditTypes).toContain('PAYMENT_CAPTURED')
     expect(auditTypes).not.toContain('MISSION_COMPLETED')
+    expect(outboundTransfer.ensureOutboundTransferAfterCapture).toHaveBeenCalledWith(
+      PAYMENT_ID,
+      'PAYMENT_CAPTURE_WEBHOOK',
+    )
   })
 
   it('autoRelease.cancel échoue → on log mais on ne re-throw pas', async () => {
-    const { handler, autoRelease, payments } = buildHarness({})
+    const { handler, autoRelease, payments, outboundTransfer } = buildHarness({})
     autoRelease.cancel.mockRejectedValueOnce(new Error('Redis down'))
 
     await expect(
@@ -210,6 +238,10 @@ describe('PaymentDomainHandler.onCaptured (PRD-003 Ticket 3.4)', () => {
     ).resolves.toBeUndefined()
 
     expect(payments.transitionAuthorizedToCapturedTx).toHaveBeenCalledTimes(1)
+    expect(outboundTransfer.ensureOutboundTransferAfterCapture).toHaveBeenCalledWith(
+      PAYMENT_ID,
+      'PAYMENT_CAPTURE_WEBHOOK',
+    )
   })
 })
 

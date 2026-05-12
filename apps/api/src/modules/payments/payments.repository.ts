@@ -171,6 +171,21 @@ export class PaymentsRepository {
     return result.count
   }
 
+  /**
+   * PRD-003 Ticket 3.5 — webhook `refund.updated` (succès) : `CAPTURED → REFUNDED`.
+   * Idempotent (replay : 0 row).
+   */
+  async transitionCapturedToRefundedTx(
+    tx: Prisma.TransactionClient,
+    opts: { paymentId: string },
+  ): Promise<number> {
+    const result = await tx.payment.updateMany({
+      where: { id: opts.paymentId, status: 'CAPTURED' },
+      data: { status: 'REFUNDED' },
+    })
+    return result.count
+  }
+
   // ---------------------------------------------------------------------------
   // Listings (cursor-based, alignement `missionListQuery`)
   // ---------------------------------------------------------------------------
