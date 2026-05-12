@@ -267,8 +267,27 @@ export const webhookErrorCodeSchema = z.enum([
   'WEBHOOK_PROCESSING_LOCKED',
   'WEBHOOK_PAYLOAD_MALFORMED',
   'WEBHOOK_PROCESSING_FAILED',
+  // PRD-003 Ticket 3.1 — 503 quand FF_PAYMENTS_ENABLED=false.
+  'PAYMENTS_DISABLED',
 ])
 export type WebhookErrorCode = z.infer<typeof webhookErrorCodeSchema>
+
+/**
+ * Body de la réponse `202` du webhook Stripe (PRD-003 Ticket 3.1).
+ * Aligné sur le contrat OpenAPI `WebhookAccepted202Body`.
+ */
+export const webhookAcceptedResponseSchema = z
+  .object({
+    accepted: z.literal(true),
+    idempotent: z.boolean(),
+    eventId: z
+      .string()
+      .min(1)
+      .max(255)
+      .regex(/^evt_/u, 'eventId doit commencer par evt_ (PRD-003 Ticket 3.1).'),
+  })
+  .strict()
+export type WebhookAcceptedResponse = z.infer<typeof webhookAcceptedResponseSchema>
 
 // ============================================================================
 // 6) Sanity export — silence noUnusedLocals si moneyCentsSchema importé non utilisé

@@ -24,7 +24,7 @@ openapi: 3.1.0
 
 info:
   title: Clean Connect API
-  version: '1.0.2-prd003-design-cto-state-machines-rev2'
+  version: '1.0.3-prd003-build-ticket-3.1-webhook-ingestion'
   description: |
     API publique Clean Connect — bloc **Photos & Paiements** (PRD-003).
 
@@ -401,6 +401,8 @@ components:
         - WEBHOOK_PROCESSING_LOCKED
         - WEBHOOK_PAYLOAD_MALFORMED
         - WEBHOOK_PROCESSING_FAILED
+        # PRD-003 Ticket 3.1 — code renvoyé sur `503` quand `FF_PAYMENTS_ENABLED=false`.
+        - PAYMENTS_DISABLED
 
     AutoReleaseErrorCode:
       type: string
@@ -1170,14 +1172,28 @@ components:
 
     WebhookAccepted202Body:
       type: object
-      required: [accepted]
+      required: [accepted, idempotent, eventId]
       additionalProperties: false
       description: |
         Réponse **202** immédiate au webhook Stripe (décision CTO) : acquittement HTTP
         rapide ; le traitement métier (idempotence DB, `DomainEvent`, BullMQ) est **asynchrone**.
-        Évite les timeouts Stripe tout en garantissant `409 WEBHOOK_ALREADY_PROCESSED` sur replay.
+
+        **Clarification Build PRD-003 Ticket 3.1** : sur replay (`stripe_event_id` déjà
+        en base, `P2002` Postgres), le serveur renvoie **202 avec `idempotent: true`**
+        au lieu de `409 WEBHOOK_ALREADY_PROCESSED`. Justification : Stripe attend un
+        `2xx` pour stopper sa boucle de retries (sinon retry 3 jours). Renvoyer 409
+        sur replay créerait du bruit côté Dashboard Stripe sans valeur ajoutée
+        (l'idempotence est déjà garantie côté DB).
       properties:
         accepted: { type: boolean, enum: [true] }
+        idempotent:
+          type: boolean
+          description: '`true` si l''event a déjà été reçu/persisté (replay) ; `false` sur premier accept.'
+        eventId:
+          type: string
+          maxLength: 255
+          pattern: '^evt_'
+          description: Echo du `stripe_event_id` (utile pour corrélation côté Stripe Dashboard / debug).
 
     AcceptedAsyncBody:
       type: object
@@ -1544,7 +1560,8 @@ paths:
         '202':
           description: |
             Event accepté pour traitement asynchrone (réponse rapide — décision CTO).
-            Replay idempotent : `409 WEBHOOK_ALREADY_PROCESSED` si `stripe_event_id` déjà traité.
+            Replay (`stripe_event_id` déjà persisté) → 202 avec `idempotent: true`
+            (clarification Build PRD-003 Ticket 3.1, voir `WebhookAccepted202Body`).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WebhookAccepted202Body' }
@@ -1553,8 +1570,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WebhookErrorBody' }
-        '409':
-          description: 'WEBHOOK_ALREADY_PROCESSED / WEBHOOK_PROCESSING_LOCKED (idempotence)'
+        '503':
+          description: |
+            `PAYMENTS_DISABLED` — le feature flag `FF_PAYMENTS_ENABLED` est `false`
+            sur cet environnement (PRD-003 Ticket 3.1). Stripe doit retry après bascule
+            opérationnelle (Verify V11).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WebhookErrorBody' }

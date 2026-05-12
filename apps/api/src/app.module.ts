@@ -1,3 +1,4 @@
+import { BullModule } from '@nestjs/bullmq'
 import { Module } from '@nestjs/common'
 import { ConfigModule } from '@nestjs/config'
 import { APP_GUARD, APP_PIPE } from '@nestjs/core'
@@ -11,6 +12,7 @@ import { PrismaModule } from './common/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
 import { MissionsModule } from './modules/missions/missions.module'
+import { PaymentsModule } from './modules/payments/payments.module'
 import { UsersModule } from './modules/users/users.module'
 
 @Module({
@@ -29,11 +31,14 @@ import { UsersModule } from './modules/users/users.module'
               env.NODE_ENV === 'development'
                 ? { target: 'pino-pretty', options: { singleLine: true, translateTime: 'HH:MM:ss' } }
                 : undefined,
-            // Redactor PII (rules securite + photos-rgpd + PRD-001 §4.3 + PRD-002 §4 CTO Build)
+            // Redactor PII (rules securite + photos-rgpd + stripe + PRD-001 §4.3 + PRD-002 §4 + PRD-003 Ticket 3.1)
             redact: {
               paths: [
                 'req.headers.authorization',
                 'req.headers.cookie',
+                // PRD-003 : signature Stripe = secret HMAC, jamais en logs
+                'req.headers["stripe-signature"]',
+                'req.headers["idempotency-key"]',
                 'req.body.password',
                 'req.body.passwordHash',
                 'req.body.refreshToken',
@@ -53,6 +58,23 @@ import { UsersModule } from './modules/users/users.module'
                 '*.street',
                 '*.location.lat',
                 '*.location.lng',
+                // PRD-003 Stripe : aucun secret / token Stripe en logs (ADR-008 + rule stripe)
+                '*.client_secret',
+                '*.clientSecret',
+                '*.stripeAccountId',
+                '*.stripeCustomerId',
+                '*.payment_method',
+                '*.paymentMethod',
+                '*.card.number',
+                '*.bankAccount',
+                '*.cardNumber',
+                '*.cvv',
+                // PRD-003 photos : captureClientUuid = clé idempotence privée + coords GPS
+                '*.captureClientUuid',
+                '*.gpsLat',
+                '*.gpsLng',
+                '*.gps.lat',
+                '*.gps.lng',
               ],
               censor: '[REDACTED]',
             },
@@ -71,11 +93,43 @@ import { UsersModule } from './modules/users/users.module'
         ]
       },
     }),
+    /**
+     * BullMQ — connexion Redis globale partagée (PRD-003 Ticket 3.1).
+     *
+     * `prefix` permet d'isoler les clés par environnement (recette / preprod / prod)
+     * partageant un même Redis ; en dev local on n'a qu'une instance donc le préfixe
+     * reste utile pour le namespace.
+     */
+    BullModule.forRootAsync({
+      useFactory: () => {
+        const env = loadEnv()
+        const url = new URL(env.REDIS_URL)
+        return {
+          connection: {
+            host: url.hostname,
+            port: url.port ? Number(url.port) : 6379,
+            password: url.password || undefined,
+            // `maxRetriesPerRequest` doit être `null` pour les workers BullMQ
+            // (sinon ioredis perd les jobs en queue lors d'un déconnect transitoire).
+            maxRetriesPerRequest: null,
+            enableReadyCheck: false,
+          },
+          prefix: `cc:${env.APP_ENV}`,
+        }
+      },
+    }),
     PrismaModule,
     HealthModule,
     AuthModule,
     UsersModule,
     MissionsModule,
+    /**
+     * PRD-003 Ticket 3.1 — module Payments gated par `FF_PAYMENTS_ENABLED`.
+     * Le module se charge toujours (Nest a besoin du graph statique), mais les
+     * controllers / processors sont neutralisés si le flag est `false`
+     * (cf. `PaymentsModule.register()`).
+     */
+    PaymentsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ConditionalThrottlerGuard },

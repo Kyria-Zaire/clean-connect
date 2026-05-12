@@ -24,7 +24,15 @@ process.env['REDIS_URL'] = process.env['REDIS_URL'] ?? process.env['REDIS_URL_TE
 
 process.env['CORS_ORIGINS'] = process.env['CORS_ORIGINS'] ?? 'http://localhost:5173'
 process.env['STRIPE_SECRET_KEY'] = process.env['STRIPE_SECRET_KEY'] ?? 'sk_test_ci_placeholder'
-process.env['STRIPE_WEBHOOK_SECRET'] = process.env['STRIPE_WEBHOOK_SECRET'] ?? 'whsec_ci_placeholder'
+process.env['STRIPE_WEBHOOK_SECRET'] =
+  process.env['STRIPE_WEBHOOK_SECRET'] ?? 'whsec_ci_integration_secret_32chars_min'
+process.env['STRIPE_API_VERSION'] = process.env['STRIPE_API_VERSION'] ?? '2025-02-24.acacia'
+process.env['STRIPE_WEBHOOK_TOLERANCE_SECONDS'] =
+  process.env['STRIPE_WEBHOOK_TOLERANCE_SECONDS'] ?? '300'
+// PRD-003 Build : la suite payments-webhook.integration override ce flag à 'true'.
+// Reste 'false' par défaut pour ne pas activer le webhook dans les autres suites.
+process.env['FF_PAYMENTS_ENABLED'] = process.env['FF_PAYMENTS_ENABLED'] ?? 'false'
+process.env['APP_VERSION'] = process.env['APP_VERSION'] ?? '0.0.0-test'
 
 process.env['THROTTLE_LIMIT'] = process.env['THROTTLE_LIMIT'] ?? '10000'
 process.env['THROTTLE_TTL_SECONDS'] = process.env['THROTTLE_TTL_SECONDS'] ?? '60'
