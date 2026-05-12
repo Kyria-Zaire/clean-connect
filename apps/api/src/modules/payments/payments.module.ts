@@ -1,11 +1,13 @@
 /**
- * PRD-003 — `PaymentsModule` (Tickets 3.1 → 3.5).
+ * PRD-003 + PRD-004 — `PaymentsModule` (Tickets 3.1 → 3.5 + 4.2).
  *
  * Périmètre :
  *  - Intent client (`POST /v1/payments/intent`) + admin listing.
  *  - Webhooks Stripe (`POST /v1/webhooks/stripe`) — ingestion + DLQ replay.
  *  - Domain handlers (PaymentIntent / Transfer / Refund).
  *  - Outbound transfers Stripe (capture → transfer) + reconcile cron.
+ *  - **PRD-004 Ticket 4.2** : retry automatique transfer via
+ *    `TransferRetryCoreModule` (file BullMQ isolée).
  *  - Admin refunds + DLQ controllers.
  *
  * DI :
@@ -16,15 +18,19 @@
  *  - `AutoReleaseCoreModule` ré-importé ici (sans `MissionsCompletionModule`)
  *    pour rompre le cycle Payments ↔ Completion : `PaymentDomainHandler`
  *    cancel le job auto-release sur `payment_intent.succeeded`.
+ *  - `TransferRetryCoreModule` : sous-graphe DI MINIMAL avec uniquement la
+ *    file `transfer-retry` + `TransferRetryQueueProducer`. Le processor
+ *    `TransferRetryProcessor` reste dans `PaymentsModule` (il injecte
+ *    `OutboundTransferService`). Cette séparation évite le cycle Nest
+ *    historique entre producer (dans `OutboundTransferService`) et processor.
  *  - `ScheduleModule.forRoot()` activé au niveau global via le 1er import —
  *    `TransferReconcileScheduler` utilise `@Cron`.
  *  - `BullModule.registerQueue(STRIPE_WEBHOOK_QUEUE)` — file d'ingestion.
  *
- * Dette :
- *  - TODO(debt): `TRANSFER_RETRY_QUEUE` Bull (worker isolé) — retiré
- *    temporairement à cause d'une cohabitation DI Nest avec
- *    `StripeWebhookProcessor` (boucle `cloneStaticInstance`). Retry
- *    transfer = manuel via `POST /v1/admin/transfers/:id/retry`.
+ * Dette PRD-003 résolue en PRD-004 Ticket 4.2 :
+ *  - ✅ `TRANSFER_RETRY_QUEUE` Bull réactivé via `TransferRetryCoreModule`.
+ *    Retry automatique avec backoff 5min/15min/1h/6h/24h + jitter ± 10 %.
+ *    Retry admin manuel reste disponible (`POST /v1/admin/transfers/:id/retry`).
  */
 
 import { BullModule } from '@nestjs/bullmq'
@@ -47,6 +53,8 @@ import { RefundsService } from './refunds/refunds.service'
 import { StripeClientFactory, STRIPE_CLIENT_TOKEN } from './stripe/stripe.client'
 import { OutboundTransferService } from './transfers/outbound-transfer.service'
 import { TransferReconcileScheduler } from './transfers/transfer-reconcile.scheduler'
+import { TransferRetryCoreModule } from './transfers/transfer-retry-core.module'
+import { TransferRetryProcessor } from './transfers/transfer-retry.processor'
 import { TransfersRepository } from './transfers/transfers.repository'
 import { PaymentDomainHandler } from './webhooks/payment-domain.handler'
 import { PaymentsWebhookController } from './webhooks/payments-webhook.controller'
@@ -60,6 +68,7 @@ import { TransferDomainHandler } from './webhooks/transfer-domain.handler'
     AuthModule,
     MissionsModule,
     AutoReleaseCoreModule,
+    TransferRetryCoreModule,
     ScheduleModule.forRoot(),
     BullModule.registerQueue({
       name: STRIPE_WEBHOOK_QUEUE,
@@ -92,6 +101,7 @@ import { TransferDomainHandler } from './webhooks/transfer-domain.handler'
     TransfersRepository,
     OutboundTransferService,
     TransferReconcileScheduler,
+    TransferRetryProcessor,
     RefundsRepository,
     RefundsService,
   ],
