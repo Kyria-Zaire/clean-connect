@@ -25,6 +25,7 @@ import type { AutoReleaseJob, Prisma } from '@prisma/client'
 import type { Queue } from 'bullmq'
 
 import { PrismaService } from '../../../common/prisma/prisma.service'
+import { injectTraceContext } from '../../observability/tracing/bullmq-trace'
 
 import {
   AUTO_RELEASE_BACKOFF_BASE_MS,
@@ -122,7 +123,10 @@ export class AutoReleaseService {
     const delay = Math.max(0, opts.scheduledFor.getTime() - opts.now.getTime())
     await this.queue.add(
       AUTO_RELEASE_PROCESS_JOB,
-      { autoReleaseJobId: opts.autoReleaseJobId, missionId: opts.missionId },
+      injectTraceContext({
+        autoReleaseJobId: opts.autoReleaseJobId,
+        missionId: opts.missionId,
+      }),
       {
         jobId: opts.bullJobId,
         delay,

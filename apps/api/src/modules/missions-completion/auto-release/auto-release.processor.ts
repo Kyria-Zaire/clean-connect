@@ -20,6 +20,8 @@ import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq'
 import { Logger } from '@nestjs/common'
 import type { Job } from 'bullmq'
 
+import { runWithExtractedTraceContext } from '../../observability/tracing/bullmq-trace'
+
 import {
   AUTO_RELEASE_MAX_ATTEMPTS,
   AUTO_RELEASE_PROCESS_JOB,
@@ -46,23 +48,30 @@ export class AutoReleaseProcessor extends WorkerHost {
       )
       return
     }
+    // PRD-004 Build B — restore trace context HTTP → delayed job worker.
+    return runWithExtractedTraceContext(
+      job.data,
+      AUTO_RELEASE_QUEUE,
+      job.name,
+      async () => {
+        const result = await this.executor.run({
+          autoReleaseJobId: job.data.autoReleaseJobId,
+          missionId: job.data.missionId,
+          workerId: WORKER_ID,
+        })
 
-    const result = await this.executor.run({
-      autoReleaseJobId: job.data.autoReleaseJobId,
-      missionId: job.data.missionId,
-      workerId: WORKER_ID,
-    })
-
-    this.logger.log(
-      {
-        autoReleaseJobId: job.data.autoReleaseJobId,
-        missionId: job.data.missionId,
-        bullJobId: job.id,
-        attemptsMade: job.attemptsMade,
-        outcome: result.outcome,
-        reason: result.reason,
+        this.logger.log(
+          {
+            autoReleaseJobId: job.data.autoReleaseJobId,
+            missionId: job.data.missionId,
+            bullJobId: job.id,
+            attemptsMade: job.attemptsMade,
+            outcome: result.outcome,
+            reason: result.reason,
+          },
+          'auto-release.processor.processed',
+        )
       },
-      'auto-release.processor.processed',
     )
   }
 

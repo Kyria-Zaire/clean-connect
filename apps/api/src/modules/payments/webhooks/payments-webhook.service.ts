@@ -29,6 +29,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service'
 import { DlqMetricsTracker } from '../../observability/metrics/dlq-metrics.tracker'
 import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
 import { WebhookMetricsTracker } from '../../observability/metrics/webhook-metrics.tracker'
+import { injectTraceContext } from '../../observability/tracing/bullmq-trace'
 import {
   STRIPE_WEBHOOK_BACKOFF_BASE_MS,
   STRIPE_WEBHOOK_MAX_ATTEMPTS,
@@ -177,15 +178,17 @@ export class PaymentsWebhookService {
       throw err
     }
 
-    // 6. Enqueue traitement asynchrone — jobId déterministe = anti-doublons côté BullMQ
+    // 6. Enqueue traitement asynchrone — jobId déterministe = anti-doublons côté BullMQ.
+    //    `injectTraceContext` ajoute `_otel.traceparent` au payload pour propager
+    //    le trace HTTP → worker (PRD-004 Build B). No-op si OTel SDK désactivé.
     await this.webhookQueue.add(
       STRIPE_WEBHOOK_PROCESS_JOB,
-      {
+      injectTraceContext({
         stripeEventId: event.id,
         type: event.type,
         livemode: event.livemode,
         payloadHash,
-      },
+      }),
       {
         jobId: `stripe-webhook-${event.id}`,
         attempts: STRIPE_WEBHOOK_MAX_ATTEMPTS,
@@ -292,12 +295,12 @@ export class PaymentsWebhookService {
     })
     await this.webhookQueue.add(
       STRIPE_WEBHOOK_PROCESS_JOB,
-      {
+      injectTraceContext({
         stripeEventId: row.externalEventId,
         type: ev.type,
         livemode: ev.livemode,
         payloadHash: row.payloadHash ?? ev.payloadHash,
-      },
+      }),
       {
         jobId: `stripe-webhook-replay-${row.id}-${Date.now()}`,
         attempts: STRIPE_WEBHOOK_MAX_ATTEMPTS,

@@ -80,13 +80,26 @@ type SentryEnv = Pick<
   | 'NODE_ENV'
 >
 
+export interface InitSentryOptions {
+  /**
+   * PRD-004 Build B — quand un SDK OpenTelemetry custom (`@opentelemetry/sdk-node`)
+   * est déjà actif (init via `instrumentation.ts` AVANT Sentry), on passe
+   * `skipOpenTelemetrySetup: true` pour éviter la double registration des
+   * instrumentations + processors (Sentry v8 utilise OTel sous le capot).
+   *
+   * Quand `false` (défaut), Sentry init son propre OTel : auto-instrumentations
+   * `http/express/fetch` + spans Sentry, sans propagation BullMQ custom.
+   */
+  skipOpenTelemetrySetup?: boolean
+}
+
 /**
  * Init Sentry. **Idempotent**.
  *
  * Retourne `true` si le SDK a été initialisé (avec ou sans DSN), `false` si
  * un init précédent était déjà actif (no-op).
  */
-export function initSentry(env: SentryEnv): boolean {
+export function initSentry(env: SentryEnv, opts: InitSentryOptions = {}): boolean {
   if (initialized) return false
   initialized = true
 
@@ -101,6 +114,7 @@ export function initSentry(env: SentryEnv): boolean {
     maxBreadcrumbs: 50,
     beforeSend: sanitizeEvent,
     beforeBreadcrumb: sanitizeBreadcrumb,
+    skipOpenTelemetrySetup: opts.skipOpenTelemetrySetup ?? false,
     /**
      * Sentry v8 intègre par défaut : `httpIntegration`, `expressIntegration`,
      * `nativeNodeFetchIntegration`, `consoleIntegration`. On laisse l'auto-init

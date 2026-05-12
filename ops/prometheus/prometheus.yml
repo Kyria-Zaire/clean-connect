@@ -1,0 +1,28 @@
+# PRD-004 Ticket 4.1 - Build B. Configuration Prometheus.
+#
+# Scrape l'endpoint protege /api/internal/metrics avec le token Bearer
+# configure cote API (`METRICS_BEARER_TOKEN`). Doit etre injecte via env
+# `METRICS_BEARER_TOKEN` au lancement docker-compose.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: clean-connect
+    env: ${PROMETHEUS_ENV:-development}
+
+scrape_configs:
+  - job_name: 'clean-connect-api'
+    metrics_path: '/api/internal/metrics'
+    scheme: http
+    static_configs:
+      - targets: ['api:3000']
+    authorization:
+      type: Bearer
+      credentials: ${METRICS_BEARER_TOKEN}
+    # PRD-004 - cleanconnect_* metrics already prefixed. No relabeling needed.
+
+  # Auto-scrape Prometheus lui-meme (sante de la stack ops).
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
