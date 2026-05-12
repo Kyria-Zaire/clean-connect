@@ -24,16 +24,21 @@ describe('MetricsService', () => {
   })
 
   describe('metric registration', () => {
-    it('exposes the 8 canonical metrics with cleanconnect_ prefix', async () => {
+    it('exposes the canonical metrics (A3 + A3-bis) with cleanconnect_ prefix', async () => {
       const { body } = await service.render()
       expect(body).toContain('# TYPE cleanconnect_http_requests_total counter')
       expect(body).toContain('# TYPE cleanconnect_http_request_duration_seconds histogram')
       expect(body).toContain('# TYPE cleanconnect_bullmq_jobs_total counter')
       expect(body).toContain('# TYPE cleanconnect_bullmq_jobs_failed_total counter')
+      // PRD-004 A3-bis : ajouts runtime instrumentation.
       expect(body).toContain('# TYPE cleanconnect_webhook_processing_total counter')
+      expect(body).toContain('# TYPE cleanconnect_webhook_processing_failures_total counter')
       expect(body).toContain('# TYPE cleanconnect_webhook_processing_duration_seconds histogram')
       expect(body).toContain('# TYPE cleanconnect_stripe_api_calls_total counter')
+      expect(body).toContain('# TYPE cleanconnect_stripe_api_failures_total counter')
+      expect(body).toContain('# TYPE cleanconnect_stripe_api_duration_seconds histogram')
       expect(body).toContain('# TYPE cleanconnect_dlq_jobs_total gauge')
+      expect(body).toContain('# TYPE cleanconnect_dlq_events_total counter')
     })
 
     it('configures Node runtime metrics via collectDefaultMetrics (registered, value populated lazily)', async () => {
@@ -118,11 +123,28 @@ describe('MetricsService', () => {
         name: 'evt',
         reason: 'timeout',
       })
-      service.stripeApiCallsTotal.inc({ method: 'POST', status: '200' })
+      // PRD-004 A3-bis : labels renommés `operation`/`status` + `event_type`/`outcome`.
+      service.stripeApiCallsTotal.inc({ operation: 'payment_intents.create', status: 'success' })
+      service.stripeApiFailuresTotal.inc({
+        operation: 'payment_intents.create',
+        status: 'rate_limited',
+      })
+      service.stripeApiDurationSeconds.observe(
+        { operation: 'payment_intents.create', status: 'success' },
+        0.2,
+      )
       service.dlqJobsTotal.set({ queue: 'stripe-webhooks' }, 5)
-      service.webhookProcessingTotal.inc({ provider: 'stripe', type: 'pi.succeeded', result: 'ok' })
+      service.dlqEventsTotal.inc({ source: 'stripe', action: 'enqueued' })
+      service.webhookProcessingTotal.inc({
+        event_type: 'payment_intent.succeeded',
+        outcome: 'accepted',
+      })
+      service.webhookProcessingFailuresTotal.inc({
+        event_type: 'payment_intent.succeeded',
+        outcome: 'failed',
+      })
       service.webhookProcessingDurationSeconds.observe(
-        { provider: 'stripe', type: 'pi.succeeded', result: 'ok' },
+        { event_type: 'payment_intent.succeeded', outcome: 'accepted' },
         0.045,
       )
 
@@ -136,10 +158,21 @@ describe('MetricsService', () => {
       expect(body).toContain(
         'cleanconnect_bullmq_jobs_failed_total{queue="stripe-webhooks",name="evt",reason="timeout"} 1',
       )
-      expect(body).toContain('cleanconnect_stripe_api_calls_total{method="POST",status="200"} 1')
+      expect(body).toContain(
+        'cleanconnect_stripe_api_calls_total{operation="payment_intents.create",status="success"} 1',
+      )
+      expect(body).toContain(
+        'cleanconnect_stripe_api_failures_total{operation="payment_intents.create",status="rate_limited"} 1',
+      )
       expect(body).toContain('cleanconnect_dlq_jobs_total{queue="stripe-webhooks"} 5')
       expect(body).toContain(
-        'cleanconnect_webhook_processing_total{provider="stripe",type="pi.succeeded",result="ok"} 1',
+        'cleanconnect_dlq_events_total{source="stripe",action="enqueued"} 1',
+      )
+      expect(body).toContain(
+        'cleanconnect_webhook_processing_total{event_type="payment_intent.succeeded",outcome="accepted"} 1',
+      )
+      expect(body).toContain(
+        'cleanconnect_webhook_processing_failures_total{event_type="payment_intent.succeeded",outcome="failed"} 1',
       )
     })
   })

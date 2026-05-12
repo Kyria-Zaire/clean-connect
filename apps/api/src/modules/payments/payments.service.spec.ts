@@ -179,11 +179,19 @@ function buildHarness(opts: {
     recordTx: jest.fn().mockResolvedValue(undefined),
   }
 
+  // PRD-004 A3-bis : injection d'un tracker neutre (no-op métriques) — on
+  // exerce le code path complet sans dépendre du registry Prometheus réel.
+  const stripeMetrics = {
+    time: jest.fn().mockImplementation(<T>(_op: string, fn: () => Promise<T>) => fn()),
+    timeSync: jest.fn().mockImplementation(<T>(_op: string, fn: () => T) => fn()),
+  }
+
   const service = new PaymentsService(
     prisma,
     paymentsRepo,
     missionsRepo,
     missionEvents as unknown as MissionEventService,
+    stripeMetrics as never,
     stripe as never,
   )
 

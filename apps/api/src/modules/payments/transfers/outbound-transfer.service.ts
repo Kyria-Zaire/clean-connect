@@ -19,6 +19,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service'
 import { assertMissionTransition } from '../../missions/domain/mission-state.machine'
 import { MissionsRepository } from '../../missions/missions.repository'
 import { MissionEventService } from '../../missions/services/mission-event.service'
+import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
 import { STRIPE_CLIENT_TOKEN } from '../stripe/stripe.client'
 
 import {
@@ -44,6 +45,7 @@ export class OutboundTransferService {
     private readonly transfers: TransfersRepository,
     private readonly missions: MissionsRepository,
     private readonly missionEvents: MissionEventService,
+    private readonly stripeMetrics: StripeMetricsTracker,
     @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
   ) {}
 
@@ -129,7 +131,9 @@ export class OutboundTransferService {
   async reconcileTransferRow(transferId: string): Promise<void> {
     const row = await this.transfers.findById(transferId)
     if (!row?.stripeTransferId) return
-    const remote = await this.stripe.transfers.retrieve(row.stripeTransferId)
+    const remote = await this.stripeMetrics.time('transfers.retrieve', () =>
+      this.stripe.transfers.retrieve(row.stripeTransferId as string),
+    )
     await this.applyRemoteTransferState(row.id, remote)
   }
 
@@ -253,7 +257,9 @@ export class OutboundTransferService {
 
     let latestCharge: string | null = null
     try {
-      const pi = await this.stripe.paymentIntents.retrieve(payment.stripePaymentIntentId)
+      const pi = await this.stripeMetrics.time('payment_intents.retrieve', () =>
+        this.stripe.paymentIntents.retrieve(payment.stripePaymentIntentId),
+      )
       const lc = pi.latest_charge
       latestCharge = typeof lc === 'string' ? lc : lc && typeof lc === 'object' && 'id' in lc ? lc.id : null
     } catch (e) {
@@ -274,19 +280,21 @@ export class OutboundTransferService {
         return
       }
 
-      const tr = await this.stripe.transfers.create(
-        {
-          amount: payoutCents,
-          currency: payment.currency,
-          destination: prestataire.stripeAccountId as string,
-          transfer_group: mission.missionNumber,
-          source_transaction: latestCharge,
-          metadata: {
-            mission_id: mission.id,
-            payment_id: payment.id,
+      const tr = await this.stripeMetrics.time('transfers.create', () =>
+        this.stripe.transfers.create(
+          {
+            amount: payoutCents,
+            currency: payment.currency,
+            destination: prestataire.stripeAccountId as string,
+            transfer_group: mission.missionNumber,
+            source_transaction: latestCharge,
+            metadata: {
+              mission_id: mission.id,
+              payment_id: payment.id,
+            },
           },
-        },
-        { idempotencyKey },
+          { idempotencyKey },
+        ),
       )
 
       await this.prisma.$transaction(async (tx) => {
@@ -318,7 +326,9 @@ export class OutboundTransferService {
         'transfer.outbound.stripe_created',
       )
 
-      const refreshed = await this.stripe.transfers.retrieve(tr.id)
+      const refreshed = await this.stripeMetrics.time('transfers.retrieve', () =>
+        this.stripe.transfers.retrieve(tr.id),
+      )
       await this.applyRemoteTransferState(transferRow.id, refreshed)
     } catch (err) {
       if (err instanceof TransferPayoutNotReadyError) {

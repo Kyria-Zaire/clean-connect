@@ -26,6 +26,9 @@ import type Stripe from 'stripe'
 
 import { loadEnv, type Env } from '../../../common/config/env'
 import { PrismaService } from '../../../common/prisma/prisma.service'
+import { DlqMetricsTracker } from '../../observability/metrics/dlq-metrics.tracker'
+import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
+import { WebhookMetricsTracker } from '../../observability/metrics/webhook-metrics.tracker'
 import {
   STRIPE_WEBHOOK_BACKOFF_BASE_MS,
   STRIPE_WEBHOOK_MAX_ATTEMPTS,
@@ -57,6 +60,11 @@ export interface IngestResult {
 
 const PRISMA_UNIQUE_VIOLATION = 'P2002'
 
+/** Helper interne — convertit un `hrtime.bigint()` de départ en secondes. */
+function durationSecondsSince(start: bigint): number {
+  return Number(process.hrtime.bigint() - start) / 1_000_000_000
+}
+
 @Injectable()
 export class PaymentsWebhookService {
   private readonly logger = new Logger(PaymentsWebhookService.name)
@@ -68,6 +76,9 @@ export class PaymentsWebhookService {
     stripeFactory: StripeClientFactory,
     @InjectQueue(STRIPE_WEBHOOK_QUEUE)
     private readonly webhookQueue: Queue<StripeWebhookJobPayload>,
+    private readonly stripeMetrics: StripeMetricsTracker,
+    private readonly webhookMetrics: WebhookMetricsTracker,
+    private readonly dlqMetrics: DlqMetricsTracker,
   ) {
     this.env = loadEnv()
     this.stripe = stripeFactory.build()
@@ -90,18 +101,26 @@ export class PaymentsWebhookService {
   async ingest(rawBody: Buffer, signatureHeader: string | undefined): Promise<IngestResult> {
     this.assertEnabled()
 
+    const ingestStart = process.hrtime.bigint()
+
     if (!signatureHeader) {
+      // event_type inconnu (pas encore décodé) → 'unknown' (normaliseur tracker).
+      this.webhookMetrics.recordOutcome(undefined, 'rejected')
       throw new WebhookInvalidSignatureException('missing_signature_header')
     }
 
-    // 1. Signature HMAC AVANT toute désérialisation (rule stripe + securite)
+    // 1. Signature HMAC AVANT toute désérialisation (rule stripe + securite).
+    //    `constructEvent` est synchrone (HMAC seul). On instrumente via le helper
+    //    sync du tracker — `status='invalid_signature'` mappé dans classify.
     let event: Stripe.Event
     try {
-      event = this.stripe.webhooks.constructEvent(
-        rawBody,
-        signatureHeader,
-        this.env.STRIPE_WEBHOOK_SECRET,
-        this.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS,
+      event = this.stripeMetrics.timeSync('webhooks.construct_event', () =>
+        this.stripe.webhooks.constructEvent(
+          rawBody,
+          signatureHeader,
+          this.env.STRIPE_WEBHOOK_SECRET,
+          this.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS,
+        ),
       )
     } catch (err) {
       // On NE log PAS le contenu du raw body (peut contenir PII/cards potentiellement
@@ -112,6 +131,7 @@ export class PaymentsWebhookService {
         },
         'stripe.webhook.signature.invalid',
       )
+      this.webhookMetrics.recordOutcome(undefined, 'rejected')
       throw new WebhookInvalidSignatureException()
     }
 
@@ -119,11 +139,17 @@ export class PaymentsWebhookService {
     // catalogue 3.1 sont stockés en DB pour observabilité mais marqués PROCESSED
     // sans routing (les tickets 3.2+ étendront le mapping).
     if (typeof event.id !== 'string' || !event.id.startsWith('evt_')) {
+      this.webhookMetrics.recordOutcome(event.type, 'rejected')
       throw new WebhookPayloadMalformedException('stripe_event_id_invalid')
     }
 
     // 3. Cohérence env ↔ livemode (audit Verify V8 + rule securite)
-    this.assertEnvConsistency(event)
+    try {
+      this.assertEnvConsistency(event)
+    } catch (err) {
+      this.webhookMetrics.recordOutcome(event.type, 'rejected')
+      throw err
+    }
 
     // 4. Hash payload (anti-tampering Redis + traçabilité audit)
     const payloadHash = createHash('sha256').update(rawBody).digest('hex')
@@ -145,6 +171,7 @@ export class PaymentsWebhookService {
           { eventId: event.id, type: event.type, livemode: event.livemode },
           'stripe.webhook.replay.idempotent',
         )
+        this.webhookMetrics.observe(event.type, 'replayed', durationSecondsSince(ingestStart))
         return { accepted: true, idempotent: true, eventId: event.id }
       }
       throw err
@@ -174,6 +201,8 @@ export class PaymentsWebhookService {
       { eventId: event.id, type: event.type, livemode: event.livemode },
       'stripe.webhook.ingested',
     )
+
+    this.webhookMetrics.observe(event.type, 'accepted', durationSecondsSince(ingestStart))
 
     return { accepted: true, idempotent: false, eventId: event.id }
   }
@@ -242,12 +271,14 @@ export class PaymentsWebhookService {
   async replayStripeDeadLetter(dlqId: string): Promise<void> {
     const row = await this.prisma.webhookDeadLetter.findUnique({ where: { id: dlqId } })
     if (!row || row.source !== 'STRIPE') {
+      this.dlqMetrics.recordReplayFailed('stripe')
       throw new NotFoundException({ error: 'WEBHOOK_DLQ_NOT_FOUND' })
     }
     const ev = await this.prisma.stripeWebhookEvent.findUnique({
       where: { stripeEventId: row.externalEventId },
     })
     if (!ev) {
+      this.dlqMetrics.recordReplayFailed('stripe')
       throw new NotFoundException({ error: 'STRIPE_WEBHOOK_EVENT_NOT_FOUND' })
     }
     await this.prisma.stripeWebhookEvent.update({
@@ -275,6 +306,7 @@ export class PaymentsWebhookService {
         removeOnFail: false,
       },
     )
+    this.dlqMetrics.recordReplayed('stripe')
     this.logger.log({ dlqId, stripeEventId: row.externalEventId }, 'stripe.webhook.dlq.replay_enqueued')
   }
 }

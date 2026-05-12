@@ -74,6 +74,13 @@ function buildService(opts: {
   service: PaymentsWebhookService
   prismaCreate: jest.Mock
   queueAdd: jest.Mock
+  webhookMetrics: { observe: jest.Mock; recordOutcome: jest.Mock }
+  dlqMetrics: {
+    recordEnqueued: jest.Mock
+    recordReplayed: jest.Mock
+    recordReplayFailed: jest.Mock
+  }
+  stripeMetrics: { time: jest.Mock; timeSync: jest.Mock }
 } {
   process.env['STRIPE_SECRET_KEY'] = process.env['STRIPE_SECRET_KEY'] ?? 'sk_test_unit'
   process.env['STRIPE_WEBHOOK_SECRET'] = WEBHOOK_SECRET
@@ -98,8 +105,33 @@ function buildService(opts: {
   } as unknown as ConstructorParameters<typeof PaymentsWebhookService>[0]
   const factoryStub = new StripeClientFactory()
   const queueStub = { add: queueAdd } as unknown as Queue
-  const service = new PaymentsWebhookService(prismaStub, factoryStub, queueStub)
-  return { service, prismaCreate, queueAdd }
+
+  // PRD-004 A3-bis : trackers neutres (no-op). On vérifie la pipeline complète
+  // sans coupler à un registry Prometheus réel ; les métriques sont testées
+  // dans les specs dédiées des trackers.
+  const stripeMetrics = {
+    time: jest.fn().mockImplementation(<T>(_op: string, fn: () => Promise<T>) => fn()),
+    timeSync: jest.fn().mockImplementation(<T>(_op: string, fn: () => T) => fn()),
+  }
+  const webhookMetrics = {
+    observe: jest.fn(),
+    recordOutcome: jest.fn(),
+  }
+  const dlqMetrics = {
+    recordEnqueued: jest.fn(),
+    recordReplayed: jest.fn(),
+    recordReplayFailed: jest.fn(),
+  }
+
+  const service = new PaymentsWebhookService(
+    prismaStub,
+    factoryStub,
+    queueStub,
+    stripeMetrics as never,
+    webhookMetrics as never,
+    dlqMetrics as never,
+  )
+  return { service, prismaCreate, queueAdd, webhookMetrics, dlqMetrics, stripeMetrics }
 }
 
 describe('PaymentsWebhookService (PRD-003 Ticket 3.1)', () => {

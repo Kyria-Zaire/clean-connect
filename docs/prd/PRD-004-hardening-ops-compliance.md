@@ -925,7 +925,91 @@ type WebhookDeadLetterView = {
 - [x] Pré-revue sécurité (§4.9) — 0 Critical / 0 Important / 5 Suggestions
 - [x] TODO Build (§4.10) — 20 items figés
 - [x] **Aucune ligne de code runtime ajoutée** ✅ (PR doc-only)
-- [ ] **Sign-off CTO Design Ticket 4.1** ← bloque l'ouverture du Build Ticket 4.1
+- [x] **Sign-off CTO Design Ticket 4.1** ✅ (validation 2026-05-12, PR #17 mergée)
+
+### 4.12 Build Ticket 4.1 — Foundations A1/A2/A3 + A3-bis (statut : en cours)
+
+> Suivi des sous-phases Build du Ticket 4.1 — chaque sous-phase = commit atomique + STOP validation CTO.
+
+#### A1 — Sentry integration (PR #18, commit `a919e64`) ✅
+
+- `@sentry/node` v8 initialisé pre-bootstrap dans `apps/api/src/main.ts`.
+- `sentry.config.ts` : `tracesSampler` 100 % routes finance (`/payments/*`, `/webhooks/stripe`), `beforeSend` + `beforeBreadcrumb` redacteurs (`deepSanitize`).
+- 4 envs Zod validés : `SENTRY_DSN` (URL optionnel), `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`, `SENTRY_TRACES_SAMPLE_RATE` (`[0..1]` default 0.1).
+- `RequestIdMiddleware` génère/propage `X-Request-Id` UUID v4 + tag scope Sentry.
+- `AllExceptionsFilter` ne capture que les 5xx + erreurs non-HTTP (anti-bruit 4xx).
+- 80 tests `sanitize.spec.ts` (Bearer/sk_/whsec_/pi_/JWT/Cloudinary signature/GPS/cycles/DoS).
+
+#### A2 — Pino hardening (PR #18, commit `5e6517e`) ✅
+
+- `common/security/sanitize.ts` (utilitaires génériques) + `common/logger/redaction.ts` (paths Pino Classes A/B/C) + `common/logger/correlation.ts` (`getCurrentTraceId` from Sentry span) + `common/logger/log-sanitizer.ts` (`pinoLogFormatter`).
+- `LoggerModule.forRootAsync` refactoré : `genReqId` lit `req.requestId` (A1), `customProps` injecte `traceId`, `redact.paths` = `REDACTION_PATHS`, `formatters.log` = `pinoLogFormatter` (bypass limitation `fast-redact` wildcards).
+- 15 tests `redaction.spec.ts` (snapshot lock-in + payloads BullMQ + arrays).
+
+#### A3 — Prometheus foundation (PR #18, commit `a6cb8f7`) ✅
+
+- `prom-client` v15 + `MetricsService` (registry isolé `cleanconnect_*` + 8 métriques canoniques).
+- 2 envs : `METRICS_ENABLED` (bool default true), `METRICS_BEARER_TOKEN` (min 32 chars, **crash boot prod si missing**).
+- `MetricsBearerGuard` (`timingSafeEqual` SHA-256), `MetricsController` `GET /api/internal/metrics`, `HttpMetricsInterceptor` global (`normalizeRoute`), `BullMqMetricsService` (`QueueEvents` listener + `normalizeReason`).
+- 28 tests métriques (service + guard + interceptor).
+
+#### A3-bis — Runtime metrics wiring (commit `build(obs): wire stripe and webhook runtime metrics`) ✅
+
+> Objectif : brancher les métriques A3 sur les flux runtime réels (Stripe + webhook + DLQ) sans refactor massif.
+
+**3 trackers créés** :
+
+| Tracker | Fichier | Métriques alimentées |
+|---|---|---|
+| `StripeMetricsTracker` | `metrics/stripe-metrics.tracker.ts` | `stripe_api_calls_total{operation,status}` + `stripe_api_failures_total{operation,status}` + `stripe_api_duration_seconds{operation,status}` |
+| `WebhookMetricsTracker` | `metrics/webhook-metrics.tracker.ts` | `webhook_processing_total{event_type,outcome}` + `webhook_processing_failures_total{event_type,outcome}` + `webhook_processing_duration_seconds{event_type,outcome}` |
+| `DlqMetricsTracker` | `metrics/dlq-metrics.tracker.ts` | `dlq_events_total{source,action}` (counter — complète la gauge `dlq_jobs_total{queue}` A3) |
+
+**Call sites instrumentés** :
+
+| Service / Processor | Appels SDK Stripe instrumentés |
+|---|---|
+| `PaymentsService` | `paymentIntents.create` + `paymentIntents.capture` + `paymentIntents.retrieve` |
+| `RefundsService` | `refunds.create` |
+| `OutboundTransferService` | `paymentIntents.retrieve` + `transfers.create` + `transfers.retrieve` (×2 — recon + post-create) |
+| `PaymentsWebhookService.ingest` | `webhooks.constructEvent` (sync, via `timeSync`) + observe outcome `accepted`/`rejected`/`replayed` |
+| `PaymentsWebhookService.replayStripeDeadLetter` | `dlq_events_total{replayed,replay_failed}` |
+| `StripeWebhookProcessor.process` | `events.retrieve` + observe outcome `accepted`/`failed` |
+| `StripeWebhookProcessor.onJobFailed` | `dlq_events_total{enqueued}` au passage final DLQ |
+
+**Décisions senior arbitrées** :
+
+- **Labels renommés** avant déploiement : `stripe_api_calls_total{method,status}` → `{operation,status}` ; `webhook_processing_total{provider,type,result}` → `{event_type,outcome}`. Aligné cahier CTO A3-bis et ADR-014.
+- **DLQ counter vs gauge** : `dlq_events_total` (counter, événements) ajouté **en complément** de `dlq_jobs_total` (gauge, taille). Sémantiques orthogonales documentées.
+- **`MetricsModule` `@Global()`** : 3 trackers injectés dans 5 services sans import explicite dans chaque module cible.
+- **Classification d'erreurs Stripe** : 9 statuts bornés via `err.name` puis `err.type` (pas de regex sur message — fragile + risque PII).
+- **Histograms Stripe** : buckets dédiés `[0.05..30]s` (plus larges que HTTP pour Connect/transfers).
+- **Cardinalité event_type** : whitelist `KNOWN_STRIPE_EVENT_TYPES` (16 entrées) + pattern strict `<resource>.<action>` + fallback `unknown` (`length > 64` ou non-string → `unknown`).
+
+**Tests A3-bis (42 nouveaux)** :
+
+- `stripe-metrics.tracker.spec.ts` (13 tests) — sync/async wrapping, classification erreurs, cardinality whitelist, isolation registry.
+- `webhook-metrics.tracker.spec.ts` (9 tests) — 4 outcomes, failures_total ciblé, normalisation (whitelist + injections).
+- `dlq-metrics.tracker.spec.ts` (4 tests) — 3 actions + non-pollution gauge.
+- `observability-metrics-a3bis.integration.spec.ts` (5 tests intégration) — webhook accepted/rejected/replayed runtime, replay DLQ admin, replay DLQ not_found.
+- `metrics.service.spec.ts` (mise à jour 11 tests) — nouveaux labels canoniques.
+
+**Gates locales** : ✅ `tsc --noEmit` · ✅ `eslint --max-warnings=0` · ✅ 26 suites / **369 unit tests** · ✅ 13 suites / **110 integration tests**.
+
+**Risques résiduels A3-bis** (≤ Medium) :
+
+- `R-A3bis-1` (Low) — un PaymentIntent qui fail au capture compte 2× outcomes côté webhook si BullMQ retry → comportement intentionnel (visibilité retries). Documenté ici pour les dashboards.
+- `R-A3bis-2` (Low) — `event_type` hors whitelist mais valide retient le label réel (pas `unknown`) → expansion contrôlée du label set quand Stripe ajoute de nouveaux types. Borne dure 64 caractères.
+- `R-A3bis-3` (Info) — la dette `TODO(debt)` "réactiver enqueue BullMQ `TRANSFER_RETRY`" (cf. `outbound-transfer.service.ts:351`) reste ouverte. Quand activée (PRD-004 Ticket 4.2), le wire `bullmq_jobs_total{queue=transfer-retry}` arrivera automatiquement via `BullMqMetricsService.TRACKED_QUEUES`.
+
+**Reste à faire Build B (hors A3-bis)** :
+
+- OpenTelemetry SDK init + sampler custom (TODO Build §4.10 #4, #12)
+- BullBoard read-only + RBAC ADMIN (§4.10 #10)
+- AlertingService + Discord/Resend (§4.10 #7, #8)
+- Dashboards Grafana JSON versionnés + docker-compose.prod.yml Prometheus/Grafana (§4.10 #17, #18)
+
+**STOP CTO** avant Build B (OTel + Grafana + BullBoard).
 
 > ✍️ À valider par `<CTO>` le `YYYY-MM-DD`. ADRs passent à `Accepted` au sign-off.
 

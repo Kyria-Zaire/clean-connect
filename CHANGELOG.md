@@ -12,6 +12,66 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Build — PRD-004 Ticket 4.1 A3-bis Metrics wiring (Sprint 4) — 2026-05-12
+
+🟢 **Instrumentation runtime des métriques Prometheus posées en A3.**
+PRD : [`docs/prd/PRD-004-hardening-ops-compliance.md`](docs/prd/PRD-004-hardening-ops-compliance.md) §4.1 (Build A3-bis). PR #18 (A1+A2+A3) validée CTO et mergée.
+
+#### Périmètre A3-bis (scope strict)
+
+- **Stripe API instrumentation** — `StripeMetricsTracker` (sync + async) wrappe les 7 appels SDK Stripe runtime : `payment_intents.create|capture|retrieve`, `refunds.create`, `transfers.create|retrieve`, `events.retrieve`, `webhooks.construct_event`. Classification d'erreurs Stripe → 9 statuts bornés (`success`, `invalid_signature`, `invalid_request`, `authentication`, `permission`, `rate_limited`, `connection`, `card_error`, `api_error`, `unknown`).
+- **Webhook processing instrumentation** — `WebhookMetricsTracker` alimente `webhook_processing_total` + `webhook_processing_failures_total` + `webhook_processing_duration_seconds` sur les 4 outcomes : `accepted` (HMAC OK + DB insert + enqueue), `rejected` (signature/livemode/payload malformé), `replayed` (event_id dupliqué → 202 idempotent), `failed` (worker exception).
+- **DLQ events instrumentation** — `DlqMetricsTracker` alimente `dlq_events_total{source, action}` (counter) sur 3 transitions : `enqueued` (processor → DLQ après retries exhaustés), `replayed` (admin replay OK), `replay_failed` (DLQ inexistante / event Stripe disparu). La gauge `dlq_jobs_total{queue}` (taille courante) reste alimentée par `BullMqMetricsService` (A3, QueueEvents listener).
+- **Labels bornés** : `operation` / `status` (Stripe) + `event_type` / `outcome` (webhook) + `source` / `action` (DLQ). Aucun label PII / UUID / cardinalité explosive. `event_type` normalisé via whitelist `KNOWN_STRIPE_EVENT_TYPES` + pattern strict + fallback `unknown`.
+- **Histogram buckets dédiés Stripe** : `[0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]s` (couvre p50 ~200 ms à timeouts longs Connect).
+
+#### Décisions senior
+
+- **DLQ counter vs gauge** — `dlq_events_total` ajouté comme **counter** distinct de la gauge `dlq_jobs_total` : sémantiques orthogonales (taille courante vs taux d'événements). PromQL différentié : `dlq_jobs_total > 10` pour seuils statiques, `rate(dlq_events_total[5m])` pour alertes burst.
+- **Labels renommés** (`method`/`provider`/`type`/`result` → `operation`/`event_type`/`outcome`) avant déploiement prod — pas de breaking change observable.
+- **`MetricsModule` `@Global()`** — les 3 trackers sont injectés dans 4 modules (Payments, MissionsCompletion, Photos, Auth via interceptor) sans coupler chaque module à un import explicite. Singleton registry conforme ADR-014.
+- **Processor outcomes** : un job en retry incrémente `outcome=failed` à chaque tentative — visibilité retries dans le compteur. Transition DLQ finale tracée séparément via `dlq_events_total`. Pas de double comptage.
+
+#### Tests (37 nouveaux)
+
+- 13 tests `stripe-metrics.tracker.spec.ts` — sync/async, classification erreurs (9 types Stripe + fallbacks), cardinality whitelist, isolation multi-registry.
+- 9 tests `webhook-metrics.tracker.spec.ts` — 4 outcomes émis, failures_total ciblé rejected/failed seulement, normalisation event_type (whitelist + pattern + injections SQL/JSON).
+- 4 tests `dlq-metrics.tracker.spec.ts` — 3 actions + non-pollution gauge.
+- 5 tests **intégration** `observability-metrics-a3bis.integration.spec.ts` — webhook accepted/rejected/replayed runtime, replay DLQ admin, replay DLQ inexistante.
+- 6 tests `metrics.service.spec.ts` mis à jour pour les nouveaux labels.
+
+#### Métriques livrées (A3 + A3-bis)
+
+13 métriques `cleanconnect_*` exposées sur `/api/internal/metrics` :
+
+| Famille | Métrique | Labels | Source |
+|---|---|---|---|
+| HTTP | `http_requests_total`, `http_request_duration_seconds` | `method`, `route`, `status` | A3 (interceptor) |
+| BullMQ | `bullmq_jobs_total`, `bullmq_jobs_failed_total` | `queue`, `name`, `result`/`reason` | A3 (QueueEvents) |
+| Stripe | `stripe_api_calls_total`, `stripe_api_failures_total`, `stripe_api_duration_seconds` | `operation`, `status` | **A3-bis** (tracker) |
+| Webhook | `webhook_processing_total`, `webhook_processing_failures_total`, `webhook_processing_duration_seconds` | `event_type`, `outcome` | **A3-bis** (ingest + processor) |
+| DLQ | `dlq_jobs_total` (gauge) + `dlq_events_total` (counter) | `queue` / `source`, `action` | A3 + **A3-bis** |
+
+#### Gates locales
+
+✅ `tsc --noEmit` (apps/api) · ✅ `eslint --max-warnings=0` (apps/api) · ✅ 26 suites / **369 unit tests** · ✅ 13 suites / **110 integration tests** (zéro régression Stripe/transfers/refunds/webhooks).
+
+#### Definition of Done — Build A3-bis
+
+Instrumentation runtime branchée sur tous les flux Stripe et webhook ✅ · `stripe_api_*` et `webhook_processing_*` réellement alimentées ✅ · `dlq_events_total` branché aux 3 transitions ✅ · 0 PII en labels ✅ · cardinalité bornée ✅ · CI locale verte ✅ · tests dédiés (37 nouveaux) ✅. **Bloque** : sign-off CTO Build A3-bis (puis Build B — OpenTelemetry / Grafana / BullBoard).
+
+---
+
+### Build — PRD-004 Ticket 4.1 Foundations A1+A2+A3 (Sprint 4) — 2026-05-12
+
+🟢 **Couches Observabilité fondamentales opérationnelles** (Sentry + Pino redacté + Prometheus endpoint). PR #18 mergée. Tests : 337/337 unitaires verts, 95/95 intégration verts.
+
+- **A1 Sentry** — `@sentry/node` v8 init pre-bootstrap, `tracesSampler` 100 % routes finance, `beforeSend` + `beforeBreadcrumb` redacteurs PII, `RequestIdMiddleware` + tag scope Sentry. 4 envs `SENTRY_DSN/ENVIRONMENT/RELEASE/TRACES_SAMPLE_RATE`. 80 tests unitaires `sanitize.spec.ts`.
+- **A2 Pino hardening** — `REDACTION_PATHS` 3 classes (A/B/C) centralisés + `pinoLogFormatter` (deep sanitization recursive, bypass limitation `fast-redact` wildcards) + `traceId` injection via `customProps` + `requestId` correlation. 15 tests `redaction.spec.ts` (snapshot lock-in + payloads BullMQ).
+- **A3 Prometheus foundation** — `prom-client` v15, registry isolé `cleanconnect_*` (8 métriques canoniques + Node runtime), `MetricsBearerGuard` (`timingSafeEqual` SHA-256), `HttpMetricsInterceptor` global (`normalizeRoute` cardinality), `BullMqMetricsService` (`QueueEvents` listener + `normalizeReason`). 2 envs `METRICS_ENABLED/BEARER_TOKEN` + Zod `superRefine` (crash boot prod si token absent). 28 tests métriques.
+
+---
+
 ### Design — PRD-004 Ticket 4.1 Observabilité & Ops (Sprint 4) — 2026-05-12
 
 🟡 **Phase Design ouverte sur Ticket 4.1 — aucune ligne de code runtime.**
