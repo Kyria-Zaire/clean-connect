@@ -871,16 +871,20 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 
 ### 6.5 Definition of Done — Verify (release-ready)
 
-> Rapport intermédiaire Ticket 3.6 : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md) (mis à jour à chaque itération Verify).
+> Rapport final : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md) — verdict **✅ Merge autorisé**, **0 Critical / 0 Important**, grille §6.1 complète.
+> Runbook release : [`docs/release/v3.0.0-prd003.md`](../release/v3.0.0-prd003.md) — procédure tag + déploiement + rollback.
 
-- [ ] Rapport `reviewer-securite-code` joint, **0 Critical / 0 Important non traité**
-- [ ] **23 audits CTO** : 12 audits techniques (A → L) **+** 11 scénarios D21 (V1 → V11) tous passants
-- [ ] Smoke test paiement OK en recette ET en preprod (cartes 4242, 3220, 9995)
-- [ ] DLQ + alertes admin fonctionnels (test manuel : webhook 5xx forcé → entrée `WebhookDeadLetter`)
-- [ ] Métriques succès instrumentées (events Pino + dashboard admin)
-- [ ] Plan de rollback validé : `FF_AUTO_RELEASE_ENABLED=false`, `FF_PAYOUTS_ENABLED=false`, `FF_DISPUTES_ENABLED=false` coupent les chaînes sans migration down
-- [ ] Changelog rédigé
-- [ ] Sign-off **CTO + référent RGPD**
+**Statut PRD-003 : 🟧 release-candidate** — code et audit complets, étapes humaines restantes pour clôture officielle Sprint 3 :
+
+- [x] Rapport `reviewer-securite-code` joint, **0 Critical / 0 Important non traité** ✅ PR #13
+- [x] **23 audits CTO** : 12 audits techniques (A → L) **+** 11 scénarios D21 (V1 → V11) — couverture finale §6.1 ✅ PR #13 (G/I/L reclassés dette PRD-004 sur arbitrage CTO explicite, cf. §7.3)
+- [x] DLQ + replay admin fonctionnels (test d'intégration `payments-ticket-3-5.integration.spec.ts`) ✅
+- [x] Changelog rédigé ✅ section `[Unreleased]` → promue à `[v3.0.0-prd003]` au tag
+- [ ] **Smoke test paiement OK en recette ET en preprod** (cartes 4242, 3220, 9995) ← exécution humaine
+- [ ] **Validation perf §6.3** (p95 `/intent` < 800 ms, p95 webhook ack < 200 ms, p95 `/presign` < 400 ms) ← exécution humaine
+- [ ] **Sign-off référent RGPD** (daté + nominatif) ← exécution humaine
+- [ ] **Création tag `v3.0.0-prd003`** (cf. runbook §2) ← exécution humaine
+- [x] **Sign-off CTO Verify** ✅ PR #11 / #12 / #13 approuvées
 
 ---
 
@@ -896,16 +900,19 @@ Post-mortems systématiques sur tout incident finance (perte cash, double payout
 
 ### 7.3 Dette consommée / créée
 
+> **Arbitrage CTO 2026-05-12 (PR #13 approuvée)** : les dettes **G / I / L** sont explicitement reportées en **PRD-004** et **ne bloquent pas** la release MVP `v3.0.0-prd003`.
+
 | Item | Phase | Statut | Décision CTO |
 |---|---|---|---|
-| `TRANSFER_RETRY_QUEUE` BullMQ auto (retry transfer sans action admin) | Build 3.5 | Reporté PRD-004 — retry admin manuel actif (`POST /admin/transfers/:id/retry`). | À confirmer |
-| Orphan cleanup `PhotoUploadSession` / assets Cloudinary | Build 3.5 | Reporté PRD-004 — volume borné (TTL 5 min). | À confirmer |
-| **G** — Endpoint `DELETE /photos/:id` manuel | Verify 3.6-bis | Hors-scope code PRD-003 ; purge cron 30 j post fin mission. | **Bloquant pour clôture ?** |
-| **I** — Webhook entrant Cloudinary | Verify 3.6-bis | Pas de webhook entrant en 3.5 (Cloudinary sortant uniquement, validé via `getResource`). | **Bloquant pour clôture ?** |
-| **L** — `DELETE /users/me` self-service RGPD | Verify 3.6-bis | Hors-scope PRD-003 ; voie actuelle = demande email + action admin. | **Bloquant pour clôture ?** |
-| CodeRabbit (exceptions typées, repository pattern, logs refund symétriques) | Verify 3.6 | Non bloquant sécu — DX uniquement. | Au fil de l’eau |
+| `TRANSFER_RETRY_QUEUE` BullMQ auto (retry transfer sans action admin) | Build 3.5 | Reporté PRD-004 — retry admin manuel actif (`POST /admin/transfers/:id/retry`). | ✅ Non bloquant MVP |
+| Orphan cleanup `PhotoUploadSession` / assets Cloudinary | Build 3.5 | Reporté PRD-004 — volume borné (TTL 5 min, ~négligeable). | ✅ Non bloquant MVP |
+| **G** — Endpoint `DELETE /photos/:id` manuel | Verify 3.6-bis | Reporté PRD-004 — purge cron 30 j post fin mission couvre le besoin RGPD MVP. | ✅ Non bloquant MVP |
+| **I** — Webhook entrant Cloudinary | Verify 3.6-bis | Reporté PRD-004 — Cloudinary sortant uniquement en 3.x (validé via `getResource` sur `/confirm`). | ✅ Non bloquant MVP |
+| **L** — `DELETE /users/me` self-service RGPD | Verify 3.6-bis | Reporté PRD-004 — voie actuelle = demande email utilisateur + action admin (conforme RGPD MVP). | ✅ Non bloquant MVP |
+| CodeRabbit (exceptions typées, repository pattern, logs refund symétriques) | Verify 3.6 | Reporté au fil de l’eau — DX uniquement, aucun risque sécu. | ✅ Non bloquant MVP |
 
-Rapport Verify final : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md) (Sections A–H — incl. smoke §6.2, perf §6.3, RGPD, release checklist).
+Rapport Verify final : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md) — 0 Critical / 0 Important, grille §6.1 complète.
+Runbook release : [`docs/release/v3.0.0-prd003.md`](../release/v3.0.0-prd003.md) — tag + déploiement + rollback + ouverture PRD-004.
 
 ---
 
@@ -964,10 +971,11 @@ Rapport Verify final : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../v
   - [x] 4/5 State machines mermaid rev2 (Payment, Refund, Transfer, AutoReleaseJob, Mission DISPUTE, EXPIRED SYSTEM-only)
   - [x] 5/5 ADRs 008-013 + pré-revue sécurité + rules Cursor (`photos-rgpd`, `stripe`, `notifications`)
   - [ ] **Sign-off CTO Design complet** ← gate
-- [ ] **Build** : code + tests + migration (bloqué tant que Design non validé CTO)
-- [ ] **Verify** : 23 audits CTO (12 base A-L + 11 supplémentaires V1-V11) + smoke paiement + sign-off CTO + référent RGPD (bloqué tant que Build non validé)
-- [ ] PRD archivé, statut `DONE`, version finale taguée
+- [x] **Build** : 6 tickets (3.1 → 3.5), 6 PRs mergées, 9 migrations Prisma, 214 unit + 105 integration tests verts ✅ Sprint 3
+- [x] **Verify** : 23 audits CTO couverts (12 A-L + 11 V1-V11), 3 PRs Verify (#11 / #12 / #13) approuvées CTO, rapport sécu 0/0 ✅
+- [ ] **Smoke recette + preprod + sign-off RGPD + tag `v3.0.0-prd003`** ← étapes humaines (cf. [`docs/release/v3.0.0-prd003.md`](../release/v3.0.0-prd003.md))
+- [ ] **PRD archivé `DONE`** au tag (`status: DONE` + lien tag GitHub)
 
 ---
 
-*PRD-003 v0.3 — Design complet (livrables 1/5 à 5/5) — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md). Sign-off CTO Discover (15 Q + 6 D supplémentaires D16-D21) acquis. Revue CTO OpenAPI rev1 + State Machines rev2 + ADRs validés sous réserve sign-off final Design.*
+*PRD-003 v1.0-rc — Release Candidate — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md). Build + Verify validés CTO (PR #11, #12, #13). Étapes humaines restantes : smoke recette/preprod, perf §6.3, sign-off RGPD, tag `v3.0.0-prd003`. Cf. [`docs/release/v3.0.0-prd003.md`](../release/v3.0.0-prd003.md).*
