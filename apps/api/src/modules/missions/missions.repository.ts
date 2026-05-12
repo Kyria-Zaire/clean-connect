@@ -282,6 +282,62 @@ export class MissionsRepository {
   }
 
   /**
+   * PRD-003 Ticket 3.2 — transition `DRAFT → PENDING_PAYMENT` (création
+   * PaymentIntent). Lock optimiste : si la mission n'est plus en `DRAFT`
+   * (annulée concurremment, déjà passée en `PENDING_PAYMENT` via replay),
+   * renvoie 0 et le caller bascule sur la branche idempotente.
+   */
+  async transitionDraftToPendingPaymentTx(
+    tx: Prisma.TransactionClient,
+    missionId: string,
+  ): Promise<number> {
+    const result = await tx.mission.updateMany({
+      where: { id: missionId, status: 'DRAFT' },
+      data: { status: 'PENDING_PAYMENT' },
+    })
+    return result.count
+  }
+
+  /**
+   * PRD-003 Ticket 3.2 — transition `PENDING_PAYMENT → PUBLISHED` (webhook
+   * Stripe `payment_intent.amount_capturable_updated`).
+   *
+   * Atomique : pose `publishedAt` + `listingExpiresAt` dans la même UPDATE
+   * pour ne pas créer de race avec le matching. Renvoie 0 si la mission a
+   * déjà été publiée par un replay de webhook (idempotent).
+   */
+  async transitionPendingPaymentToPublishedTx(
+    tx: Prisma.TransactionClient,
+    opts: { missionId: string; publishedAt: Date; listingExpiresAt: Date },
+  ): Promise<number> {
+    const result = await tx.mission.updateMany({
+      where: { id: opts.missionId, status: 'PENDING_PAYMENT' },
+      data: {
+        status: 'PUBLISHED',
+        publishedAt: opts.publishedAt,
+        listingExpiresAt: opts.listingExpiresAt,
+      },
+    })
+    return result.count
+  }
+
+  /**
+   * PRD-003 Ticket 3.2 — webhook `payment_intent.canceled` : la mission
+   * doit basculer en `CANCELLED` (ne reste pas bloquée en `PENDING_PAYMENT`).
+   * Lock idempotent : retourne 0 si la mission n'est plus en `PENDING_PAYMENT`.
+   */
+  async transitionPendingPaymentToCancelledTx(
+    tx: Prisma.TransactionClient,
+    opts: { missionId: string },
+  ): Promise<number> {
+    const result = await tx.mission.updateMany({
+      where: { id: opts.missionId, status: 'PENDING_PAYMENT' },
+      data: { status: 'CANCELLED' },
+    })
+    return result.count
+  }
+
+  /**
    * Lock optimiste — accept first-wins (ADR-005). Une seule UPDATE conditionnée :
    *  - mission encore PUBLISHED
    *  - encore non expirée

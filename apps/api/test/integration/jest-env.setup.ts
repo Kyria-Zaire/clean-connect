@@ -33,6 +33,7 @@ process.env['STRIPE_WEBHOOK_TOLERANCE_SECONDS'] =
 // Reste 'false' par défaut pour ne pas activer le webhook dans les autres suites.
 process.env['FF_PAYMENTS_ENABLED'] = process.env['FF_PAYMENTS_ENABLED'] ?? 'false'
 process.env['APP_VERSION'] = process.env['APP_VERSION'] ?? '0.0.0-test'
+process.env['PAYMENT_PLATFORM_FEE_RATE'] = process.env['PAYMENT_PLATFORM_FEE_RATE'] ?? '0.18'
 
 process.env['THROTTLE_LIMIT'] = process.env['THROTTLE_LIMIT'] ?? '10000'
 process.env['THROTTLE_TTL_SECONDS'] = process.env['THROTTLE_TTL_SECONDS'] ?? '60'

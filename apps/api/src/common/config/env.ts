@@ -61,6 +61,19 @@ const envSchema = z
      */
     APP_VERSION: z.string().min(1).max(40).default('0.1.0-dev'),
 
+    /**
+     * PRD-003 Ticket 3.2 — taux de commission plateforme (snapshot lock-in à la
+     * création du PaymentIntent, ADR-008 §4). `0.18` = 18 % du montant TTC.
+     * - **Snapshot immutable** : même si on change la valeur côté env, les
+     *   Payments existants conservent la commission calculée à leur création.
+     * - Bornes : `[0, 0.5]` — toute valeur > 50 % est probablement une faute
+     *   de frappe (crash boot).
+     * - Le calcul exact HT/TTC sera réaffiné en Ticket 3.4 (transfer Connect).
+     *   En 3.2 on snapshote pour fixer les contrats DB ; aucun Transfer n'est
+     *   encore émis.
+     */
+    PAYMENT_PLATFORM_FEE_RATE: z.coerce.number().min(0).max(0.5).default(0.18),
+
     CLOUDINARY_URL: z.string().url().optional(),
     FCM_PROJECT_ID: z.string().optional(),
     FCM_SERVER_KEY: z.string().optional(),

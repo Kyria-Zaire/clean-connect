@@ -77,6 +77,15 @@ const STATE_TO_SEMANTIC_REASON: Partial<Record<Mission['status'], string>> = {
 export class MissionsService {
   private readonly logger = new Logger(MissionsService.name)
   private readonly listingTtlMs: number
+  /**
+   * PRD-003 Ticket 3.2 — quand le module Payments est activé, la publication
+   * directe `DRAFT → PUBLISHED` est interdite côté API : la mission doit
+   * passer par `POST /v1/payments/intent` puis attendre le webhook Stripe
+   * (`payment_intent.amount_capturable_updated`) pour devenir `PUBLISHED`.
+   * Cf. correction CTO 2026-05-12 : « mission jamais PUBLISHED sans webhook
+   * Stripe valide ».
+   */
+  private readonly paymentsEnabled: boolean
 
   constructor(
     private readonly prisma: PrismaService,
@@ -89,6 +98,7 @@ export class MissionsService {
     config: ConfigService<Env, true>,
   ) {
     this.listingTtlMs = config.get('MISSION_LISTING_TTL_MS', { infer: true })
+    this.paymentsEnabled = config.get('FF_PAYMENTS_ENABLED', { infer: true })
   }
 
   // ---------------------------------------------------------------------------
@@ -154,6 +164,13 @@ export class MissionsService {
     if (!mission) throw new MissionNotFoundError()
     if (actor.role !== 'CLIENT' || mission.clientId !== actor.userId) {
       throw new MissionForbiddenError()
+    }
+
+    // PRD-003 Ticket 3.2 : aucune publication directe quand Payments actif.
+    // Le client doit appeler `POST /v1/payments/intent` pour transitionner
+    // `DRAFT → PENDING_PAYMENT`, puis le webhook Stripe pousse `→ PUBLISHED`.
+    if (this.paymentsEnabled && mission.status === 'DRAFT') {
+      throw new MissionInvalidStateError('mission_publish_requires_payment')
     }
 
     try {

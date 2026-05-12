@@ -35,6 +35,9 @@ import { MissionViewService } from './services/mission-view.service'
     MatchingService,
     MissionViewService,
   ],
-  exports: [MissionsService],
+  // PRD-003 Ticket 3.2 — `PaymentsModule` réutilise le repo + l'audit + le
+  // matching pour orchestrer les transitions liées au paiement
+  // (`DRAFT → PENDING_PAYMENT` puis webhook → `PUBLISHED`).
+  exports: [MissionsService, MissionsRepository, MissionEventService, MatchingService],
 })
 export class MissionsModule {}
