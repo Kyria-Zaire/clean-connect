@@ -12,6 +12,41 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Discover — PRD-004 Hardening, Ops & Compliance (Sprint 4) — 2026-05-12
+
+🟡 **Phase Discover ouverte — aucune ligne de code runtime.**
+PRD : [`docs/prd/PRD-004-hardening-ops-compliance.md`](docs/prd/PRD-004-hardening-ops-compliance.md) — statut `DISCOVER_DRAFT`. Validation CTO requise pour passer en Design.
+
+#### Périmètre proposé (5 tickets)
+
+- **4.1 Observabilité & Ops** — Sentry + OpenTelemetry + dashboards p95/p99 + BullMQ monitoring + alerting DLQ.
+- **4.2 Retry & Recovery BullMQ** — retry auto transfer (dette PRD-003), stuck job recovery, poison job isolation, safety-net cron, recovery playbooks.
+- **4.3 Admin Tooling UI** — dashboard admin, transfers/refunds/DLQ/disputes monitors, audit timeline, traçabilité actions admin.
+- **4.4 RGPD avancé** — `DELETE /users/me` (dette **L**), export utilisateur, `DELETE /admin/photos/:id` (dette **G**), webhook entrant Cloudinary (dette **I**), consent logs, Cloudinary deletion guarantees, retention audit.
+- **4.5 Monitoring financier** — Stripe/DB reconciliation, stuck funds detector, payout anomalies, daily finance report, consistency invariants.
+
+#### Décisions à arbitrer en Discover (9 Open Questions CTO)
+
+OQ-1 Sentry seul vs Sentry+OTel ; OQ-2 Prometheus/Grafana maintenant ou plus tard ; OQ-3 BullBoard vs admin custom ; OQ-4 hard delete vs anonymisation `/users/me` ; OQ-5 export JSON seul vs ZIP+photos ; OQ-6 canal alerting Slack/email ; OQ-7 daily finance report email vs dashboard ; OQ-8 seuils d'alerte (stuck transfer, DLQ count, error rate) ; OQ-9 PRD-004 unique vs split 004A Ops / 004B Admin&RGPD.
+
+#### Risk assessment
+
+🔴 RGPD = 5/5 (DELETE users + export utilisateur + suppression photo touchent au cœur du droit à l'effacement et à la portabilité) ; 🟠 Sécurité = 4/5 (Sentry doit redacter PII, admin tooling expose des routes très sensibles) ; 🟠 Financier = 4/5 (retry transfer auto et reconciliation cron manipulent du cash réel) ; 🟠 Dette ops = 4/5 (sans 4.1/4.3, PRD-005 Disputes infaisable proprement) ; 🟡 Perf = 3/5, Disponibilité externe = 3/5, UX = 2/5, Coût = 2/5.
+
+#### Recommandation ordre d'exécution
+
+4.1 (observer) → 4.2 (automatiser) → 4.5 (contrôler) → 4.4 (se conformer) → 4.3 (confortifier admin). Cible tag : `v3.1.0-prd004` (ou split `v3.1.0-prd004a` + `v3.2.0-prd004b` si OQ-9 = split).
+
+#### Dépendances PRD-003
+
+Reprend explicitement les dettes G / I / L arbitrées CTO PR #13 + `debt-prd004-transfer-retry-queue` + `debt-prd004-orphan-cleanup` + suivi CodeRabbit DX.
+
+#### Definition of Done — Discover
+
+PRD instancié + 5 tickets + risques + métriques + OQ + dépendances + ordre d'exécution + zéro code runtime ✅. **Bloque** : sign-off CTO § DoD Discover dernière case.
+
+---
+
 ### Verify — PRD-002 Missions & Géolocalisation (Ticket 2.3) — 2026-05-12
 
 ✅ **Sign-off CTO accordé — merge PR #4 autorisé.**
