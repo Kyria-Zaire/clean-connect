@@ -12,6 +12,7 @@ import { PrismaModule } from './common/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
 import { HealthModule } from './modules/health/health.module'
 import { MissionsModule } from './modules/missions/missions.module'
+import { MissionsCompletionModule } from './modules/missions-completion/missions-completion.module'
 import { PaymentsModule } from './modules/payments/payments.module'
 import { PhotosModule } from './modules/photos/photos.module'
 import { UsersModule } from './modules/users/users.module'
@@ -143,6 +144,14 @@ import { UsersModule } from './modules/users/users.module'
      * PhotoUploadSession). Gated par `FF_PHOTOS_ENABLED` au niveau service.
      */
     PhotosModule,
+    /**
+     * PRD-003 Ticket 3.4 — module MissionsCompletion (complete / validate /
+     * report-problem + AutoReleaseJob BullMQ delayed T+48h ouvrées).
+     * Cycle forwardRef avec `PaymentsModule` (PaymentDomainHandler appelle
+     * `AutoReleaseService.cancel`, `MissionCompletionService.validate`
+     * appelle `PaymentsService.requestCapture`).
+     */
+    MissionsCompletionModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ConditionalThrottlerGuard },

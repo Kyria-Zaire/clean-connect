@@ -1,7 +1,7 @@
 import { MissionStatusSchema, type MissionStatus } from '@cc/shared-types'
 
 /**
- * Graphe de transitions **MVP PRD-002 + PRD-003 Ticket 3.2**.
+ * Graphe de transitions **MVP PRD-002 + PRD-003 Tickets 3.2 / 3.4**.
  *
  * Modélisation :
  *  - PRD-002 Build : `DRAFT → PUBLISHED → ACCEPTED|EXPIRED|CANCELLED`
@@ -10,13 +10,23 @@ import { MissionStatusSchema, type MissionStatus } from '@cc/shared-types'
  *    `PENDING_PAYMENT → PUBLISHED` est exclusivement déclenchée par le
  *    webhook Stripe `payment_intent.amount_capturable_updated` (jamais par
  *    une route API utilisateur — cf. correction CTO Ticket 3.2).
+ *  - PRD-003 Ticket 3.4 (mission completion + capture) :
+ *      `ACCEPTED → CLIENT_VALIDATION_PENDING` (POST /complete, prestataire,
+ *      garde-fou photos ≥ 3 BEFORE + ≥ 5 AFTER syncées).
+ *      `CLIENT_VALIDATION_PENDING → COMPLETED` (webhook
+ *      `payment_intent.succeeded` après capture confirmée — jamais
+ *      directement depuis une route HTTP).
+ *      `CLIENT_VALIDATION_PENDING → DISPUTE_OPEN` (POST /report-problem,
+ *      client owner — bloque l'auto-release T+48h ouvrées).
  *  - L'état intermédiaire `PROPOSED` est *réservé* (présent dans l'enum DB)
  *    mais non utilisé en marketplace : les propositions sont matérialisées
  *    par les lignes `MissionProposal` ; le statut mission reste `PUBLISHED`
  *    pendant la fenêtre TTL.
- *  - États aval (IN_PROGRESS, AWAITING_CLIENT_VALIDATION, COMPLETED,
- *    DISPUTE_OPEN, REFUNDED) déclarés pour PRD-003 Ticket 3.4+ : aucune
- *    transition ici en 3.2.
+ *  - `IN_PROGRESS` reste réservé à un futur endpoint `/start` (mobile)
+ *    dédié — non livré en 3.4 (cf. PRD §5.1quater, `TODO(debt)
+ *    mission-start-endpoint`).
+ *  - `REFUNDED` = Ticket 3.5. `COMPLETED → DISPUTE_OPEN` (fenêtre 7 j post
+ *    completion) = PRD-005.
  *
  * Règle produit : toute mutation de statut côté API DOIT passer par
  * `assertMissionTransition()` (contrainte CTO Build §6).
@@ -32,12 +42,23 @@ export const MISSION_TRANSITIONS_MVP: {
   PENDING_PAYMENT: ['PUBLISHED', 'CANCELLED'],
   PUBLISHED: ['ACCEPTED', 'EXPIRED', 'CANCELLED'],
   PROPOSED: ['ACCEPTED', 'EXPIRED', 'CANCELLED'],
-  ACCEPTED: [],
+  // PRD-003 Ticket 3.4 — prestataire peut directement `complete` une mission
+  // ACCEPTED (les photos AFTER sont uploadées au fil de la prestation via
+  // les routes presign/confirm). L'état IN_PROGRESS n'est pas un prérequis
+  // serveur en 3.4 (TODO(debt) mission-start-endpoint).
+  ACCEPTED: ['CLIENT_VALIDATION_PENDING', 'CANCELLED'],
   EXPIRED: [],
   CANCELLED: [],
-  IN_PROGRESS: [],
-  AWAITING_CLIENT_VALIDATION: [],
+  IN_PROGRESS: ['CLIENT_VALIDATION_PENDING', 'CANCELLED'],
+  // PRD-003 Ticket 3.4 — transitions sortantes :
+  //   → COMPLETED : webhook `payment_intent.succeeded` (capture confirmée).
+  //   → DISPUTE_OPEN : POST /report-problem (CLIENT) ou
+  //                    `charge.dispute.created` (Ticket 3.5).
+  CLIENT_VALIDATION_PENDING: ['COMPLETED', 'DISPUTE_OPEN', 'CANCELLED'],
+  // PRD-003 Ticket 3.4 — état terminal succès (transfer prestataire +
+  // fenêtre litige T+7j = Ticket 3.5 / PRD-005).
   COMPLETED: [],
+  // PRD-003 Ticket 3.4 — terminal MVP (workflow litige complet = PRD-005).
   DISPUTE_OPEN: [],
   REFUNDED: [],
 }

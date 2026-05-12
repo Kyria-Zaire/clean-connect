@@ -16,8 +16,8 @@
 | **ID** | `PRD-003` |
 | **Slug** | `photos-paiements` |
 | **Titre** | Photos AVANT/APRÈS + Stripe Connect Express (escrow) — sous-systèmes Media Evidence / Payment Lifecycle / Mission Completion / Stripe Connect Onboarding |
-| **Version PRD** | `0.6` (Design ✅ signé-off, Build Tickets 3.1 + 3.2 + 3.3 livrés 2026-05-12) |
-| **Statut** | `BUILD_IN_PROGRESS` (Tickets 3.1 + 3.2 + 3.3 livrés, en attente validation CTO avant Ticket 3.4) |
+| **Version PRD** | `0.7` (Design ✅ signé-off, Build Tickets 3.1 + 3.2 + 3.3 + 3.4 livrés 2026-05-12, capture séquestre **sans transfer**) |
+| **Statut** | `BUILD_IN_PROGRESS` (Tickets 3.1 + 3.2 + 3.3 + 3.4 livrés, en attente validation CTO avant Ticket 3.5 — transfers + refunds + DLQ replay) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` (cadrage) → `architecte-api` + `securite` + `stripe` + `photos-rgpd` (Design) |
 | **Persona pilote Discover** | `senior-dev` |
@@ -722,9 +722,69 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 4. **OpenAPI presign** : cycle de vie sessions **abandonnées** (`consumedAt` NULL jusqu'à confirm ou expiration ; après `expiresAt` sans confirm → `410` ; purge/orphans → **3.5** `photos-orphan-cleanup-job`).
 5. **OpenAPI + `CloudinaryClient`** : timeouts / 5xx sur `getResource` — retry **mobile** sur `confirm` safe grâce à l'idempotence (`idempotent: true` après premier succès).
 
-**Backlog Ticket 3.4** (démarrage après merge PR #9 sur `main` — correction CTO **sans** `stripe.transfers.create`) :
-- `POST /v1/missions/:id/complete`, `POST /v1/missions/:id/validate`, quotas photos BEFORE/AFTER, fenêtre litige, planification auto-release (BullMQ), **`stripe.paymentIntents.capture`** après validation client ou auto-release, webhook `payment_intent.succeeded` → `Payment CAPTURED`, mission `COMPLETED` / `DISPUTED`, ownership capture **SYSTEM / ADMIN exceptionnel** uniquement, tests de course validation vs auto-release.
-- **Hors 3.4** : transfer vers prestataire, webhooks `transfer.*`, refund orchestration, retry transfer, DLQ replay UI, orphan cleanup final → **3.5**.
+### 5.1quater Ticket 3.4 — Mission completion + client validation + Payment capture (sans transfer)
+
+**Statut** : ✅ `BUILD_DONE` 2026-05-12 — capture séquestre client-only / auto-release.
+
+**Périmètre livré (scope strict CTO Ticket 3.4)** :
+
+- Endpoints :
+  - `POST /v1/missions/:id/complete` — `[PRESTATAIRE]`, transition `ACCEPTED → CLIENT_VALIDATION_PENDING`, quotas photos BEFORE ≥ 3 / AFTER ≥ 5 (`MissionPhotoQuotaService`), planification `AutoReleaseJob` BullMQ T+48h ouvrées Paris (jours fériés FR via `business-hours.ts`).
+  - `POST /v1/missions/:id/validate` — `[CLIENT]`, cancel `AutoReleaseJob` (verrou applicatif `lockedAt`/`lockedBy`), `PaymentsService.requestCapture(CLIENT)` avec idempotency-key déterministe `capture-mission-{missionId}`, réponse `202` (capture asynchrone — confirmation via webhook).
+  - `POST /v1/missions/:id/report-problem` — `[CLIENT | PRESTATAIRE]`, transition `CLIENT_VALIDATION_PENDING → DISPUTE_OPEN`, cancel `AutoReleaseJob` (`cancelReason='dispute_opened'`), bloque toute libération séquestre.
+- Domain :
+  - Enum `MissionStatus` renommé `AWAITING_CLIENT_VALIDATION → CLIENT_VALIDATION_PENDING` + ajout `COMPLETED` & `DISPUTE_OPEN` (migration `20260513010000_prd003_ticket_3_4_mission_completion`).
+  - State machine `ACCEPTED → CLIENT_VALIDATION_PENDING`, `CLIENT_VALIDATION_PENDING → {COMPLETED, DISPUTE_OPEN, CANCELLED}` (cf. `mission-state.machine.ts`).
+  - DTOs Zod : `completeMissionBodySchema`, `validateMissionBodySchema`, `reportMissionProblemBodySchema`, `MissionCompletionResponse` (cf. `packages/shared-types/src/zod/mission.ts`).
+- Capture séquestre :
+  - `PaymentsService.requestCapture(missionId, actor: CaptureActor)` — actor restreint à `CLIENT | SYSTEM | ADMIN`, idempotency-key déterministe `capture-mission-{missionId}` (1 seul `paymentIntents.capture()` Stripe par mission), audit `PAYMENT_CAPTURE_REQUESTED`.
+  - `PaymentDomainHandler` étendu `payment_intent.succeeded` → `Payment.AUTHORIZED → CAPTURED` (`amountCapturedCents` = `amount_received`), `Mission.CLIENT_VALIDATION_PENDING → COMPLETED`, cancel `AutoReleaseJob` (`cancelReason='payment_captured'`). Idempotent (replay webhook = no-op).
+  - Erreurs : `PAYMENT_NOT_CAPTURABLE` (état ≠ AUTHORIZED), `PAYMENT_AUTHORIZATION_EXPIRED` (7j Visa/MC).
+- Auto-release :
+  - `AutoReleaseJob` Prisma model (status `SCHEDULED|EXECUTING|COMPLETED|CANCELLED|FAILED`, `lockedAt`/`lockedBy` pour verrou applicatif, `bullJobId` déterministe via `buildAutoReleaseBullJobId`).
+  - `AutoReleaseExecutor` (logique métier découplée de BullMQ) — acquiert le lock, re-vérifie invariants (mission status, payment status, photos quotas), appelle `PaymentsService.requestCapture(SYSTEM)` en cas de succès, audit `AUTO_RELEASE_BLOCKED { reason }` sinon.
+  - `AutoReleaseProcessor` (worker BullMQ, thin wrapper sur `AutoReleaseExecutor`, propage les erreurs pour retry exponentiel).
+- Race conditions couvertes :
+  - **Validation client vs auto-release** : idempotency-key Stripe identique des deux côtés ⇒ 1 seule capture réelle. La 2e branche détecte `PAYMENT_NOT_CAPTURABLE` (état non `AUTHORIZED`) et abandonne sans replay.
+  - **Report-problem vs auto-release** : processor re-vérifie `Mission.status === CLIENT_VALIDATION_PENDING` après acquisition du lock ; si `DISPUTE_OPEN`, audit `AUTO_RELEASE_BLOCKED { reason: 'mission_disputed' }`.
+  - **Double validation simultanée** : idempotency Stripe + `transitionAuthorizedToCapturedTx` `updateMany` (0 mutation si déjà CAPTURED).
+- OpenAPI bumpé `1.0.7-prd003-ticket-3.4-mission-completion-capture` ([`docs/api/PRD-003-openapi.yaml`](../api/PRD-003-openapi.yaml)) — descriptions `/complete`, `/validate`, `/report-problem` mises à jour, mention explicite **hors-scope** `stripe.transfers.create` (réservé 3.5).
+- Tests unitaires :
+  - `PaymentsService.requestCapture.spec` (happy paths + replay + erreurs).
+  - `MissionCompletionService.spec` (complete + validate + reportProblem, quotas, RBAC, idempotence).
+  - `AutoReleaseExecutor.spec` (job not found, terminal, lock not acquired, invariants, capture).
+  - `PaymentDomainHandler.onCaptured.spec` (happy path + idempotent replay + race DISPUTE_OPEN).
+  - `business-hours.spec` (T+48h ouvrées Paris, jours fériés FR 2026-2028).
+- Tests intégration : `payments-domain.integration.spec` étendu pour `payment_intent.succeeded` (Payment CAPTURED + Mission COMPLETED + AutoReleaseJob CANCELLED + replay idempotent).
+
+**Ajustements CTO Ticket 3.4 (capture-only)** :
+
+1. **Aucun `stripe.transfers.create`** ni webhook `transfer.*` traité — explicitement réservé Ticket 3.5 (`PaymentDomainHandler.PAYMENT_DOMAIN_EVENT_TYPES` couvre uniquement les `payment_intent.*`).
+2. **Aucune orchestration refund** — `PaymentsService.requestRefund` reste hors-scope 3.4.
+3. **Ownership capture** : `CLIENT` (validation explicite), `SYSTEM` (auto-release T+48h), `ADMIN` (incident audité). Aucun `PRESTATAIRE` ne peut capturer.
+4. **Mission `COMPLETED` confirmée uniquement par webhook** — jamais en sync depuis HTTP (cohérence eventual + idempotence webhook).
+
+**Hors Ticket 3.4 (réservé Ticket 3.5)** :
+- `stripe.transfers.create` vers compte Express prestataire (commission 18 % HT, application_fee_amount).
+- Webhooks `transfer.created`, `transfer.paid`, `transfer.failed`, `transfer.reversed`.
+- Refund orchestration complète (`paymentIntents.cancel`, `refunds.create`, états `PARTIALLY_REFUNDED`).
+- Retry transfer + DLQ replay admin UI.
+- Orphan cleanup final (photos + sessions abandonnées).
+- Cron de sécurité `escrow.safety-net` horaire (`paymentIntents.capture` à T+72h si BullMQ a perdu un job).
+
+**Dettes ouvertes (`TODO(debt)`)** :
+- `mission-start-endpoint` : pas de `POST /v1/missions/:id/start` en 3.4 (mission passe directement `ACCEPTED → CLIENT_VALIDATION_PENDING`). État `IN_PROGRESS` reste réservé state machine.
+- `auto-release-cron-safety-net` : cron horaire qui rejoue les `AutoReleaseJob.SCHEDULED` dont `scheduledFor < now - 1h` (filet de secours BullMQ) — Ticket 3.5.
+- `dispute-resolution-workflow` : décision admin post-`DISPUTE_OPEN` (capture forcée / refund / partial) — non automatisée 3.4.
+- `mission-completion-http-integration-tests` : tests d'intégration HTTP `/complete` + `/validate` + `/report-problem` couverts indirectement (unit tests `MissionCompletionService` exhaustifs + integration test `payment_intent.succeeded` qui valide la chaîne webhook complète). Tests d'intégration HTTP dédiés (BullMQ + Stripe mock + Cloudinary mock + état mission ACCEPTED avec quota photos) à compléter Ticket 3.5 en même temps que les tests `transfer.*`.
+
+**Backlog Ticket 3.5** :
+- `stripe.transfers.create` avec `application_fee_amount` (commission 18 % HT).
+- Webhooks `transfer.*` (`Transfer.PENDING → SENT → REVERSED`).
+- Refund orchestration (`POST /v1/admin/missions/:id/refund`).
+- DLQ replay admin (BullMQ `failed` jobs).
+- Orphan cleanup final (`photos-orphan-cleanup-job`).
+- Cron de sécurité `escrow.safety-net` horaire.
 
 ### 5.2 Garde-fous transverses (rappel — actifs sur tous les tickets Build)
 

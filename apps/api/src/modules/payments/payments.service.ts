@@ -40,14 +40,17 @@ import { loadEnv } from '../../common/config/env'
 import { PrismaService } from '../../common/prisma/prisma.service'
 import { MissionsRepository } from '../missions/missions.repository'
 import { MissionEventService } from '../missions/services/mission-event.service'
+import { buildCaptureIdempotencyKey } from '../missions-completion/auto-release/auto-release.constants'
 
 import {
   MissionForbiddenException,
   MissionNotFoundException,
   PaymentAmountRequiredException,
+  PaymentAuthorizationExpiredException,
   PaymentIdempotencyConflictException,
   PaymentInvalidStateException,
   PaymentMissingIdempotencyKeyException,
+  PaymentNotCapturableException,
   PaymentStripeException,
   PaymentsDisabledException,
 } from './payments.errors'
@@ -59,6 +62,24 @@ interface ClientActor {
   userId: string
   role: 'CLIENT'
 }
+
+/**
+ * PRD-003 Ticket 3.4 — acteur autorisé à déclencher une capture PaymentIntent.
+ *
+ * - `SYSTEM` : déclenché par `MissionCompletionService.validate()` (qui agit
+ *   pour le CLIENT après validation manuelle) **ou** par l'`AutoReleaseExecutor`
+ *   (T+48h ouvrées BullMQ). Aucun `userId` car aucun humain n'a directement
+ *   appelé l'endpoint Stripe.
+ * - `ADMIN` : capture exceptionnelle déclenchée depuis le back-office (cas
+ *   support — débloquer une mission litigieuse résolue manuellement). Audit
+ *   identifie l'admin via `userId`.
+ *
+ * **JAMAIS de capture par un acteur CLIENT direct** (rule securite + CTO 3.2
+ * ajustement #4). Le client valide → service capture en tant que SYSTEM.
+ */
+export type CaptureActor =
+  | { kind: 'SYSTEM'; trigger: 'CLIENT_VALIDATION' | 'AUTO_RELEASE' }
+  | { kind: 'ADMIN'; userId: string }
 
 @Injectable()
 export class PaymentsService {
@@ -248,6 +269,114 @@ export class PaymentsService {
       currency,
       status: payment.status,
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PRD-003 Ticket 3.4 — Capture (SYSTEM / ADMIN)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Déclenche une capture Stripe sur un PaymentIntent encore en `AUTHORIZED`.
+   *
+   * Garanties :
+   *  - Idempotence forte : la clé Stripe `capture-mission-<id>` est passée à
+   *    chaque appel — un second `requestCapture()` concurrent (race
+   *    `validate` vs `auto-release`) ne crée pas de double capture.
+   *  - Aucune mutation DB côté `Payment` ici : la transition
+   *    `AUTHORIZED → CAPTURED` se fait **uniquement** au webhook
+   *    `payment_intent.succeeded` (`PaymentDomainHandler.onCaptured`).
+   *    Cette séparation garantit que `Payment.amountCapturedCents` reflète
+   *    toujours `amount_received` côté Stripe (source de vérité).
+   *  - Audit `PAYMENT_CAPTURE_REQUESTED` (avant Stripe) + payment retourné
+   *    tel quel.
+   *
+   * Le caller (`MissionCompletionService.validate` ou `AutoReleaseExecutor`)
+   * **NE doit PAS** attendre que le payment passe à `CAPTURED` dans la même
+   * requête HTTP : on renvoie la mission en `CLIENT_VALIDATION_PENDING` et
+   * le webhook fera la transition vers `COMPLETED`.
+   *
+   * @throws PaymentNotCapturableException 409 — payment absent ou statut ≠
+   *   AUTHORIZED (déjà capturé / failed / cancelled / refunded).
+   * @throws PaymentAuthorizationExpiredException 422 — payment CANCELLED
+   *   avec `failureCode='authorization_expired'` (7 j sans capture).
+   * @throws PaymentStripeException 422 — appel Stripe failed (réseau /
+   *   permission / configuration).
+   */
+  async requestCapture(missionId: string, actor: CaptureActor): Promise<Payment> {
+    if (!this.paymentsEnabled) throw new PaymentsDisabledException()
+
+    const payment = await this.payments.findByMissionId(missionId)
+    if (!payment) {
+      throw new PaymentNotCapturableException(`no_payment_for_mission`)
+    }
+
+    // Cas pathologique : autorisation expirée — Stripe a déjà annulé
+    // l'intent il y a 7j+, on remonte un 422 distinct pour l'UX.
+    if (payment.status === 'CANCELLED' && payment.failureCode === 'authorization_expired') {
+      throw new PaymentAuthorizationExpiredException()
+    }
+
+    // Idempotence métier : si déjà CAPTURED → no-op silencieux (le caller
+    // appellera la transition mission via webhook qui a déjà eu lieu).
+    if (payment.status === 'CAPTURED') {
+      return payment
+    }
+    if (payment.status !== 'AUTHORIZED') {
+      throw new PaymentNotCapturableException(
+        `payment_status_must_be_AUTHORIZED (current: ${payment.status})`,
+      )
+    }
+
+    const idempotencyKey = buildCaptureIdempotencyKey(missionId)
+
+    // Audit AVANT l'appel Stripe (audit Verify V4 — trace même en cas
+    // d'échec réseau pour permettre l'investigation support).
+    await this.prisma.$transaction(async (tx) => {
+      await this.missionEvents.recordTx(tx, {
+        missionId,
+        type: 'PAYMENT_CAPTURE_REQUESTED',
+        actorUserId: actor.kind === 'ADMIN' ? actor.userId : null,
+        payload: {
+          paymentId: payment.id,
+          stripePaymentIntentId: payment.stripePaymentIntentId,
+          trigger: actor.kind === 'SYSTEM' ? actor.trigger : 'ADMIN_OVERRIDE',
+          idempotencyKey,
+        },
+      })
+    })
+
+    try {
+      await this.stripe.paymentIntents.capture(
+        payment.stripePaymentIntentId,
+        // `amount_to_capture` non spécifié → capture full (`amount_authorized`).
+        {},
+        { idempotencyKey },
+      )
+    } catch (err) {
+      this.logger.error(
+        {
+          missionId,
+          paymentId: payment.id,
+          intentId: payment.stripePaymentIntentId,
+          actorKind: actor.kind,
+          err: err instanceof Error ? { name: err.name, message: err.message } : 'unknown',
+        },
+        'payments.capture.stripe_failed',
+      )
+      throw new PaymentStripeException('stripe_capture_failed')
+    }
+
+    this.logger.log(
+      {
+        missionId,
+        paymentId: payment.id,
+        intentId: payment.stripePaymentIntentId,
+        actorKind: actor.kind,
+      },
+      'payments.capture.requested',
+    )
+
+    return payment
   }
 
   // ---------------------------------------------------------------------------

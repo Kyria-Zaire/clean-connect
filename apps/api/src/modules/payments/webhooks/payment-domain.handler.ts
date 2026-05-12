@@ -22,7 +22,7 @@
  *    autre état (lock SQL côté `transitionPendingPaymentToPublished`).
  */
 
-import { Injectable, Logger } from '@nestjs/common'
+import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import type Stripe from 'stripe'
 
@@ -31,13 +31,24 @@ import { PrismaService } from '../../../common/prisma/prisma.service'
 import { MissionsRepository } from '../../missions/missions.repository'
 import { MatchingService } from '../../missions/services/matching.service'
 import { MissionEventService } from '../../missions/services/mission-event.service'
+import { AutoReleaseService } from '../../missions-completion/auto-release/auto-release.service'
 import { PaymentsRepository } from '../payments.repository'
 
-/** Types Stripe gérés en 3.2 — toute extension passe par un nouveau ticket. */
+/**
+ * Types Stripe routés par `PaymentDomainHandler`.
+ *
+ * - Ticket 3.2 : `amount_capturable_updated`, `payment_failed`, `canceled`.
+ * - Ticket 3.4 : `payment_intent.succeeded` (capture confirmée → mission
+ *   `COMPLETED`, auto-release annulé).
+ *
+ * Toute extension future (Ticket 3.5 `charge.dispute.*` / `transfer.*`)
+ * passe par un nouveau ticket + ADR.
+ */
 export const PAYMENT_DOMAIN_EVENT_TYPES = new Set<string>([
   'payment_intent.amount_capturable_updated',
   'payment_intent.payment_failed',
   'payment_intent.canceled',
+  'payment_intent.succeeded',
 ])
 
 /**
@@ -91,6 +102,8 @@ export class PaymentDomainHandler {
     private readonly missions: MissionsRepository,
     private readonly missionEvents: MissionEventService,
     private readonly matching: MatchingService,
+    @Inject(forwardRef(() => AutoReleaseService))
+    private readonly autoRelease: AutoReleaseService,
     config: ConfigService<Env, true>,
   ) {
     this.listingTtlMs = config.get('MISSION_LISTING_TTL_MS', { infer: true })
@@ -123,6 +136,9 @@ export class PaymentDomainHandler {
         return
       case 'payment_intent.canceled':
         await this.onCanceled(event.data.object as Stripe.PaymentIntent)
+        return
+      case 'payment_intent.succeeded':
+        await this.onCaptured(event.data.object as Stripe.PaymentIntent)
         return
       default:
         // Should-never-happen : le caller filtre via `shouldHandle()`.
@@ -340,6 +356,130 @@ export class PaymentDomainHandler {
         isAuthorizationExpired: failureCode === 'authorization_expired',
       },
       'payments.domain.canceled.processed',
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // PRD-003 Ticket 3.4 — payment_intent.succeeded → Payment CAPTURED
+  //                     + Mission CLIENT_VALIDATION_PENDING → COMPLETED
+  //                     + AutoReleaseJob CANCELLED (idempotent)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Webhook Stripe `payment_intent.succeeded` — capture confirmée.
+   *
+   * Étapes (atomiques) :
+   *  1. Lookup Payment via `stripePaymentIntentId`.
+   *  2. Transition `AUTHORIZED → CAPTURED` (idempotent via `updateMany`).
+   *  3. Transition `Mission CLIENT_VALIDATION_PENDING → COMPLETED` (idempotent).
+   *     Hors `CLIENT_VALIDATION_PENDING` (cas pathologique : déjà COMPLETED ou
+   *     DISPUTE_OPEN survenu en parallèle) → on capture quand même côté
+   *     Payment (Stripe = source de vérité fonds), mais la mission reste
+   *     dans son état actuel (le litige doit être instruit avant
+   *     COMPLETED).
+   *  4. Annule l'`AutoReleaseJob` SCHEDULED associé — idempotent et
+   *     hors-transaction (la queue BullMQ a sa propre IO).
+   *  5. Audit `PAYMENT_CAPTURED` (toujours) + `MISSION_COMPLETED` (si
+   *     transition effective).
+   *
+   * Hors-scope 3.4 :
+   *  - `stripe.transfers.create` (déléguée Ticket 3.5).
+   *  - Notif push prestataire « mission validée » (PRD-004).
+   */
+  private async onCaptured(intent: Stripe.PaymentIntent): Promise<void> {
+    const payment = await this.payments.findByStripePaymentIntentId(intent.id)
+    if (!payment) {
+      this.logger.warn(
+        { intentId: intent.id },
+        'payments.domain.captured.payment_not_found',
+      )
+      return
+    }
+
+    if (payment.status === 'CAPTURED') {
+      this.logger.log(
+        { paymentId: payment.id, intentId: intent.id },
+        'payments.domain.captured.idempotent_skip',
+      )
+      return
+    }
+
+    // Stripe `amount_received` reflète le montant réellement capturé (full
+    // capture en MVP → = `amount`). On verrouille en DB pour matcher
+    // l'historique financier.
+    const amountCapturedCents = intent.amount_received ?? intent.amount
+
+    let missionTransitioned = false
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await this.payments.transitionAuthorizedToCapturedTx(tx, {
+        paymentId: payment.id,
+        amountCapturedCents,
+      })
+      if (updated !== 1) {
+        // Race : un autre worker a déjà traité l'event. No-op (audit V1).
+        return
+      }
+      await this.missionEvents.recordTx(tx, {
+        missionId: payment.missionId,
+        type: 'PAYMENT_CAPTURED',
+        actorUserId: null,
+        payload: {
+          paymentId: payment.id,
+          stripePaymentIntentId: intent.id,
+          amountCapturedCents,
+        },
+      })
+      const completed = await this.missions.transitionClientValidationPendingToCompletedTx(tx, {
+        missionId: payment.missionId,
+        now: new Date(),
+      })
+      if (completed === 1) {
+        missionTransitioned = true
+        await this.missionEvents.recordTx(tx, {
+          missionId: payment.missionId,
+          type: 'MISSION_COMPLETED',
+          actorUserId: null,
+          payload: {
+            paymentId: payment.id,
+            stripePaymentIntentId: intent.id,
+            source: 'payment_webhook',
+          },
+        })
+      }
+    })
+
+    // Annulation BullMQ hors-transaction (le job peut déjà être en cours
+    // d'exécution côté Redis — `AutoReleaseService.cancel` est tolérant).
+    // Cas attendus :
+    //  - validate CLIENT a déjà cancel le job → no-op
+    //  - auto-release a déclenché la capture → job RUNNING → markCompleted
+    //    sera fait côté executor au retour du capture call.
+    try {
+      await this.autoRelease.cancel({
+        missionId: payment.missionId,
+        reason: 'payment_captured',
+      })
+    } catch (err) {
+      this.logger.error(
+        {
+          missionId: payment.missionId,
+          err: err instanceof Error ? { name: err.name, message: err.message } : 'unknown',
+        },
+        'payments.domain.captured.auto_release_cancel_failed',
+      )
+      // Non-blocking : la capture est faite, l'auto-release sera no-op
+      // au pire (idempotence Stripe).
+    }
+
+    this.logger.log(
+      {
+        paymentId: payment.id,
+        missionId: payment.missionId,
+        intentId: intent.id,
+        amountCapturedCents,
+        missionTransitioned,
+      },
+      'payments.domain.captured.processed',
     )
   }
 }

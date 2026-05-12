@@ -116,6 +116,35 @@ export class PaymentsRepository {
   }
 
   /**
+   * PRD-003 Ticket 3.4 — webhook `payment_intent.succeeded` :
+   * passage `AUTHORIZED → CAPTURED`. Idempotent (replay webhook : 0 row si
+   * déjà `CAPTURED`). Persiste `amountCapturedCents` (Stripe expose
+   * `amount_received`).
+   *
+   * Notes :
+   *  - On accepte aussi un statut entrant `AUTHORIZATION_PENDING` car Stripe
+   *    peut, dans certains chemins SetupIntent/Apple Pay, sauter le webhook
+   *    `amount_capturable_updated` (le `succeeded` arrive directement après
+   *    la capture). On absorbe ce cas pour rester aligné Stripe API contract.
+   */
+  async transitionAuthorizedToCapturedTx(
+    tx: Prisma.TransactionClient,
+    opts: { paymentId: string; amountCapturedCents: number },
+  ): Promise<number> {
+    const result = await tx.payment.updateMany({
+      where: {
+        id: opts.paymentId,
+        status: { in: ['AUTHORIZATION_PENDING', 'AUTHORIZED'] },
+      },
+      data: {
+        status: 'CAPTURED',
+        amountCapturedCents: opts.amountCapturedCents,
+      },
+    })
+    return result.count
+  }
+
+  /**
    * Webhook `payment_intent.canceled` — passage `*_PENDING|AUTHORIZED → CANCELLED`.
    * `failureCode='authorization_expired'` si Stripe a déclenché la cancellation
    * automatique après 7 j sans capture (rev2 state machines).
