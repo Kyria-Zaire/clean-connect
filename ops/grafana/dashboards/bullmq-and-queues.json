@@ -1,0 +1,123 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "schemaVersion": 39,
+  "tags": ["clean-connect", "bullmq", "queues", "prd-004"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(cleanconnect_bullmq_jobs_total, queue)",
+        "includeAll": true,
+        "label": "Queue",
+        "multi": true,
+        "name": "queue",
+        "options": [],
+        "query": { "query": "label_values(cleanconnect_bullmq_jobs_total, queue)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timezone": "Europe/Paris",
+  "title": "Clean Connect — BullMQ & Queues",
+  "uid": "cc-bullmq",
+  "version": 1,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Jobs completed/sec by queue",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (queue) (rate(cleanconnect_bullmq_jobs_total{state=\"completed\",queue=~\"$queue\"}[1m]))",
+          "legendFormat": "{{queue}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Jobs failed/sec by queue",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (queue) (rate(cleanconnect_bullmq_jobs_failed_total{queue=~\"$queue\"}[1m]))",
+          "legendFormat": "{{queue}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "BullMQ jobs by state (cumulative)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (queue, state) (cleanconnect_bullmq_jobs_total{queue=~\"$queue\"})",
+          "legendFormat": "{{queue}} / {{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Webhook processing latency p95 by outcome",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (outcome, le) (rate(cleanconnect_webhook_processing_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "DLQ size (gauge)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum by (queue) (cleanconnect_dlq_jobs_total)",
+          "legendFormat": "{{queue}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "title": "DLQ events/min by action",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (action) (rate(cleanconnect_dlq_events_total[1m]))",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

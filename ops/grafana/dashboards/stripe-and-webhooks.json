@@ -1,0 +1,112 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "schemaVersion": 39,
+  "tags": ["clean-connect", "stripe", "webhooks", "prd-004"],
+  "templating": { "list": [] },
+  "time": { "from": "now-3h", "to": "now" },
+  "timezone": "Europe/Paris",
+  "title": "Clean Connect — Stripe & Webhooks",
+  "uid": "cc-stripe-webhooks",
+  "version": 1,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Stripe API calls/sec by operation",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(cleanconnect_stripe_api_calls_total[1m]))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Stripe API failures/sec by operation × status",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (operation, status) (rate(cleanconnect_stripe_api_failures_total[1m]))",
+          "legendFormat": "{{operation}} / {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Stripe API latency p95 (s) by operation",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (operation, le) (rate(cleanconnect_stripe_api_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Webhook processing throughput by outcome",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(cleanconnect_webhook_processing_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "Webhook failures/sec by event_type × outcome",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (event_type, outcome) (rate(cleanconnect_webhook_processing_failures_total[5m]))",
+          "legendFormat": "{{event_type}} / {{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "title": "DLQ size + delta last 5m",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "cleanconnect_dlq_jobs_total",
+          "legendFormat": "DLQ {{queue}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(cleanconnect_dlq_events_total[5m])",
+          "legendFormat": "{{action}} ({{source}}) /5m",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

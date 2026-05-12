@@ -1,0 +1,17 @@
+# PRD-004 Ticket 4.1 — Build B.
+# Provider de dashboards JSON — Grafana lit `/var/lib/grafana/dashboards/`
+# au boot et toutes les 30s en mode reload-on-change.
+apiVersion: 1
+
+providers:
+  - name: 'clean-connect'
+    orgId: 1
+    folder: 'Clean Connect'
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
