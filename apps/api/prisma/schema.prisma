@@ -2,6 +2,9 @@
 // Clean Connect — Schéma Prisma
 // -----------------------------------------------------------------------------
 // Sprint 0.2 : "Big Four" — User, Mission, Address, Photo
+// PRD-003 Design (2026-05-12) : Payment / Transfer séparés, StripeWebhookEvent,
+// WebhookDeadLetter, PhotoUploadSession, PhotoDeletionLog, AutoReleaseJob,
+// extension Photo (variants ORIGINAL|DISPLAY, GPS, session), flags Stripe User.
 //
 // Conventions (rules `architecte-api` + `backend`) :
 //   - Tous les montants sont en centimes (Int) — cf. ADR-002
@@ -78,6 +81,71 @@ enum PhotoType {
   AFTER
 }
 
+/// Variante Cloudinary — **DISPLAY** = EXIF strip + optimisé ; **ORIGINAL** = conservé sécurisé (audit / litige). ADR-009.
+enum PhotoVariant {
+  ORIGINAL
+  DISPLAY
+}
+
+/// Cycle de vie paiement carte (PaymentIntent). **Ne pas** mélanger avec le transfert Connect — cf. décision CTO Design PRD-003.
+enum PaymentStatus {
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+/// Transfert vers compte Connect Express — état distinct du paiement.
+enum TransferStatus {
+  PENDING
+  SENT
+  FAILED
+  REVERSED
+}
+
+/// Verrouillage traitement webhook Stripe (`SELECT … FOR UPDATE` côté service — ADR-008 / ADR-011).
+enum StripeWebhookProcessingStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+/// Synthèse onboarding / capabilities Stripe Connect — filtre matching strict (PRD-003 Discover Q7).
+enum ProviderPayoutStatus {
+  NOT_ONBOARDED
+  ONBOARDING_IN_PROGRESS
+  IDENTITY_PENDING
+  PAYOUTS_DISABLED
+  CHARGES_DISABLED
+  READY
+}
+
+enum AutoReleaseJobStatus {
+  SCHEDULED
+  RUNNING
+  SUCCEEDED
+  CANCELLED
+  FAILED
+}
+
+enum WebhookDeadLetterSource {
+  STRIPE
+  CLOUDINARY
+}
+
+enum PhotoDeletionReason {
+  RETENTION_POLICY
+  LEGAL_HOLD
+  FRAUD_INVESTIGATION
+  ADMIN_ACTION
+}
+
+enum PhotoDeletionActor {
+  SYSTEM
+  ADMIN
+}
+
 // -----------------------------------------------------------------------------
 // User
 // -----------------------------------------------------------------------------
@@ -93,6 +161,14 @@ model User {
   // Stripe — `stripeCustomerId` pour CLIENT, `stripeAccountId` (Connect Express) pour PRESTATAIRE
   stripeCustomerId  String?  @unique @map("stripe_customer_id")
   stripeAccountId   String?  @unique @map("stripe_account_id")
+  /// Capabilities Stripe (webhook `account.updated`) — source de vérité partielle pour `providerPayoutStatus`.
+  stripeChargesEnabled   Boolean? @map("stripe_charges_enabled")
+  stripeTransfersEnabled Boolean? @map("stripe_transfers_enabled")
+  stripePayoutsEnabled    Boolean? @map("stripe_payouts_enabled")
+  /// Exigences KYC Stripe (`requirements.currently_due`, etc.).
+  stripeRequirementsDue Json? @map("stripe_requirements_due")
+  /// Synthèse onboarding — filtre matching strict (PRD-003).
+  providerPayoutStatus ProviderPayoutStatus @default(NOT_ONBOARDED) @map("provider_payout_status")
 
   // Adresse de l'utilisateur (résidence client OU base prestataire pour matching)
   addressId         String?  @unique @map("address_id") @db.Uuid
@@ -123,11 +199,13 @@ model User {
   missionsAsPrestataire Mission[] @relation("MissionPrestataire")
   missionProposals      MissionProposal[]
   missionEvents         MissionEvent[]
+  photoUploadSessions   PhotoUploadSession[] @relation("PhotoUploadSessionUploader")
 
   @@index([role])
   @@index([deletedAt])
   @@index([suspendedAt])
   @@index([verifiedAt])
+  @@index([providerPayoutStatus])
   @@map("users")
 }
 
@@ -217,8 +295,11 @@ model Mission {
   /// Après publication : expiration liste marketplace si aucun accept (15 min MVP, configurable Build).
   listingExpiresAt DateTime? @map("listing_expires_at")
 
-  // Stripe (séquestre) — PRD-003
-  stripePaymentIntentId String? @unique @map("stripe_payment_intent_id")
+  /// PRD-003 : paiement carte (PaymentIntent) — 1:1 mission, `stripe_payment_intent_id` vit ici (plus sur `missions`).
+  payment               Payment?
+  photoUploadSessions   PhotoUploadSession[]
+  autoReleaseJobs       AutoReleaseJob[]
+  photoDeletionLogs     PhotoDeletionLog[]
 
   proposals MissionProposal[]
   events    MissionEvent[]
@@ -277,25 +358,213 @@ model MissionProposal {
 }
 
 // -----------------------------------------------------------------------------
+// PRD-003 — Paiements & webhooks
+// -----------------------------------------------------------------------------
+
+model Payment {
+  id                    String        @id @default(uuid()) @db.Uuid
+  missionId             String        @unique @map("mission_id") @db.Uuid
+  mission               Mission       @relation(fields: [missionId], references: [id], onDelete: Restrict)
+
+  stripePaymentIntentId String        @unique @map("stripe_payment_intent_id") @db.VarChar(255)
+  /// Montant autorisé (centimes) — `amount` capturable côté Stripe après webhook autorisation.
+  amountAuthorizedCents Int           @map("amount_authorized_cents")
+  /// Montant effectivement capturé (centimes), renseigné après `capture`.
+  amountCapturedCents   Int?          @map("amount_captured_cents")
+  currency              String        @default("eur") @db.VarChar(3)
+  applicationFeeCents   Int?          @map("application_fee_cents")
+  /// Snapshot TVA future (hors moteur TVA MVP — décision CTO Q14).
+  vatRateSnapshot       Decimal?      @map("vat_rate_snapshot") @db.Decimal(5, 4)
+  status                PaymentStatus
+
+  transfer Transfer?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("payments")
+}
+
+model Transfer {
+  id               String         @id @default(uuid()) @db.Uuid
+  paymentId        String         @unique @map("payment_id") @db.Uuid
+  payment          Payment        @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  stripeTransferId String?        @unique @map("stripe_transfer_id") @db.VarChar(255)
+  amountCents      Int            @map("amount_cents")
+  currency         String         @default("eur") @db.VarChar(3)
+  status           TransferStatus
+
+  /// Clé idempotence Stripe — **déterministe** côté service (ex. `transfer-mission-{missionId}`).
+  idempotencyKey String @unique @map("idempotency_key") @db.VarChar(255)
+
+  failureCode    String? @map("failure_code") @db.VarChar(120)
+  failureMessage String? @map("failure_message") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("transfers")
+}
+
+/// Événement Stripe entrant — anti-replay via `stripe_event_id` UNIQUE + `payload_hash` (ADR-008 / ADR-011).
+model StripeWebhookEvent {
+  stripeEventId       String                        @id @map("stripe_event_id") @db.VarChar(255)
+  type                String                        @db.VarChar(120)
+  payloadHash         String                        @map("payload_hash") @db.VarChar(64)
+  livemode            Boolean
+  processingStatus    StripeWebhookProcessingStatus @default(PENDING) @map("processing_status")
+  receivedAt          DateTime                      @default(now()) @map("received_at")
+  /// Horodatage pris lors du verrou transactionnel (`SELECT … FOR UPDATE`) — évite double traitement concurrent.
+  processingStartedAt DateTime?                     @map("processing_started_at")
+  processedAt         DateTime?                     @map("processed_at")
+  lastError             String?                       @map("last_error") @db.Text
+
+  @@index([processingStatus, receivedAt])
+  @@map("stripe_webhook_events")
+}
+
+model WebhookDeadLetter {
+  id              String                  @id @default(uuid()) @db.Uuid
+  source          WebhookDeadLetterSource
+  externalEventId String                  @map("external_event_id") @db.VarChar(255)
+  payloadHash     String?                 @map("payload_hash") @db.VarChar(64)
+  errorMessage    String                  @map("error_message") @db.Text
+  attempts        Int                     @default(0)
+  lastAttemptAt   DateTime                @map("last_attempt_at")
+  resolvedAt      DateTime?               @map("resolved_at")
+  createdAt       DateTime                @default(now()) @map("created_at")
+
+  @@index([source, externalEventId])
+  @@map("webhook_dead_letters")
+}
+
+/// Job auto-release T+48h ouvrées — traçabilité BullMQ / retries / audit (décision CTO Design).
+model AutoReleaseJob {
+  id             String               @id @default(uuid()) @db.Uuid
+  missionId      String               @map("mission_id") @db.Uuid
+  mission        Mission              @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  scheduledFor   DateTime             @map("scheduled_for")
+  status         AutoReleaseJobStatus
+  bullJobId      String?              @unique @map("bull_job_id") @db.VarChar(128)
+  idempotencyKey String?              @unique @map("idempotency_key") @db.VarChar(255)
+  cancelReason   String?              @map("cancel_reason") @db.VarChar(255)
+  lastError      String?              @map("last_error") @db.Text
+  startedAt      DateTime?            @map("started_at")
+  finishedAt     DateTime?            @map("finished_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([missionId, status])
+  @@index([scheduledFor, status])
+  @@map("auto_release_jobs")
+}
+
+// -----------------------------------------------------------------------------
+// PRD-003 — Sessions upload photo (signed URL) + extension Photo
+// -----------------------------------------------------------------------------
+
+/// Session jeton court — anti cross-mission / prépare antivirus & modération (décision CTO Design).
+model PhotoUploadSession {
+  id             String @id @default(uuid()) @db.Uuid
+  missionId      String @map("mission_id") @db.Uuid
+  mission        Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  uploaderUserId String @map("uploader_user_id") @db.Uuid
+  uploader       User   @relation("PhotoUploadSessionUploader", fields: [uploaderUserId], references: [id], onDelete: Restrict)
+
+  phase PhotoType @map("phase")
+
+  /// SHA-256 hex du jeton opaque — le secret n'est **jamais** stocké en clair.
+  tokenDigest String    @unique @map("token_digest") @db.VarChar(64)
+  expiresAt   DateTime  @map("expires_at")
+  consumedAt  DateTime? @map("consumed_at")
+
+  /// Taille max fichier (octets) — défaut 10 MiB (ADR-009).
+  maxBytes Int @default(10485760) @map("max_bytes")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  photos Photo[]
+
+  @@index([missionId, phase])
+  @@map("photo_upload_sessions")
+}
+
+// -----------------------------------------------------------------------------
 // Photo
 // -----------------------------------------------------------------------------
 
 model Photo {
   // L'ID est généré CÔTÉ CLIENT (UUID v4) pour assurer l'idempotence des uploads offline.
   // Référence : cahier v1.4 §6 (mode offline) + rule mobile.
-  id         String    @id @db.Uuid
-  missionId  String    @map("mission_id") @db.Uuid
-  mission    Mission   @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  id        String  @id @db.Uuid
+  missionId String  @map("mission_id") @db.Uuid
+  mission   Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
 
-  type       PhotoType
-  url        String    @db.VarChar(2048)
+  type PhotoType
 
-  /// Cloudinary metadata (cloudId, width, height, bytes, format, exif)
-  metadata   Json      @default("{}")
+  /// URL legacy / display rapide — les nouveaux flux privilégient `cloudinaryPublicId` + signed URL.
+  url      String @db.VarChar(2048)
+  metadata Json   @default("{}")
 
-  // Rétention RGPD : purge automatique 12 mois après fin de mission (rule photos-rgpd)
-  createdAt  DateTime  @default(now()) @map("created_at")
+  /// Variante Cloudinary — DISPLAY = strip EXIF + optimisé ; ORIGINAL = conservé sécurisé (ADR-009).
+  variant PhotoVariant @default(DISPLAY) @map("variant")
 
+  /// UUID logique « capture » côté mobile (même valeur pour la paire ORIGINAL+DISPLAY).
+  captureClientUuid String? @map("capture_client_uuid") @db.Uuid
+
+  photoUploadSessionId String?             @map("photo_upload_session_id") @db.Uuid
+  photoUploadSession   PhotoUploadSession? @relation(fields: [photoUploadSessionId], references: [id], onDelete: SetNull)
+
+  cloudinaryPublicId String? @map("cloudinary_public_id") @db.VarChar(1024)
+  checksumSha256     String? @map("checksum_sha256") @db.VarChar(64)
+
+  gpsLatitude       Decimal? @map("gps_latitude") @db.Decimal(10, 8)
+  gpsLongitude      Decimal? @map("gps_longitude") @db.Decimal(11, 8)
+  gpsAccuracyMeters Int?     @map("gps_accuracy_meters")
+  gpsMissing        Boolean @default(false) @map("gps_missing")
+  flagSuspicious    Boolean @default(false) @map("flag_suspicious")
+
+  syncedAt    DateTime? @map("synced_at")
+  imageWidth  Int?      @map("image_width")
+  imageHeight Int?      @map("image_height")
+  bytes       Int?
+
+  /// Tombstone après purge asset Cloudinary — la ligne reste pour audit (ADR-010).
+  deletedAt DateTime? @map("deleted_at")
+
+  // Rétention RGPD : purge automatique — **30 jours** post fin mission (PRD-003 ADR-010, remplace 12 mois rule legacy).
+  createdAt DateTime @default(now()) @map("created_at")
+
+  photoDeletionLogs PhotoDeletionLog[]
+
+  @@unique([missionId, captureClientUuid, variant])
   @@index([missionId, type])
+  @@index([photoUploadSessionId])
   @@map("photos")
+}
+
+/// Audit des suppressions (cron rétention, litige, fraude) — **aucune** suppression manuelle client/prestataire (décision CTO Design).
+model PhotoDeletionLog {
+  id        String @id @default(uuid()) @db.Uuid
+  photoId   String @map("photo_id") @db.Uuid
+  photo     Photo  @relation(fields: [photoId], references: [id], onDelete: Restrict)
+
+  missionId String  @map("mission_id") @db.Uuid
+  mission   Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  reason      PhotoDeletionReason
+  performedBy PhotoDeletionActor @map("performed_by")
+  batchId     String?            @map("batch_id") @db.VarChar(64)
+  metadata    Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([missionId, createdAt])
+  @@index([batchId])
+  @@map("photo_deletion_logs")
 }
