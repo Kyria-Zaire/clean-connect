@@ -896,13 +896,16 @@ Post-mortems systématiques sur tout incident finance (perte cash, double payout
 
 ### 7.3 Dette consommée / créée
 
-| Item | Phase | Statut |
-|---|---|---|
-| `TRANSFER_RETRY_QUEUE` BullMQ auto (retry transfer sans action admin) | Build 3.5 | Reporté Verify 3.6 — **documenté uniquement** (pas d’implémentation sauf correctif faible risque validé CTO). Voir `PaymentsModule` commentaire TODO(debt). |
-| Orphan cleanup `PhotoUploadSession` / assets Cloudinary | Build 3.5 | Reporté 3.6 — **documenté uniquement** (pas d’implémentation sauf faible risque). |
-| CodeRabbit (exceptions typées, repository pattern, logs refund symétriques) | Verify 3.6 | **Non bloquant** — traiter uniquement si patch rapide & faible risque. |
+| Item | Phase | Statut | Décision CTO |
+|---|---|---|---|
+| `TRANSFER_RETRY_QUEUE` BullMQ auto (retry transfer sans action admin) | Build 3.5 | Reporté PRD-004 — retry admin manuel actif (`POST /admin/transfers/:id/retry`). | À confirmer |
+| Orphan cleanup `PhotoUploadSession` / assets Cloudinary | Build 3.5 | Reporté PRD-004 — volume borné (TTL 5 min). | À confirmer |
+| **G** — Endpoint `DELETE /photos/:id` manuel | Verify 3.6-bis | Hors-scope code PRD-003 ; purge cron 30 j post fin mission. | **Bloquant pour clôture ?** |
+| **I** — Webhook entrant Cloudinary | Verify 3.6-bis | Pas de webhook entrant en 3.5 (Cloudinary sortant uniquement, validé via `getResource`). | **Bloquant pour clôture ?** |
+| **L** — `DELETE /users/me` self-service RGPD | Verify 3.6-bis | Hors-scope PRD-003 ; voie actuelle = demande email + action admin. | **Bloquant pour clôture ?** |
+| CodeRabbit (exceptions typées, repository pattern, logs refund symétriques) | Verify 3.6 | Non bloquant sécu — DX uniquement. | Au fil de l’eau |
 
-Rapport Verify Ticket 3.6 : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md).
+Rapport Verify final : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md) (Sections A–H — incl. smoke §6.2, perf §6.3, RGPD, release checklist).
 
 ---
 
