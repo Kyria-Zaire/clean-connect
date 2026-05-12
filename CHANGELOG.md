@@ -12,6 +12,47 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Design — PRD-004 Ticket 4.1 Observabilité & Ops (Sprint 4) — 2026-05-12
+
+🟡 **Phase Design ouverte sur Ticket 4.1 — aucune ligne de code runtime.**
+PRD : [`docs/prd/PRD-004-hardening-ops-compliance.md`](docs/prd/PRD-004-hardening-ops-compliance.md) §4.1 → §4.11. Validation CTO Design Ticket 4.1 requise pour passer en Build.
+
+#### Décisions architecturales (4 ADRs)
+
+- **[ADR-014](docs/adr/ADR-014-observability-architecture.md)** — 3 piliers stricts : **Sentry** (erreurs + APM) + **OpenTelemetry** (traces cross-service) + **Prometheus/Grafana** auto-hébergés (métriques techniques + queues + business). Sampling 10 % prod + override 100 % routes critiques (finance, webhooks). Corrélation triple `requestId` + `traceId` + `jobId`.
+- **[ADR-015](docs/adr/ADR-015-bullmq-monitoring-dlq.md)** — **BullBoard** read-only derrière `JwtAccessGuard(ADMIN)` + 7 métriques `cleanconnect_bullmq_*` (queue depth, retries, stalled, DLQ size, processing lag) + DLQ visibility sans exposition payload brut.
+- **[ADR-016](docs/adr/ADR-016-logging-redaction-strategy.md)** — Pino prod figé + redactor 3 classes (A=secrets 18 chemins, B=finance 7, C=PII 14) + corrélation IDs obligatoires + IP redactée par défaut + rétention 30/90/180 j selon type + RGPD conforme (UUID = pseudonyme CNIL).
+- **[ADR-017](docs/adr/ADR-017-alerting-strategy.md)** — **Discord webhook** (`#ops-p0`, `#ops-p1`, `#ops-p2-p3`) temps réel + récap quotidien email/Discord (Resend) + matrice sévérité P0-P3 + escalade `@here`/`@on-call` + silence window auditable + templates sans PII (`sanitizeForAlert`).
+
+#### Design technique (PRD §4.1 → §4.7)
+
+- **Architecture observabilité** : diagramme single-process NestJS → 3 exports parallèles (Sentry, OTel/Sentry, Prometheus) + Pino stdout.
+- **2 flux de référence tracés** : `POST /missions/:id/validate` mono-process + `POST /webhooks/stripe` cross-process (traceId continu HTTP → BullMQ worker).
+- **Matrice flux × signaux** : 5 flux × {Prometheus, OTel, Pino} couverts.
+- **Endpoints health/readiness/metrics** : `/healthz` + `/readyz` (public) + `/api/internal/metrics` + `/api/internal/queues` (Bearer interne firewall réseau Docker) + `/admin/queues/*` BullBoard + `/admin/observability/silence` (JWT ADMIN).
+- **Conventions nommage** : préfixe `cleanconnect_<domain>_<entity>_<measure>_<unit>` + **19 métriques figées** Ticket 4.1.
+- **Contrats observabilité** : `AlertEvent` schema (severity P0-P3 + kind enum + sanitize) + `WebhookDeadLetterView` (payloadHashTruncated, errorMessageSanitized, traceId) + RBAC matrix par endpoint.
+- **3 dashboards Grafana** : D1 API Health + D2 BullMQ Queues + D3 Business Funnel (préparé 4.1, alimenté 4.5).
+- **12 modules Nest réservés** (`observability/*` + `admin/observability/*`) pour Build.
+
+#### Risk assessment Design (8 risques)
+
+🟠 Fuite PII = 4/5 (`beforeSend` Sentry + `sanitizeForAlert` + `/metrics` Bearer + firewall) · 🟠 Surface attaquable = 4/5 (RBAC strict + BullBoard read-only + JWT) · 🟡 Saturation logs / Alert fatigue / Vendor Sentry / Régression perf = 3/5 (mitigés sampling + rétention + tuning + bench) · 🟡 Coût = 2/5 (~30 €/mois total).
+
+#### Pré-revue sécurité
+
+[`docs/security-reviews/2026-05-12-prd-004-observability-design-prereview.md`](docs/security-reviews/2026-05-12-prd-004-observability-design-prereview.md) — **0 Critical / 0 Important / 5 Suggestions / 18 Conforme**. 5 Conditions Build obligatoires : DPA Sentry + registre RGPD ; test redactor Pino exhaustif ; Sentry `beforeSend` filter PII ; auth Grafana via reverse proxy + `auth_request` API ; test OTel traceId cross-process.
+
+#### TODO Build figé (20 items)
+
+Cf. PRD §4.10 — séquence d'implémentation Build Ticket 4.1 (dépendances npm, env vars, init Sentry+OTel pre-bootstrap, `ObservabilityModule`, hooks BullMQ, `AlertingService`, silence Redis, Prometheus middleware, BullBoard read-only, redactor Pino, custom sampler, tests intégration `traceId` cross-process, dashboards Grafana JSON versionnés, `docker-compose.prod.yml` Prometheus+Grafana, `CLAUDE.md` update).
+
+#### Definition of Done — Design Ticket 4.1
+
+ADRs 014-017 rédigés ✅ · Architecture validée ✅ · Dashboards listés ✅ · Alerting défini ✅ · Sécurité validée (pré-revue 0/0) ✅ · 0 ligne runtime ✅. **Bloque** : sign-off CTO Design Ticket 4.1 (DoD PRD §4.11 dernière case).
+
+---
+
 ### Discover — PRD-004 Hardening, Ops & Compliance (Sprint 4) — 2026-05-12
 
 🟡 **Phase Discover ouverte — aucune ligne de code runtime.**
