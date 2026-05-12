@@ -25,10 +25,14 @@ import { Logger as PinoLogger } from 'nestjs-pino'
 import type Stripe from 'stripe'
 import request from 'supertest'
 
+import { getQueueToken } from '@nestjs/bullmq'
+import type { Queue } from 'bullmq'
+
 import { AppModule } from '../../src/app.module'
 import { __resetEnvCacheForTests } from '../../src/common/config/env'
 import { AllExceptionsFilter } from '../../src/common/filters/all-exceptions.filter'
 import { PrismaService } from '../../src/common/prisma/prisma.service'
+import { STRIPE_WEBHOOK_QUEUE } from '../../src/modules/payments/payments.constants'
 import { OutboundTransferService } from '../../src/modules/payments/transfers/outbound-transfer.service'
 import { STRIPE_CLIENT_TOKEN } from '../../src/modules/payments/stripe/stripe.client'
 import { PaymentDomainHandler } from '../../src/modules/payments/webhooks/payment-domain.handler'
@@ -135,7 +139,11 @@ function buildStripeStub(): StripeStub {
   }
 }
 
-async function buildApp(): Promise<{ app: INestApplication; stripe: StripeStub }> {
+async function buildApp(): Promise<{
+  app: INestApplication
+  stripe: StripeStub
+  webhookQueue: Queue
+}> {
   process.env['FF_PAYMENTS_ENABLED'] = 'true'
   process.env['APP_ENV'] = 'recette'
   process.env['NODE_ENV'] = 'recette'
@@ -154,7 +162,8 @@ async function buildApp(): Promise<{ app: INestApplication; stripe: StripeStub }
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' })
   app.useGlobalFilters(new AllExceptionsFilter(app.get(PinoLogger)))
   await app.init()
-  return { app, stripe }
+  const webhookQueue = app.get<Queue>(getQueueToken(STRIPE_WEBHOOK_QUEUE))
+  return { app, stripe, webhookQueue }
 }
 
 interface CapturedFixture {
@@ -309,12 +318,14 @@ function makeTransferEvent(
 describe('PRD-003 Ticket 3.5 — Transfers / Refunds / DLQ / Reconcile', () => {
   let app: INestApplication
   let stripe: StripeStub
+  let webhookQueue: Queue
   let prisma: PrismaService
 
   beforeAll(async () => {
     const built = await buildApp()
     app = built.app
     stripe = built.stripe
+    webhookQueue = built.webhookQueue
     prisma = app.get(PrismaService)
   })
 
@@ -577,7 +588,7 @@ describe('PRD-003 Ticket 3.5 — Transfers / Refunds / DLQ / Reconcile', () => {
       expect(res.status).toBe(403)
     })
 
-    it('ADMIN → 202 + reset processingStatus=PENDING', async () => {
+    it('ADMIN → 202 + re-enqueue BullMQ avec jobId déterministe', async () => {
       const evtId = `evt_dlq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
       await prisma.stripeWebhookEvent.create({
         data: {
@@ -602,17 +613,35 @@ describe('PRD-003 Ticket 3.5 — Transfers / Refunds / DLQ / Reconcile', () => {
       const admin = await createTestUser(prisma, { role: 'ADMIN' })
       const adminToken = await forgeAccessToken(app, { id: admin.id, role: 'ADMIN' })
 
+      // Spy sur l'instance réelle de la queue Bull (vs override provider, qui
+      // casse le BullExplorer / Worker — cf. doc bull.explorer.js). On ne
+      // s'appuie PAS sur l'état DB post-replay : le worker BullMQ consume
+      // aussitôt le job ré-enqueue et le marque FAILED (timing CI Linux).
+      // Le contrat métier est : `replayStripeDeadLetter` a bien posé un job
+      // déterministe sur la queue (jobId `stripe-webhook-replay-…`).
+      const addSpy = jest.spyOn(webhookQueue, 'add')
+      addSpy.mockClear()
+
       const res = await request(app.getHttpServer())
         .post(`/api/v1/admin/webhooks/stripe-dead-letters/${dlq.id}/replay`)
         .set('authorization', `Bearer ${adminToken}`)
         .send({})
       expect(res.status).toBe(202)
+      expect(res.body).toEqual({ accepted: true })
 
-      const reloaded = await prisma.stripeWebhookEvent.findUnique({
-        where: { stripeEventId: evtId },
-      })
-      expect(reloaded!.processingStatus).toBe('PENDING')
-      expect(reloaded!.processingStartedAt).toBeNull()
+      expect(addSpy).toHaveBeenCalledTimes(1)
+      const [jobName, payload, opts] = addSpy.mock.calls[0] as [
+        string,
+        { stripeEventId: string; type: string; livemode: boolean; payloadHash: string },
+        { jobId: string },
+      ]
+      expect(jobName).toBe('process')
+      expect(payload.stripeEventId).toBe(evtId)
+      expect(payload.type).toBe('payment_intent.succeeded')
+      expect(payload.livemode).toBe(false)
+      expect(opts.jobId).toMatch(/^stripe-webhook-replay-/u)
+
+      addSpy.mockRestore()
     })
   })
 
