@@ -24,6 +24,9 @@ import type { Job } from 'bullmq'
 import type Stripe from 'stripe'
 
 import { PrismaService } from '../../../common/prisma/prisma.service'
+import { DlqMetricsTracker } from '../../observability/metrics/dlq-metrics.tracker'
+import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
+import { WebhookMetricsTracker } from '../../observability/metrics/webhook-metrics.tracker'
 import {
   STRIPE_WEBHOOK_MAX_ATTEMPTS,
   STRIPE_WEBHOOK_PROCESS_JOB,
@@ -47,6 +50,9 @@ export class StripeWebhookProcessor extends WorkerHost {
     private readonly paymentDomain: PaymentDomainHandler,
     private readonly transferDomain: TransferDomainHandler,
     private readonly refundDomain: RefundDomainHandler,
+    private readonly stripeMetrics: StripeMetricsTracker,
+    private readonly webhookMetrics: WebhookMetricsTracker,
+    private readonly dlqMetrics: DlqMetricsTracker,
     @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
   ) {
     super()
@@ -61,12 +67,16 @@ export class StripeWebhookProcessor extends WorkerHost {
       return
     }
     const { stripeEventId, type, payloadHash } = job.data
+    const processStart = process.hrtime.bigint()
     const lockTaken = await this.tryAcquireLock(stripeEventId)
     if (!lockTaken) {
       this.logger.log(
         { stripeEventId, type },
         'stripe.webhook.processor.already_locked_or_processed',
       )
+      // No outcome metric here : c'est un cas légitime (concurrent worker /
+      // déjà processed). On évite de polluer `webhook_processing_total` —
+      // l'event original a déjà été comptabilisé `accepted` à l'ingestion.
       return
     }
 
@@ -88,10 +98,13 @@ export class StripeWebhookProcessor extends WorkerHost {
           },
           'stripe.webhook.processor.processed_no_domain_route',
         )
+        this.webhookMetrics.observe(type, 'accepted', durationSecondsSince(processStart))
         return
       }
 
-      const event = await this.stripe.events.retrieve(stripeEventId)
+      const event = await this.stripeMetrics.time('events.retrieve', () =>
+        this.stripe.events.retrieve(stripeEventId),
+      )
       if (this.paymentDomain.shouldHandle(type)) {
         await this.paymentDomain.handle(event)
       }
@@ -113,8 +126,13 @@ export class StripeWebhookProcessor extends WorkerHost {
         },
         'stripe.webhook.processor.processed',
       )
+      this.webhookMetrics.observe(type, 'accepted', durationSecondsSince(processStart))
     } catch (err) {
       await this.markFailed(stripeEventId, err)
+      // Outcome `failed` à chaque tentative de processor échouée — c'est
+      // intentionnel (visibilité retries dans le compteur). La transition
+      // DLQ finale est tracée en plus via `dlq_events_total` ci-dessous.
+      this.webhookMetrics.observe(type, 'failed', durationSecondsSince(processStart))
       throw err
     }
   }
@@ -195,6 +213,7 @@ export class StripeWebhookProcessor extends WorkerHost {
           lastAttemptAt: new Date(),
         },
       })
+      this.dlqMetrics.recordEnqueued('stripe')
       this.logger.error(
         { stripeEventId: job.data.stripeEventId, attempts, type: job.data.type },
         'stripe.webhook.processor.dead_letter',
@@ -208,4 +227,8 @@ export class StripeWebhookProcessor extends WorkerHost {
       )
     }
   }
+}
+
+function durationSecondsSince(start: bigint): number {
+  return Number(process.hrtime.bigint() - start) / 1_000_000_000
 }

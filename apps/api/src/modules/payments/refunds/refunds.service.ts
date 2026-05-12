@@ -8,6 +8,7 @@ import type Stripe from 'stripe'
 import { loadEnv } from '../../../common/config/env'
 import { PrismaService } from '../../../common/prisma/prisma.service'
 import { MissionEventService } from '../../missions/services/mission-event.service'
+import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
 import {
   PaymentInvalidStateException,
   PaymentPartialRefundNotSupportedException,
@@ -31,6 +32,7 @@ export class RefundsService {
     private readonly prisma: PrismaService,
     private readonly refunds: RefundsRepository,
     private readonly missionEvents: MissionEventService,
+    private readonly stripeMetrics: StripeMetricsTracker,
     @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
   ) {
     this.paymentsEnabled = loadEnv().FF_PAYMENTS_ENABLED
@@ -90,17 +92,19 @@ export class RefundsService {
     })
 
     try {
-      const rf = await this.stripe.refunds.create(
-        {
-          payment_intent: payment.stripePaymentIntentId,
-          amount: captured,
-          metadata: {
-            mission_id: payment.missionId,
-            payment_id: payment.id,
-            refund_id: refundRow.id,
+      const rf = await this.stripeMetrics.time('refunds.create', () =>
+        this.stripe.refunds.create(
+          {
+            payment_intent: payment.stripePaymentIntentId,
+            amount: captured,
+            metadata: {
+              mission_id: payment.missionId,
+              payment_id: payment.id,
+              refund_id: refundRow.id,
+            },
           },
-        },
-        { idempotencyKey },
+          { idempotencyKey },
+        ),
       )
 
       if (rf.status === 'succeeded' || rf.status === 'pending') {

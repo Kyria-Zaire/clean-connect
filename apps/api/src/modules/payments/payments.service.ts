@@ -41,6 +41,7 @@ import { PrismaService } from '../../common/prisma/prisma.service'
 import { MissionsRepository } from '../missions/missions.repository'
 import { MissionEventService } from '../missions/services/mission-event.service'
 import { buildCaptureIdempotencyKey } from '../missions-completion/auto-release/auto-release.constants'
+import { StripeMetricsTracker } from '../observability/metrics/stripe-metrics.tracker'
 
 import {
   MissionForbiddenException,
@@ -92,6 +93,7 @@ export class PaymentsService {
     private readonly payments: PaymentsRepository,
     private readonly missions: MissionsRepository,
     private readonly missionEvents: MissionEventService,
+    private readonly stripeMetrics: StripeMetricsTracker,
     @Inject(STRIPE_CLIENT_TOKEN) private readonly stripe: Stripe,
   ) {
     // `loadEnv()` retourne un objet déjà validé / transformé (booleans et
@@ -165,26 +167,28 @@ export class PaymentsService {
     // 4. Création PaymentIntent Stripe avec idempotency-key client telle quelle.
     let intent: Stripe.PaymentIntent
     try {
-      intent = await this.stripe.paymentIntents.create(
-        {
-          amount: amountAuthorizedCents,
-          currency,
-          // CORRECTION CTO 3.2 : capture_method='manual' OBLIGATOIRE — pas de
-          // capture automatique au paiement initial. La capture sera déclenchée
-          // après validation client / auto-release / action admin (3.4).
-          capture_method: 'manual',
-          // Anti-fraude : on ne fait pas confiance au client pour spécifier le
-          // moyen de paiement, Stripe.js / Payment Element gère ça côté mobile.
-          automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
-          metadata: {
-            missionId: mission.id,
-            missionNumber: mission.missionNumber,
-            clientId: mission.clientId,
-            commissionSnapshotCents: applicationFeeCents.toString(),
-            providerPayoutSnapshotCents: providerPayoutCents.toString(),
+      intent = await this.stripeMetrics.time('payment_intents.create', () =>
+        this.stripe.paymentIntents.create(
+          {
+            amount: amountAuthorizedCents,
+            currency,
+            // CORRECTION CTO 3.2 : capture_method='manual' OBLIGATOIRE — pas de
+            // capture automatique au paiement initial. La capture sera déclenchée
+            // après validation client / auto-release / action admin (3.4).
+            capture_method: 'manual',
+            // Anti-fraude : on ne fait pas confiance au client pour spécifier le
+            // moyen de paiement, Stripe.js / Payment Element gère ça côté mobile.
+            automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+            metadata: {
+              missionId: mission.id,
+              missionNumber: mission.missionNumber,
+              clientId: mission.clientId,
+              commissionSnapshotCents: applicationFeeCents.toString(),
+              providerPayoutSnapshotCents: providerPayoutCents.toString(),
+            },
           },
-        },
-        { idempotencyKey },
+          { idempotencyKey },
+        ),
       )
     } catch (err) {
       this.logger.error(
@@ -346,11 +350,13 @@ export class PaymentsService {
     })
 
     try {
-      await this.stripe.paymentIntents.capture(
-        payment.stripePaymentIntentId,
-        // `amount_to_capture` non spécifié → capture full (`amount_authorized`).
-        {},
-        { idempotencyKey },
+      await this.stripeMetrics.time('payment_intents.capture', () =>
+        this.stripe.paymentIntents.capture(
+          payment.stripePaymentIntentId,
+          // `amount_to_capture` non spécifié → capture full (`amount_authorized`).
+          {},
+          { idempotencyKey },
+        ),
       )
     } catch (err) {
       this.logger.error(
@@ -451,7 +457,9 @@ export class PaymentsService {
   private async replayExisting(existing: Payment): Promise<CreatePaymentIntentResponse> {
     let intent: Stripe.PaymentIntent
     try {
-      intent = await this.stripe.paymentIntents.retrieve(existing.stripePaymentIntentId)
+      intent = await this.stripeMetrics.time('payment_intents.retrieve', () =>
+        this.stripe.paymentIntents.retrieve(existing.stripePaymentIntentId),
+      )
     } catch (err) {
       this.logger.warn(
         {
