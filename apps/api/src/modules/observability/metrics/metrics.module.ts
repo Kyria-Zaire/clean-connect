@@ -36,6 +36,7 @@ import { DlqMetricsTracker } from './dlq-metrics.tracker'
 import { HttpMetricsInterceptor } from './http-metrics.interceptor'
 import { MetricsController } from './metrics.controller'
 import { MetricsService } from './metrics.service'
+import { RetryMetricsTracker } from './retry-metrics.tracker'
 import { StripeMetricsTracker } from './stripe-metrics.tracker'
 import { WebhookMetricsTracker } from './webhook-metrics.tracker'
 
@@ -48,11 +49,18 @@ import { WebhookMetricsTracker } from './webhook-metrics.tracker'
     StripeMetricsTracker,
     WebhookMetricsTracker,
     DlqMetricsTracker,
+    RetryMetricsTracker,
     {
       provide: APP_INTERCEPTOR,
       useClass: HttpMetricsInterceptor,
     },
   ],
-  exports: [MetricsService, StripeMetricsTracker, WebhookMetricsTracker, DlqMetricsTracker],
+  exports: [
+    MetricsService,
+    StripeMetricsTracker,
+    WebhookMetricsTracker,
+    DlqMetricsTracker,
+    RetryMetricsTracker,
+  ],
 })
 export class MetricsModule {}

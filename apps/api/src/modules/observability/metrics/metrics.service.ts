@@ -57,6 +57,7 @@ export class MetricsService implements OnModuleDestroy {
   readonly httpRequestDurationSeconds: Histogram<'method' | 'route' | 'status'>
   readonly bullmqJobsTotal: Counter<'queue' | 'name' | 'result'>
   readonly bullmqJobsFailedTotal: Counter<'queue' | 'name' | 'reason'>
+  readonly bullmqRetryExhaustedTotal: Counter<'queue' | 'job_type' | 'reason'>
 
   // Webhook processing — A3-bis : labels `{event_type, outcome}` (CTO).
   readonly webhookProcessingTotal: Counter<'event_type' | 'outcome'>
@@ -106,6 +107,17 @@ export class MetricsService implements OnModuleDestroy {
       name: `${PREFIX}bullmq_jobs_failed_total`,
       help: 'Total BullMQ jobs that ended in FAILED state after retries exhaustion.',
       labelNames: ['queue', 'name', 'reason'] as const,
+      registers: [this.registry],
+    })
+
+    // PRD-004 Ticket 4.2 — métrique CTO : suivi des jobs ayant épuisé toutes
+    // leurs tentatives (retry policy exhausted). Sert au dashboard recovery
+    // + alerte P1. Labels bornés : `queue` (4 max), `job_type` (slug stable),
+    // `reason` (slug normalisé). Aucun ID dynamique autorisé.
+    this.bullmqRetryExhaustedTotal = new Counter({
+      name: `${PREFIX}bullmq_retry_exhausted_total`,
+      help: 'BullMQ / domain jobs that consumed all retry attempts (terminal failure). One event per terminal failure.',
+      labelNames: ['queue', 'job_type', 'reason'] as const,
       registers: [this.registry],
     })
 
