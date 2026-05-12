@@ -871,6 +871,8 @@ Sign-off CTO Design 2026-05-12. Build découpé en **6 tickets** (validation CTO
 
 ### 6.5 Definition of Done — Verify (release-ready)
 
+> Rapport intermédiaire Ticket 3.6 : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md) (mis à jour à chaque itération Verify).
+
 - [ ] Rapport `reviewer-securite-code` joint, **0 Critical / 0 Important non traité**
 - [ ] **23 audits CTO** : 12 audits techniques (A → L) **+** 11 scénarios D21 (V1 → V11) tous passants
 - [ ] Smoke test paiement OK en recette ET en preprod (cartes 4242, 3220, 9995)
@@ -894,7 +896,13 @@ Post-mortems systématiques sur tout incident finance (perte cash, double payout
 
 ### 7.3 Dette consommée / créée
 
-À documenter en §5.4 pendant Build.
+| Item | Phase | Statut |
+|---|---|---|
+| `TRANSFER_RETRY_QUEUE` BullMQ auto (retry transfer sans action admin) | Build 3.5 | Reporté Verify 3.6 — **documenté uniquement** (pas d’implémentation sauf correctif faible risque validé CTO). Voir `PaymentsModule` commentaire TODO(debt). |
+| Orphan cleanup `PhotoUploadSession` / assets Cloudinary | Build 3.5 | Reporté 3.6 — **documenté uniquement** (pas d’implémentation sauf faible risque). |
+| CodeRabbit (exceptions typées, repository pattern, logs refund symétriques) | Verify 3.6 | **Non bloquant** — traiter uniquement si patch rapide & faible risque. |
+
+Rapport Verify Ticket 3.6 : [`docs/verify/PRD-003-audit-securite-ticket-3-6.md`](../verify/PRD-003-audit-securite-ticket-3-6.md).
 
 ---
 
