@@ -356,6 +356,7 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 3. **Contrat API** complet : chaque route avec verbe / auth / RBAC / ownership / idempotency-key / rate limit / codes HTTP.
 4. **State machine paiement** dédiée (`payment-state.machine.ts`) + extension `mission-state.machine.ts`, assertions strictes (pattern PRD-002).
 5. **ADRs à rédiger** :
+   - **Contrat OpenAPI 3.1** — [`docs/api/PRD-003-openapi.yaml`](../api/PRD-003-openapi.yaml). 21 endpoints (18 demandés CTO + 3 ajouts cohérents : `GET /missions/:id/payment`, `GET /missions/:id/transfer`, `GET /admin/auto-release-jobs`). Lint Redocly 0 warning. Tags : Payments, Transfers (Admin), Webhooks, Webhooks (Admin), Photos, Photos (Admin), Mission Completion, Mission Status (RBAC), Auto-release (Admin). Security schemes : `bearerAuth` (JWT) + `stripeSignature` (HMAC) + header `Idempotency-Key` obligatoire sur mutations financières.
    - **ADR-008** — Mécanique « escrow » : `capture_method='manual'` + delayed transfer Stripe Connect Express. Limites (autorisation expire ~7j Visa/MC), trade-offs vs destination/separate charges, wording produit. ✅ tranché Q1.
      - **Doit aussi documenter** (ajustements revue CTO 2026-05-12, livrable 1/5 Prisma) :
        - `TransferStatus.REVERSED` : alimenté par webhook Stripe `transfer.reversed` (reversal / fonds repris / compte prestataire fermé / fraude). Effet métier : mission bascule en `DISPUTE_OPEN`, re-transfert manuel **hors MVP**.

@@ -28,10 +28,7 @@
 
 import { z } from 'zod'
 
-import {
-  PaymentStatusSchema,
-  TransferStatusSchema,
-} from './enums'
+import { PaymentStatusSchema, TransferStatusSchema } from './enums'
 import { serverIdempotencyKeySchema } from './idempotency'
 import {
   currencyEurSchema,
@@ -110,14 +107,20 @@ export const paymentMonetarySnapshotInternalSchema = z
   })
   .strict()
   .superRefine((data, ctx) => {
-    if (data.amountCapturedCents !== null && data.amountCapturedCents > data.amountAuthorizedCents) {
+    if (
+      data.amountCapturedCents !== null &&
+      data.amountCapturedCents > data.amountAuthorizedCents
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['amountCapturedCents'],
         message: 'amountCapturedCents ne peut pas dépasser amountAuthorizedCents.',
       })
     }
-    if (data.applicationFeeCents !== null && data.applicationFeeCents > data.amountAuthorizedCents) {
+    if (
+      data.applicationFeeCents !== null &&
+      data.applicationFeeCents > data.amountAuthorizedCents
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['applicationFeeCents'],
@@ -132,7 +135,8 @@ export const paymentMonetarySnapshotInternalSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['providerPayoutCents'],
-        message: 'providerPayoutCents doit être exactement (amountAuthorizedCents - applicationFeeCents).',
+        message:
+          'providerPayoutCents doit être exactement (amountAuthorizedCents - applicationFeeCents).',
       })
     }
     if (
@@ -142,7 +146,8 @@ export const paymentMonetarySnapshotInternalSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['providerPayoutCents'],
-        message: 'applicationFeeCents et providerPayoutCents doivent être tous deux NULL ou tous deux renseignés.',
+        message:
+          'applicationFeeCents et providerPayoutCents doivent être tous deux NULL ou tous deux renseignés.',
       })
     }
   })

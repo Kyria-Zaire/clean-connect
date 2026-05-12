@@ -155,9 +155,7 @@ describe('PRD-003 Zod — règles métier critiques', () => {
     })
 
     it('refuse lat hors borne (>90)', () => {
-      expect(() =>
-        photoGpsInputSchema.parse({ gpsLatitude: 91, gpsLongitude: 0 }),
-      ).toThrow()
+      expect(() => photoGpsInputSchema.parse({ gpsLatitude: 91, gpsLongitude: 0 })).toThrow()
     })
   })
 
@@ -296,7 +294,12 @@ describe('PRD-003 Zod — règles métier critiques', () => {
     })
 
     it('expose la whitelist MIME en constante', () => {
-      expect(PHOTO_ALLOWED_MIME_TYPES).toEqual(['image/jpeg', 'image/png', 'image/heic', 'image/webp'])
+      expect(PHOTO_ALLOWED_MIME_TYPES).toEqual([
+        'image/jpeg',
+        'image/png',
+        'image/heic',
+        'image/webp',
+      ])
     })
 
     it('refuse bytes > 10 Mo', () => {
@@ -312,9 +315,7 @@ describe('PRD-003 Zod — règles métier critiques', () => {
     })
 
     it('refuse champ inconnu (.strict)', () => {
-      expect(() =>
-        presignPhotoUploadInputSchema.parse({ ...valid, unknownField: 'foo' }),
-      ).toThrow()
+      expect(() => presignPhotoUploadInputSchema.parse({ ...valid, unknownField: 'foo' })).toThrow()
     })
   })
 
@@ -357,8 +358,8 @@ describe('PRD-003 Zod — règles métier critiques', () => {
   // -----------------------------------------------------------------------
   // 8. Vues publiques RBAC — vérification "no leak"
   // -----------------------------------------------------------------------
-  describe('Public schemas n\'exposent pas les champs interdits', () => {
-    it('clientPaymentViewSchema n\'a pas applicationFeeCents/providerPayoutCents/vatRateSnapshot', () => {
+  describe("Public schemas n'exposent pas les champs interdits", () => {
+    it("clientPaymentViewSchema n'a pas applicationFeeCents/providerPayoutCents/vatRateSnapshot", () => {
       const shape = clientPaymentViewSchema.shape
       expect(shape).not.toHaveProperty('applicationFeeCents')
       expect(shape).not.toHaveProperty('providerPayoutCents')
@@ -366,7 +367,7 @@ describe('PRD-003 Zod — règles métier critiques', () => {
       expect(shape).not.toHaveProperty('clientSecret')
     })
 
-    it('prestatairePaymentViewSchema n\'a pas applicationFeeCents ni stripePaymentIntentId', () => {
+    it("prestatairePaymentViewSchema n'a pas applicationFeeCents ni stripePaymentIntentId", () => {
       const shape = prestatairePaymentViewSchema.shape
       expect(shape).not.toHaveProperty('applicationFeeCents')
       expect(shape).not.toHaveProperty('stripePaymentIntentId')
@@ -374,7 +375,7 @@ describe('PRD-003 Zod — règles métier critiques', () => {
       expect(shape).toHaveProperty('providerPayoutCents')
     })
 
-    it('publicPhotoSchema n\'a pas cloudinaryPublicId, checksum, tokenDigest, flagSuspicious', () => {
+    it("publicPhotoSchema n'a pas cloudinaryPublicId, checksum, tokenDigest, flagSuspicious", () => {
       const shape = publicPhotoSchema.shape
       expect(shape).not.toHaveProperty('cloudinaryPublicId')
       expect(shape).not.toHaveProperty('checksumSha256')

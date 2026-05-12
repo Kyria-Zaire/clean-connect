@@ -10,3 +10,4 @@ ios
 *.lock
 pnpm-lock.yaml
 docs/CAHIER-DES-CHARGES-v1.3.md
+docs/api/*.yaml

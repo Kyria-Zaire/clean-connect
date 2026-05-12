@@ -21,10 +21,7 @@
 
 import { z } from 'zod'
 
-import {
-  StripeWebhookProcessingStatusSchema,
-  WebhookDeadLetterSourceSchema,
-} from './enums'
+import { StripeWebhookProcessingStatusSchema, WebhookDeadLetterSourceSchema } from './enums'
 import {
   isoDateSchema,
   moneyCentsPositiveSchema,

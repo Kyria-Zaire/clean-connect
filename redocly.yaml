@@ -1,0 +1,16 @@
+# =============================================================================
+# Configuration Redocly CLI — Clean Connect
+# Lance via : `pnpm exec redocly lint docs/api/PRD-003-openapi.yaml`
+# =============================================================================
+
+extends:
+  - recommended
+
+apis:
+  prd-003@v1:
+    root: docs/api/PRD-003-openapi.yaml
+
+rules:
+  # Localhost en `servers` est légitime pour le dev local Clean Connect — pas
+  # un faux exemple example.com. Le linter `no-server-example.com` est trop large.
+  no-server-example.com: off

@@ -50,7 +50,8 @@ export const serverIdempotencyKeySchema = idempotencyKeySchema.refine(
     key.startsWith('refund-') ||
     key.startsWith('auto-release-'),
   {
-    message: 'Server idempotency-key doit utiliser un préfixe métier (cc-/transfer-/capture-/refund-/auto-release-).',
+    message:
+      'Server idempotency-key doit utiliser un préfixe métier (cc-/transfer-/capture-/refund-/auto-release-).',
   },
 )
 export type ServerIdempotencyKey = z.infer<typeof serverIdempotencyKeySchema>
