@@ -171,6 +171,11 @@ export const paymentInternalSchema = z
     providerPayoutCents: moneyCentsSchema.nullable(),
     vatRateSnapshot: z.number().nonnegative().max(1).nullable(),
     status: PaymentStatusSchema,
+    /** PRD-003 Ticket 3.2 — clé idempotence client (header `Idempotency-Key`). */
+    idempotencyKey: z.string().min(8).max(255),
+    /** Renseigné côté handler webhook `payment_failed` / `canceled`. */
+    failureCode: z.string().max(120).nullable(),
+    failureMessage: z.string().max(2_000).nullable(),
     createdAt: isoDateSchema,
     updatedAt: isoDateSchema,
   })
@@ -353,7 +358,9 @@ export const paymentErrorCodeSchema = z.enum([
   'PAYMENT_FORBIDDEN',
   'PAYMENT_INVALID_STATE',
   'PAYMENT_AMOUNT_MISMATCH',
+  'PAYMENT_AMOUNT_REQUIRED',
   'PAYMENT_IDEMPOTENCY_CONFLICT',
+  'PAYMENT_MISSING_IDEMPOTENCY_KEY',
   'PAYMENT_3DS_REQUIRED',
   'PAYMENT_CARD_DECLINED',
   'PAYMENT_AUTHORIZATION_EXPIRED',
@@ -361,6 +368,9 @@ export const paymentErrorCodeSchema = z.enum([
   'PAYMENT_REFUND_NOT_ALLOWED',
   'PAYMENT_ALREADY_REFUNDED',
   'PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED',
+  'MISSION_NOT_FOUND',
+  'MISSION_FORBIDDEN',
+  'MISSION_NOT_PAYABLE',
   'TRANSFER_NOT_FOUND',
   'TRANSFER_FORBIDDEN',
   'TRANSFER_PROVIDER_NOT_READY',
@@ -376,3 +386,53 @@ export const paymentErrorResponseSchema = z
   })
   .strict()
 export type PaymentErrorResponse = z.infer<typeof paymentErrorResponseSchema>
+
+// ============================================================================
+// 5) Pagination — query + response (PRD-003 Ticket 3.2)
+// ============================================================================
+
+/**
+ * Query `GET /v1/payments/mine` (CLIENT). Cursor opaque + plafond serveur strict
+ * (contrainte CTO Build §3, alignement `missionListQuerySchema`).
+ */
+export const clientPaymentListQuerySchema = z
+  .object({
+    cursor: uuidSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(20),
+    status: PaymentStatusSchema.optional(),
+  })
+  .strict()
+export type ClientPaymentListQuery = z.infer<typeof clientPaymentListQuerySchema>
+
+/** Réponse paginée `GET /v1/payments/mine`. */
+export const clientPaymentListResponseSchema = z
+  .object({
+    items: z.array(clientPaymentViewSchema),
+    nextCursor: z.string().nullable(),
+  })
+  .strict()
+export type ClientPaymentListResponse = z.infer<typeof clientPaymentListResponseSchema>
+
+/**
+ * Query `GET /v1/admin/payments` (ADMIN). Filtres additionnels par client /
+ * mission pour faciliter le support et l'audit.
+ */
+export const adminPaymentListQuerySchema = z
+  .object({
+    cursor: uuidSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    status: PaymentStatusSchema.optional(),
+    clientId: uuidSchema.optional(),
+    missionId: uuidSchema.optional(),
+  })
+  .strict()
+export type AdminPaymentListQuery = z.infer<typeof adminPaymentListQuerySchema>
+
+/** Réponse paginée `GET /v1/admin/payments`. */
+export const adminPaymentListResponseSchema = z
+  .object({
+    items: z.array(adminPaymentViewSchema),
+    nextCursor: z.string().nullable(),
+  })
+  .strict()
+export type AdminPaymentListResponse = z.infer<typeof adminPaymentListResponseSchema>
