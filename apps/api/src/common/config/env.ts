@@ -166,6 +166,71 @@ const envSchema = z
       .transform((v) => v !== 'false'),
     METRICS_BEARER_TOKEN: z.string().min(32).max(256).optional(),
 
+    /**
+     * PRD-004 Ticket 4.1 (Build B) — OpenTelemetry SDK.
+     *
+     * `OTEL_ENABLED` — feature flag de l'instrumentation OTel (auto-instrumentations
+     * + propagation `traceparent` cross-process HTTP → BullMQ worker). En dev
+     * recommandé `false` pour ne pas polluer la console ; en recette/prod
+     * recommandé `true` pour activer les traces distribuées.
+     * `OTEL_EXPORTER_OTLP_ENDPOINT` — URL OTLP/HTTP du collector (Tempo, Jaeger,
+     * etc.). Si absent → exporter console (dev uniquement).
+     * `OTEL_SERVICE_NAME` — défaut `clean-connect-api`. Utilisé pour étiqueter
+     * les spans dans le backend OTel.
+     * `OTEL_TRACES_SAMPLER_RATIO` — `[0..1]`. Routes finance/webhook restent
+     * forcées à 100 % via `Sentry tracesSampler` (déjà en place A1).
+     */
+    OTEL_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('false')
+      .transform((v) => v === 'true'),
+    OTEL_EXPORTER_OTLP_ENDPOINT: z
+      .string()
+      .url()
+      .optional()
+      .or(z.literal('').transform(() => undefined)),
+    OTEL_SERVICE_NAME: z.string().min(1).max(64).default('clean-connect-api'),
+    OTEL_TRACES_SAMPLER_RATIO: z.coerce.number().min(0).max(1).default(0.1),
+
+    /**
+     * PRD-004 Ticket 4.1 (Build B) — BullBoard read-only.
+     *
+     * `BULL_BOARD_ENABLED` — feature flag du mount `/api/internal/queues`.
+     * Désactivé par défaut tant que la stack monitoring n'est pas branchée.
+     * `INTERNAL_BEARER_TOKEN` — token réseau interne (firewall Docker) en
+     * complément du JWT ADMIN sur les routes `/api/internal/*`. Optionnel mais
+     * recommandé en prod (defense in depth).
+     */
+    BULL_BOARD_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('false')
+      .transform((v) => v === 'true'),
+    INTERNAL_BEARER_TOKEN: z.string().min(32).max(256).optional(),
+
+    /**
+     * PRD-004 Ticket 4.1 (Build B) — Alerting Discord.
+     *
+     * `ALERTING_ENABLED` — feature flag du dispatcher `AlertingService`.
+     * `DISCORD_WEBHOOK_URL` — URL Discord (forme `https://discord.com/api/webhooks/<id>/<token>`).
+     * Le service n'envoie rien si non configuré (no-op silencieux + log).
+     * `ALERTING_COOLDOWN_SECONDS` — cooldown anti-spam par clé d'alerte
+     * (`<severity>:<kind>`). Défaut 5 min (P0/P1) ; P2 agrégé séparément.
+     */
+    ALERTING_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('false')
+      .transform((v) => v === 'true'),
+    DISCORD_WEBHOOK_URL: z
+      .string()
+      .url()
+      .regex(
+        /^https:\/\/(canary\.)?discord(app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/,
+        'DISCORD_WEBHOOK_URL doit être de la forme https://discord.com/api/webhooks/<id>/<token>.',
+      )
+      .optional()
+      .or(z.literal('').transform(() => undefined)),
+    ALERTING_COOLDOWN_SECONDS: z.coerce.number().int().min(10).max(3_600).default(300),
+
     THROTTLE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(120),
 
@@ -268,6 +333,33 @@ const envSchema = z
         message:
           'CLOUDINARY_URL est obligatoire quand FF_PHOTOS_ENABLED=true (PRD-003 Ticket 3.3).',
         path: ['CLOUDINARY_URL'],
+      })
+    }
+    // Garde-fou PRD-004 Ticket 4.1 (Build B) — BullBoard.
+    // En production, le mount `/api/internal/queues` DOIT être protégé en
+    // double couche (JWT ADMIN + Bearer interne). Sans `INTERNAL_BEARER_TOKEN`
+    // configuré, on refuse de booter BullBoard en prod pour éviter l'exposition.
+    if (
+      data.BULL_BOARD_ENABLED &&
+      data.NODE_ENV === 'production' &&
+      !data.INTERNAL_BEARER_TOKEN
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'INTERNAL_BEARER_TOKEN obligatoire en production quand BULL_BOARD_ENABLED=true (PRD-004 Build B).',
+        path: ['INTERNAL_BEARER_TOKEN'],
+      })
+    }
+    // Garde-fou PRD-004 Ticket 4.1 (Build B) — Alerting.
+    // Si activé, le webhook Discord doit être configuré (sinon dispatcher
+    // silencieux = perte d'alertes critiques en prod).
+    if (data.ALERTING_ENABLED && !data.DISCORD_WEBHOOK_URL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'DISCORD_WEBHOOK_URL obligatoire quand ALERTING_ENABLED=true (PRD-004 Build B).',
+        path: ['DISCORD_WEBHOOK_URL'],
       })
     }
   })

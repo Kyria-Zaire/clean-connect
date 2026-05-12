@@ -27,6 +27,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service'
 import { DlqMetricsTracker } from '../../observability/metrics/dlq-metrics.tracker'
 import { StripeMetricsTracker } from '../../observability/metrics/stripe-metrics.tracker'
 import { WebhookMetricsTracker } from '../../observability/metrics/webhook-metrics.tracker'
+import { runWithExtractedTraceContext } from '../../observability/tracing/bullmq-trace'
 import {
   STRIPE_WEBHOOK_MAX_ATTEMPTS,
   STRIPE_WEBHOOK_PROCESS_JOB,
@@ -66,6 +67,16 @@ export class StripeWebhookProcessor extends WorkerHost {
       )
       return
     }
+    // PRD-004 Build B — restore trace context HTTP → worker (no-op si OTel SDK off).
+    return runWithExtractedTraceContext(
+      job.data,
+      STRIPE_WEBHOOK_QUEUE,
+      job.name,
+      () => this.processImpl(job),
+    )
+  }
+
+  private async processImpl(job: Job<StripeWebhookJobPayload>): Promise<void> {
     const { stripeEventId, type, payloadHash } = job.data
     const processStart = process.hrtime.bigint()
     const lockTaken = await this.tryAcquireLock(stripeEventId)
