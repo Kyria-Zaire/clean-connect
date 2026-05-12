@@ -1,17 +1,26 @@
 import { MissionStatusSchema, type MissionStatus } from '@cc/shared-types'
 
 /**
- * Graphe de transitions **MVP PRD-002** (Discover validé CTO 2026-05-12).
- * Les états réservés aux PRD aval existent en DB mais n'ont **aucune** transition sortante ici.
+ * Graphe de transitions **MVP PRD-002 Build** (Discover validé CTO 2026-05-12,
+ * affiné Build conformément à ADR-005 marketplace first-accept-wins).
  *
- * Règle produit : toute mutation de statut côté API doit passer par ce module
- * (pas de `status` arbitraire depuis un controller).
+ * Modélisation :
+ *  - `DRAFT → PUBLISHED → ACCEPTED|EXPIRED|CANCELLED`.
+ *  - L'état intermédiaire `PROPOSED` est *réservé* (présent dans l'enum DB)
+ *    mais non utilisé en marketplace : les propositions sont matérialisées
+ *    par les lignes `MissionProposal` ; le statut mission reste `PUBLISHED`
+ *    pendant la fenêtre TTL.
+ *  - États aval (IN_PROGRESS, AWAITING_CLIENT_VALIDATION, COMPLETED,
+ *    DISPUTE_OPEN, REFUNDED) déclarés pour PRD-003+ : aucune transition ici.
+ *
+ * Règle produit : toute mutation de statut côté API DOIT passer par
+ * `assertMissionTransition()` (contrainte CTO Build §6).
  */
 export const MISSION_TRANSITIONS_MVP: {
   readonly [S in MissionStatus]: readonly MissionStatus[]
 } = {
   DRAFT: ['PUBLISHED', 'CANCELLED'],
-  PUBLISHED: ['PROPOSED', 'EXPIRED', 'CANCELLED'],
+  PUBLISHED: ['ACCEPTED', 'EXPIRED', 'CANCELLED'],
   PROPOSED: ['ACCEPTED', 'EXPIRED', 'CANCELLED'],
   ACCEPTED: [],
   EXPIRED: [],

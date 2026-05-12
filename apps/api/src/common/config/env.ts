@@ -43,6 +43,34 @@ const envSchema = z
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(120),
 
     /**
+     * Délai après publication d'une mission au-delà duquel elle passe en EXPIRED
+     * si aucun prestataire n'a accepté. Décision Discover Q5 : 15 min.
+     * Configurable pour tests / pré-prod (cf. ADR-005).
+     */
+    MISSION_LISTING_TTL_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(24 * 60 * 60 * 1_000)
+      .default(15 * 60 * 1_000),
+
+    /**
+     * Plafond serveur pour les requêtes radius PostGIS (matching).
+     * Contrainte CTO Build §3 : aucune requête de matching sans limite.
+     */
+    MATCHING_MAX_PROVIDERS: z.coerce.number().int().min(1).max(500).default(50),
+
+    /**
+     * Endpoint BAN (Base Adresse Nationale) — provider principal géocodage
+     * (Discover Q3 + ADR-006). Override possible en tests pour mocker.
+     */
+    BAN_BASE_URL: z
+      .string()
+      .url()
+      .default('https://api-adresse.data.gouv.fr'),
+    BAN_TIMEOUT_MS: z.coerce.number().int().min(500).max(15_000).default(5_000),
+
+    /**
      * Bypass total du Throttler — réservé aux tests d'intégration (cf.
      * `ConditionalThrottlerGuard`). CRASH BOOT si activé en production
      * (`superRefine` plus bas). Jamais lu dans le code métier hors guard.
