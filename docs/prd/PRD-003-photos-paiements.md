@@ -16,8 +16,8 @@
 | **ID** | `PRD-003` |
 | **Slug** | `photos-paiements` |
 | **Titre** | Photos AVANT/APRÈS + Stripe Connect Express (escrow) — sous-systèmes Media Evidence / Payment Lifecycle / Mission Completion / Stripe Connect Onboarding |
-| **Version PRD** | `0.2` (Discover validé) |
-| **Statut** | `DISCOVER_DONE` (sign-off CTO 2026-05-12) → ouverture Design |
+| **Version PRD** | `0.3` (Design complet — livrables 1/5 à 5/5 livrés, sign-off final CTO en attente) |
+| **Statut** | `DESIGN_REVIEW` (Discover ✅, Design livré, sign-off CTO final attendu) |
 | **Owner produit** | CTO Clean Connect |
 | **Owner technique** | `senior-dev` (cadrage) → `architecte-api` + `securite` + `stripe` + `photos-rgpd` (Design) |
 | **Persona pilote Discover** | `senior-dev` |
@@ -311,13 +311,147 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
    ──── expire (TTL listing dépassé) ────→ EXPIRED (refund auto)
 ```
 
-**Règles dures associées** :
-- Aucune transition non listée n'est autorisée (extension PRD-002 `assertMissionTransition`).
+#### Livrable 4/5 Design — diagrammes d'état (mermaid) — **rev2 (revue CTO 2026-05-12)**
+
+Les diagrammes ci-dessous figent le **Design** pour alignement futur `payment-state.machine.ts`, `refund-state.machine.ts`, extension `mission-state.machine.ts`, et processors webhook / auto-release. Ils complètent l'ASCII §3.5 v0.2 sans le remplacer.
+
+**Conventions visuelles** (notation) :
+
+- `[*]` = état d'entrée / sortie (terminal).
+- `note right of X` = état terminal explicite (rouge dans le rendu).
+- Préfixes transitions : `(webhook)` = déclenchée par event Stripe / Cloudinary ; `(async/BullMQ)` = traitement asynchrone job ; `(sync)` = mutation HTTP synchrone ; `(cron)` = job cron (safety-net, purge).
+- Acteur entre parenthèses : `(CLIENT)`, `(PRESTATAIRE)`, `(ADMIN)`, `(SYSTEM)`. **Aucune transition non listée n'est autorisée** (extension `assertMissionTransition`).
+
+**Payment (`PaymentStatus`) — cycle carte (PaymentIntent manual capture)**
+
+> Ajustement revue CTO : transition explicite **`AUTHORIZED → CANCELLED`** (capture abandonnée, `payment_intent.canceled` ou `authorization_expired` Visa/MC ~7j).
+
+```mermaid
+stateDiagram-v2
+  [*] --> AUTHORIZED: (webhook) payment_intent.amount_capturable_updated
+  AUTHORIZED --> CAPTURED: (async/BullMQ) capture idempotent + (webhook) payment_intent.succeeded
+  AUTHORIZED --> FAILED: (webhook) payment_intent.payment_failed
+  AUTHORIZED --> CANCELLED: (webhook) payment_intent.canceled — mission CANCELLED/EXPIRED ou authorization_expired ~7j
+  CAPTURED --> REFUND_PENDING: (sync ADMIN) refund initié
+  REFUND_PENDING --> REFUNDED: (webhook) charge.refunded
+  REFUND_PENDING --> FAILED: (webhook) refund.failed
+  FAILED --> [*]
+  REFUNDED --> [*]
+  CANCELLED --> [*]
+  note right of CANCELLED: Terminal. Aucun débit côté client.
+  note right of REFUNDED: Terminal. Remboursement intégral (no partial MVP).
+  note right of FAILED: Terminal. Audit + alerte ops.
+```
+
+**Refund (`RefundStatus`) — cycle dédié, distinct du `PaymentStatus`**
+
+> Ajustement revue CTO : refund a son cycle propre. **Partial refunds non supportés MVP** (montant refund = `amountCapturedCents`, intégral).
+
+```mermaid
+stateDiagram-v2
+  [*] --> PENDING: (sync ADMIN) POST /payments/{id}/refund + Idempotency-Key
+  PENDING --> REFUNDED: (webhook) charge.refunded (status='succeeded')
+  PENDING --> FAILED: (webhook) charge.refund.updated (status='failed') / refund.failed
+  REFUNDED --> [*]
+  FAILED --> [*]
+  note right of PENDING: Idempotent : même Idempotency-Key = même refund logique (rétention min 24 h).
+  note right of REFUNDED: Terminal. Aucun double refund. Synchronise PaymentStatus → REFUNDED.
+  note right of FAILED: Terminal. Retry manuel admin via nouvel Idempotency-Key.
+```
+
+**Transfer Connect (`TransferStatus`) — distinct du paiement**
+
+> Ajustement revue CTO : ajout **`RETRY_SCHEDULED`**. `FAILED → RETRY_SCHEDULED → PENDING` permet retry idempotent piloté DLQ (admin) ou BullMQ (exponentiel ≤ 5 tentatives), sans perdre la trace d'audit. `REVERSED` reste terminal (re-transfer hors MVP).
+
+```mermaid
+stateDiagram-v2
+  [*] --> PENDING: (async/BullMQ) création post-capture
+  PENDING --> SENT: (webhook) transfer.paid
+  PENDING --> FAILED: (webhook) transfer.failed
+  FAILED --> RETRY_SCHEDULED: (sync ADMIN | async/BullMQ) retry planifié, même idempotencyKey
+  RETRY_SCHEDULED --> PENDING: (async/BullMQ) relance idempotente
+  FAILED --> [*]: retries épuisés (≥ 5) → DLQ
+  SENT --> REVERSED: (webhook) transfer.reversed — fonds repris, mission → DISPUTE_OPEN
+  REVERSED --> [*]
+  note right of RETRY_SCHEDULED: Trace audit + lockedAt/lockedBy. Pas de double transfer (idempotencyKey déterministe).
+  note right of REVERSED: Terminal. Re-transfer manuel hors MVP — ADR-008.
+```
+
+**StripeWebhookEvent (`StripeWebhookProcessingStatus`) — verrou + idempotence**
+
+```mermaid
+stateDiagram-v2
+  [*] --> PENDING: (webhook) insert evt + payload_hash
+  PENDING --> PROCESSING: (async/BullMQ) SELECT FOR UPDATE lock
+  PROCESSING --> PROCESSED: handler OK + DomainEvent enqueue
+  PROCESSING --> FAILED: erreur métier / retries exhausted → DLQ
+  PROCESSED --> [*]
+  FAILED --> [*]
+  note right of FAILED: Terminal. DLQ replay **ADMIN only** via POST /v1/admin/webhooks/dead-letter/{id}/replay.
+```
+
+**AutoReleaseJob (`AutoReleaseJobStatus`) — T+48h ouvrées + verrou applicatif**
+
+> Ajustement revue CTO : **terminal states explicites** = `COMPLETED` (renommé `SUCCEEDED → COMPLETED` pour homogénéité), `FAILED`, `CANCELLED`. Tous sortent vers `[*]`.
+
+```mermaid
+stateDiagram-v2
+  [*] --> SCHEDULED: mission → CLIENT_VALIDATION_PENDING (delayed BullMQ + cron safety-net horaire)
+  SCHEDULED --> RUNNING: (async/BullMQ) worker lock — lockedAt/lockedBy
+  RUNNING --> COMPLETED: capture+transfer idempotents OK (renommage SUCCEEDED→COMPLETED)
+  RUNNING --> FAILED: erreur Stripe / invariant `canReleaseEscrow` faux
+  SCHEDULED --> CANCELLED: (sync CLIENT validate) | (sync CLIENT/PRESTATAIRE dispute) — cancelReason audité
+  RUNNING --> CANCELLED: race cancel (client prioritaire — verrou refusé)
+  COMPLETED --> [*]
+  FAILED --> [*]
+  CANCELLED --> [*]
+  note right of COMPLETED: Terminal. capture+transfer atomiques (audit Verify V10).
+  note right of FAILED: Terminal. Audit `AUTO_RELEASE_FAILED` + alerte ops (retry manuel admin).
+  note right of CANCELLED: Terminal. `cancelReason ∈ { client_validated, dispute_opened }`.
+```
+
+**Mission (`MissionStatus`) — transitions DISPUTE_OPEN et fenêtre limitée**
+
+> Ajustement revue CTO : documenter explicitement les **3 entrées DISPUTE_OPEN** + **fenêtre limitée 7 jours** post-`COMPLETED`. Hors-fenêtre → erreur métier `DISPUTE_WINDOW_EXPIRED`.
+
+```mermaid
+stateDiagram-v2
+  state "CLIENT_VALIDATION_PENDING" as CVP
+  state "AUTO_RELEASE_PENDING" as ARP
+  state "COMPLETED" as DONE
+  state "DISPUTE_OPEN" as DISP
+
+  CVP --> DISP: (sync CLIENT|PRESTATAIRE) POST /missions/{id}/report-problem — annule AutoReleaseJob
+  ARP --> DISP: (sync CLIENT|PRESTATAIRE) POST /missions/{id}/report-problem — annule job en cours, bloque transfer
+  DONE --> DISP: (sync CLIENT|PRESTATAIRE) — **fenêtre limitée ≤ 7j post completedAt** ; sinon 409 DISPUTE_WINDOW_EXPIRED
+  note right of DISP: Process litige = PRD-005. Tout `Transfer` SENT peut être REVERSED via Stripe.
+  note right of DONE: Fenêtre dispute = `disputeWindowDays = 7` (config). Hors fenêtre → support manuel.
+```
+
+**Mission expiration (`SYSTEM` / BullMQ uniquement)**
+
+> Ajustement revue CTO : transition `PUBLISHED → EXPIRED` est **purement système** — aucun acteur humain ne peut la déclencher. Cron BullMQ horaire qui scanne `publishedAt + listingTtlHours < now`.
+
+```mermaid
+stateDiagram-v2
+  state "PUBLISHED" as PUB
+  state "EXPIRED" as EXP
+  PUB --> EXP: (async/BullMQ cron) TTL listing dépassé — refund auto (PaymentIntent.cancel)
+  note right of EXP: Terminal. Acteur = SYSTEM only. Pas de route HTTP exposée.
+```
+
+**Règles dures associées (rev2)** :
+
+- Aucune transition non listée n'est autorisée (extension PRD-002 `assertMissionTransition` + `assertPaymentTransition` + `assertTransferTransition` + `assertAutoReleaseJobTransition` + `assertRefundTransition`).
 - Une mission ne devient `PUBLISHED` (= visible matching) que si `paymentStatus = AUTHORIZED` (Stripe a autorisé la carte).
-- Tout `cancel` ou `expire` après `PAID` déclenche un `paymentIntents.cancel()` (libère l'autorisation Stripe avant capture) — pas de capture, pas de refund nécessaire.
+- Tout `cancel` ou `expire` après `PAID` déclenche un `paymentIntents.cancel()` (libère l'autorisation Stripe avant capture) → `PaymentStatus → CANCELLED`. Aucune capture, aucun refund nécessaire.
 - Tout passage par `payments.captureAndTransfer()` est **idempotent** (keys déterministes `capture-mission-${id}` + `transfer-mission-${id}`).
-- Tout passage en `COMPLETED` doit avoir `paymentStatus ∈ { RELEASED, AUTO_RELEASED }` ET `≥ 5 photos AFTER syncées` ET `≥ 3 photos BEFORE syncées` ET pas de `DISPUTE_OPEN`.
-- Une transition `CLIENT_VALIDATION_PENDING → DISPUTE_OPEN` annule le job BullMQ `escrow.auto-release` (jobId déterministe `auto-release-${missionId}`).
+- Tout passage en `COMPLETED` doit avoir `paymentStatus = CAPTURED` ET `transferStatus ∈ { PENDING, SENT }` ET `≥ 5 photos AFTER syncées` ET `≥ 3 photos BEFORE syncées` ET pas de `DISPUTE_OPEN`.
+- Une transition `CLIENT_VALIDATION_PENDING|AUTO_RELEASE_PENDING → DISPUTE_OPEN` annule le job BullMQ `escrow.auto-release` (jobId déterministe `auto-release-${missionId}`) et déclenche `AutoReleaseJob → CANCELLED { cancelReason: 'dispute_opened' }`.
+- Une transition `COMPLETED → DISPUTE_OPEN` est autorisée **uniquement** dans la fenêtre `disputeWindowDays = 7` post-`completedAt`. Hors fenêtre : 409 `DISPUTE_WINDOW_EXPIRED` (support manuel).
+- **`PUBLISHED → EXPIRED`** : exclusivement `SYSTEM` / BullMQ cron (pas de route HTTP). Implique `paymentIntents.cancel()` + `PaymentStatus → CANCELLED`.
+- **DLQ replay** : exclusivement `ADMIN` via `POST /v1/admin/webhooks/dead-letter/{id}/replay` (`x-rbac: [ADMIN]`). Aucun acteur métier (CLIENT/PRESTATAIRE) ne peut relancer un job DLQ.
+- **Partial refunds non supportés MVP** : `Refund.amountCents == Payment.amountCapturedCents`, sinon 422 `PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED`. Plusieurs refunds successifs sur même payment → 409 `PAYMENT_ALREADY_REFUNDED`.
 - L'extension du matching PRD-002 ajoute **deux** filtres : `mission.status = 'PUBLISHED'` ET `prestataire.providerPayoutStatus = 'READY'`.
 
 ### 3.6 Definition of Done — Discover ✅
@@ -356,9 +490,14 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 3. **Contrat API** complet : chaque route avec verbe / auth / RBAC / ownership / idempotency-key / rate limit / codes HTTP.
 4. **State machine paiement** dédiée (`payment-state.machine.ts`) + extension `mission-state.machine.ts`, assertions strictes (pattern PRD-002).
 5. **ADRs à rédiger** :
+   - **Contrat OpenAPI 3.1** — [`docs/api/PRD-003-openapi.yaml`](../api/PRD-003-openapi.yaml) (`info.version` `1.0.1-prd003-design-cto-openapi-rev1`). 21 endpoints. Revue CTO OpenAPI (corrections) : `GET /missions/:id/payment` réservé **CLIENT + ADMIN** (réponses `ClientPaymentView` | `AdminPaymentView`, projection déterministe — pas de prestataire) ; `GET /missions/:id/transfer` réservé **PRESTATAIRE + ADMIN** (`PrestataireTransferView` | `AdminTransferView`) ; `GET /admin/auto-release-jobs` en **offset/limit** (défaut 50, max 100) ; remboursement documenté **idempotent 24 h min** ; webhook Stripe **202** + traitement async ; **410** `UPLOAD_SESSION_EXPIRED` ; **422** `MISSING_REQUIRED_BEFORE_PHOTOS` / `AFTER_REQUIRES_BEFORE` ; **409** `PAYMENT_AUTHORIZATION_EXPIRED` sur validate client ; codes `WEBHOOK_ALREADY_PROCESSED` / `PHOTO_CAPTURE_CLIENT_UUID_SESSION_MISMATCH`. Lint Redocly : 0 erreur.
    - **ADR-008** — Mécanique « escrow » : `capture_method='manual'` + delayed transfer Stripe Connect Express. Limites (autorisation expire ~7j Visa/MC), trade-offs vs destination/separate charges, wording produit. ✅ tranché Q1.
+     - **Doit aussi documenter** (ajustements revue CTO 2026-05-12, livrable 1/5 Prisma) :
+       - `TransferStatus.REVERSED` : alimenté par webhook Stripe `transfer.reversed` (reversal / fonds repris / compte prestataire fermé / fraude). Effet métier : mission bascule en `DISPUTE_OPEN`, re-transfert manuel **hors MVP**.
+       - Fallback `authorization_expired` au moment de la capture : DeadLetter + alerte ops + retry idempotent ; option produit non-MVP : re-authorize flow ou capture immédiate + delayed transfer.
    - **ADR-009** — Cloudinary signed upload (multipart direct, pas de base64) + EXIF strip + lat/lng séparé en DB + dual variant (ORIGINAL + DISPLAY). ✅ tranché D2+D16+D17+Q3.
    - **ADR-010** — Politique rétention photos 30 jours (remplace mention 12 mois `photos-rgpd.mdc`) + exceptions litige/fraude/légal. ✅ tranché Q2.
+     - **Doit explicitement traiter** (ajustement revue CTO 2026-05-12, livrable 1/5 Prisma) : la suppression **physique Cloudinary** (`uploader.destroy` sur public_id, type=private) en plus du tombstone DB (`photos.deleted_at` + `photo_deletion_logs`). Stratégie : (a) batch quotidien cron à 03:00 Europe/Paris, (b) idempotent par `batch_id`, (c) tolère 404 Cloudinary (asset déjà supprimé), (d) audit `PhotoDeletionLog` même en cas d'échec partiel.
    - **ADR-011** — Stripe API pinning (`STRIPE_API_VERSION` config-driven, jamais `latest`). ✅ tranché Q12.
    - **ADR-012** — Email provider Resend (vs SendGrid/Postmark, alternatives refusées dans §8.2). ✅ tranché Q10.
    - **ADR-013** — Notifications minimales MVP : push FCM + email Resend (pas SMS). ✅ tranché Q9.
@@ -370,6 +509,49 @@ PRD-003 ferme cette boucle : **le client paie, les fonds sont mis en séquestre,
 9. **Pré-revue `reviewer-securite-code` OBLIGATOIRE** sur le Design (risque ≥ 4 sur sécu/finance/RGPD) avant validation CTO Design.
 
 **DoD Design** : cf. template PRD §4.9 + sign-off CTO + rapport pré-revue sécurité joint.
+
+---
+
+### 4.10 Livrable 5/5 — ADRs + pré-revue sécurité + rules Cursor (revue CTO 2026-05-12)
+
+**ADRs rédigés et `Accepted`** :
+
+| ADR | Sujet | Statut |
+|---|---|:-:|
+| **ADR-008** | Escrow Stripe Connect Express — `capture_method='manual'` + delayed transfer + `authorization_expired` + `transfer.reversed` + state machines paiement/transfer/refund | ✅ `Accepted` |
+| **ADR-009** | Photos AVANT/APRÈS — Cloudinary signed upload + dual variant `ORIGINAL` / `DISPLAY` + EXIF strip + lat/lng séparé en DB | ✅ `Accepted` |
+| **ADR-010** | Photos — rétention **30 jours** + cron purge 03h Europe/Paris + suppression réelle Cloudinary + `PhotoDeletionLog` | ✅ `Accepted` |
+| **ADR-011** | Stripe API pinning — `STRIPE_API_VERSION = '2025-02-24.acacia'` (config-driven, jamais `latest`) | ✅ `Accepted` |
+| **ADR-012** | Email provider Resend — DX excellente (React Email), mock dev obligatoire, tier gratuit + 50 $/mois 50 K mails | ✅ `Accepted` |
+| **ADR-013** | Notifications MVP — Expo Push (proxy `exp.host`) + Resend email + `PushToken` (RBAC self), pas de SMS, pas de LaunchDarkly | ✅ `Accepted` |
+
+**Pré-revue sécurité** : [`docs/security-reviews/2026-05-12-prd-003-design-prereview.md`](../security-reviews/2026-05-12-prd-003-design-prereview.md) — **0 Critical, 0 Important**, 3 suggestions, 22 conformes, **5 conditions Build CB1-CB5** documentées.
+
+**Rules Cursor mises à jour** :
+- `.cursor/rules/photos-rgpd.mdc` : rétention **12 mois → 30 jours**, dual variant ORIGINAL/DISPLAY, interdiction base64, `captureClientUuid` + `PhotoUploadSession`, suppression réelle Cloudinary, GPS séparé EXIF.
+- `.cursor/rules/stripe.mdc` : suppression `transfer_data.destination` (Destination charges refusé) → `capture_method='manual'` + delayed transfer, idempotence renforcée toutes mutations (`pi/capture/transfer/refund-mission-{id}-{attempt}`), table `StripeWebhookEvent` + `payloadHash`, webhook réponse **202** + traitement async, verrou applicatif `AutoReleaseJob.lockedAt/lockedBy`, refund intégral MVP, API version pinned `STRIPE_API_VERSION`, DLQ replay ADMIN-only, EXPIRED SYSTEM-only.
+- `.cursor/rules/notifications.mdc` : **créée** — stack Expo Push + Resend email + mock dev, orchestrator multi-canal, `PushToken` RBAC self, env vars feature flags.
+
+**State machines rev2 (livrable 4/5)** — 8 ajustements CTO intégrés dans §3.5 :
+
+1. ✅ `PaymentStatus.CANCELLED` (transition `AUTHORIZED → CANCELLED`).
+2. ✅ `TransferStatus.RETRY_SCHEDULED` (transition `FAILED → RETRY_SCHEDULED → PENDING`).
+3. ✅ `AutoReleaseJobStatus` terminaux : `COMPLETED` (renommage `SUCCEEDED`) / `FAILED` / `CANCELLED`.
+4. ✅ Mission `DISPUTE_OPEN` documenté depuis `CLIENT_VALIDATION_PENDING` / `AUTO_RELEASE_PENDING` / `COMPLETED` (fenêtre `disputeWindowDays = 7`, sinon `409 DISPUTE_WINDOW_EXPIRED`).
+5. ✅ `RefundStatus` dédié `PENDING → REFUNDED | FAILED` + **no partial refund MVP** (`PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED` 422).
+6. ✅ DLQ replay = **ADMIN only** (endpoint `POST /v1/admin/webhooks/dead-letter/{id}/replay` `x-rbac: [ADMIN]`).
+7. ✅ Mission `PUBLISHED → EXPIRED` = **SYSTEM / BullMQ only** (cron `mission.expire`, aucune route HTTP).
+8. ✅ Mermaid visuels : `[*]` terminaux, préfixes `(webhook)` / `(async/BullMQ)` / `(sync)` / `(cron)`, `note right of X` pour terminaux explicites.
+
+**OpenAPI** : [`docs/api/PRD-003-openapi.yaml`](../api/PRD-003-openapi.yaml) bumpé `1.0.2-prd003-design-cto-state-machines-rev2`. 22 endpoints (ajout `POST /v1/admin/webhooks/dead-letter/{id}/replay`). Redocly lint **0 erreur, 0 warning**.
+
+**Schéma Prisma** : enums alignés (`PaymentStatus` + `CANCELLED` + `REFUND_PENDING`, `TransferStatus` + `RETRY_SCHEDULED`, `AutoReleaseJobStatus` `SUCCEEDED → COMPLETED`, ajout `RefundStatus`). Migration `20260512230000_prd003_state_machines_rev2` (Design draft).
+
+**Zod `@cc/shared-types`** : `RefundStatusSchema` exporté, `refundPaymentInputSchema.amountCents` rendu **obligatoire**, codes erreur `PAYMENT_ALREADY_REFUNDED`, `PAYMENT_PARTIAL_REFUND_NOT_SUPPORTED`, `TRANSFER_RETRY_NOT_ALLOWED`, `DISPUTE_WINDOW_EXPIRED` ajoutés. Typecheck OK.
+
+**Verify** : 23 audits CTO inchangés (12 base A-L + 11 V1-V11) — couvrent les 5 conditions Build CB1-CB5 de la pré-revue.
+
+> ⏸️ **Stop après livrable 5/5** : attente **sign-off CTO Design complet** avant ouverture Build. Aucune migration `schema.prisma` appliquée en main, aucun code Build, aucune PR Build avant validation.
 
 ---
 
@@ -536,11 +718,17 @@ Post-mortems systématiques sur tout incident finance (perte cash, double payout
 ## 9. Checklist BMAD globale
 
 - [x] **Discover** : PRD instancié, stories rédigées, risk assessment fait, 15 Open Questions résolues, 21 décisions CTO consolidées — **sign-off CTO 2026-05-12** ✅
-- [ ] **Design** : Schémas Prisma + Zod + contrat API + ADRs 008-013 + pré-revue sécu (en cours sur `design/prd-003-photos-paiements`)
+- [x] **Design — livrables 1/5 à 5/5** :
+  - [x] 1/5 Schéma Prisma + migrations Design
+  - [x] 2/5 Schémas Zod `@cc/shared-types` (Input / Internal / Public RBAC-aware)
+  - [x] 3/5 OpenAPI 3.1 `1.0.2-prd003-design-cto-state-machines-rev2` (22 endpoints, Redocly lint 0 erreur)
+  - [x] 4/5 State machines mermaid rev2 (Payment, Refund, Transfer, AutoReleaseJob, Mission DISPUTE, EXPIRED SYSTEM-only)
+  - [x] 5/5 ADRs 008-013 + pré-revue sécurité + rules Cursor (`photos-rgpd`, `stripe`, `notifications`)
+  - [ ] **Sign-off CTO Design complet** ← gate
 - [ ] **Build** : code + tests + migration (bloqué tant que Design non validé CTO)
 - [ ] **Verify** : 23 audits CTO (12 base A-L + 11 supplémentaires V1-V11) + smoke paiement + sign-off CTO + référent RGPD (bloqué tant que Build non validé)
 - [ ] PRD archivé, statut `DONE`, version finale taguée
 
 ---
 
-*PRD-003 v0.2 — Discover validé — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md). Sign-off CTO sur les 15 Open Questions + 6 décisions supplémentaires (D16-D21). Passage Design autorisé.*
+*PRD-003 v0.3 — Design complet (livrables 1/5 à 5/5) — 2026-05-12 — méthode [BMAD-light](../method/BMAD.md). Sign-off CTO Discover (15 Q + 6 D supplémentaires D16-D21) acquis. Revue CTO OpenAPI rev1 + State Machines rev2 + ADRs validés sous réserve sign-off final Design.*

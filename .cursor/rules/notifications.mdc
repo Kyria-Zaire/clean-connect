@@ -1,0 +1,242 @@
+---
+description: Notifications transactionnelles Clean Connect — Expo Push (mobile) + Resend email, mock en dev, orchestrateur multi-canal, push tokens RBAC self, pas de SMS MVP, pas de LaunchDarkly MVP (env vars feature flags)
+globs: apps/api/src/modules/notifications/**/*.ts
+alwaysApply: false
+---
+
+# Notifications — Clean Connect
+
+> Activé sur `apps/api/src/modules/notifications/**`.
+> ADRs : [ADR-012 Resend](../../docs/adr/ADR-012-email-provider-resend.md), [ADR-013 Expo push + email MVP](../../docs/adr/ADR-013-notifications-push-email-mvp.md).
+> Décisions CTO PRD-003 : Q9 (push + email MVP, pas SMS) + Q10 (Resend) + Q15 (env vars feature flags).
+
+---
+
+## Canaux
+
+| Canal | Provider | Stack | Activé par |
+|---|---|---|---|
+| Push mobile (iOS + Android) | **Expo Push Notifications** (proxy `exp.host`) | `expo-server-sdk` côté backend, `expo-notifications` côté mobile | ADR-013 |
+| Email transactionnel | **Resend** (`resend` SDK) + `@react-email/components` | Templates TSX, type-safe, preview local | ADR-012 |
+| SMS | ❌ **Refus MVP** (Q9 — coût + complexité) | — | — |
+| In-app temps réel | ❌ Hors scope MVP (PRD-004) | — | — |
+
+---
+
+## Modèle DB — `PushToken`
+
+```prisma
+model PushToken {
+  id        String       @id @default(uuid()) @db.Uuid
+  userId    String       @map("user_id") @db.Uuid
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String       @unique @db.VarChar(255) // ExpoPushToken[xxx]
+  platform  PushPlatform // IOS | ANDROID
+  active    Boolean      @default(true) // false si DeviceNotRegistered
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@index([userId, active])
+}
+
+enum PushPlatform {
+  IOS
+  ANDROID
+}
+```
+
+**Endpoints** (RBAC self) :
+- `POST /v1/me/push-tokens` (CLIENT, PRESTATAIRE) — register/update idempotent.
+- `DELETE /v1/me/push-tokens/{token}` (CLIENT, PRESTATAIRE) — logout / désinstall.
+
+---
+
+## Envoi push — Expo Server SDK
+
+```typescript
+import { Expo, ExpoPushMessage } from 'expo-server-sdk'
+
+@Injectable()
+export class PushService {
+  private readonly expo = new Expo({ accessToken: env.EXPO_ACCESS_TOKEN }) // optionnel
+
+  async sendToUser(userId: string, payload: PushPayload) {
+    const tokens = await this.prisma.pushToken.findMany({
+      where: { userId, active: true },
+      select: { token: true },
+    })
+
+    const messages: ExpoPushMessage[] = tokens
+      .filter(t => Expo.isExpoPushToken(t.token)) // filtre tokens malformés
+      .map(t => ({
+        to: t.token,
+        sound: 'default',
+        title: payload.title,
+        body: payload.body,
+        data: payload.data ?? {},
+        priority: 'high',
+        channelId: 'default',
+      }))
+
+    if (messages.length === 0) return
+
+    const chunks = this.expo.chunkPushNotifications(messages)
+    for (const chunk of chunks) {
+      try {
+        const tickets = await this.expo.sendPushNotificationsAsync(chunk)
+        await this.handleTickets(tickets, chunk) // désactive tokens DeviceNotRegistered
+      } catch (err) {
+        logger.error({ err, userId }, 'push.send.failed')
+      }
+    }
+  }
+}
+```
+
+**Règles dures** :
+- `Expo.isExpoPushToken(token)` filtre AVANT envoi.
+- Ticket `DeviceNotRegistered` → `PushToken.active = false` (logging warn, pas une erreur applicative).
+- Pino structuré : `push.send.success`, `push.send.failed`, `push.ticket.error`.
+
+---
+
+## Envoi email — Resend SDK + React Email
+
+```typescript
+import { Resend } from 'resend'
+import { renderTemplate } from './templates/render'
+
+export const resend = env.NODE_ENV === 'development'
+  ? createMockResend()
+  : new Resend(env.RESEND_API_KEY)
+
+@Injectable()
+export class EmailService {
+  async send(template: EmailTemplate, vars: Record<string, unknown>) {
+    const html = await renderTemplate(template, vars) // React Email render server-side
+    const { data, error } = await resend.emails.send({
+      from: env.EMAIL_FROM,
+      to: vars.recipientEmail as string,
+      subject: vars.subject as string,
+      html,
+      headers: { 'X-Clean-Connect-Template': template },
+      replyTo: env.EMAIL_REPLY_TO,
+    })
+    if (error) {
+      logger.error({ template, error }, 'email.send.failed')
+      throw new EmailSendError(template, error)
+    }
+    logger.info({ template, emailId: data!.id }, 'email.send.success')
+    return data!.id
+  }
+}
+```
+
+---
+
+## Mode `development` — mock obligatoire (push + email)
+
+```typescript
+function createMockResend() {
+  return {
+    emails: {
+      send: async (params: any) => {
+        const id = `dev-mock-${randomUUID()}`
+        const filename = `${Date.now()}-${params.headers?.['X-Clean-Connect-Template'] ?? 'unknown'}.html`
+        const filepath = path.join(process.cwd(), 'tmp', 'emails', filename)
+        await fs.mkdir(path.dirname(filepath), { recursive: true })
+        await fs.writeFile(filepath, params.html, 'utf-8')
+        logger.info({ id, filepath, template: params.headers?.['X-Clean-Connect-Template'] }, 'email.dev.captured')
+        return { data: { id }, error: null }
+      },
+    },
+  }
+}
+```
+
+**Règle dure** : en `NODE_ENV=development`, **aucun email ni push réel** n'est envoyé. Captures sur disque pour preview + tests d'intégration.
+
+---
+
+## Orchestration — `notifications.module`
+
+```
+apps/api/src/modules/notifications/
+├── email/
+│   ├── email.client.ts          # Resend + mock
+│   ├── email.service.ts
+│   └── templates/
+│       ├── _layout.tsx
+│       ├── mission-validated.tsx
+│       ├── mission-auto-release-reminder-24h.tsx
+│       ├── mission-auto-released.tsx
+│       ├── payment-failed.tsx
+│       ├── admin-dlq-alert.tsx
+│       └── render.ts
+├── push/
+│   ├── push.client.ts           # Expo + mock
+│   ├── push.service.ts
+│   └── handle-tickets.ts
+├── orchestrator.service.ts      # notify(user, event, payload) → email ∪ push parallèle
+└── notifications.module.ts
+```
+
+Le service `orchestrator.service.ts` reçoit un event domaine (ex: `MissionAutoReleased`, `PaymentFailed`, `MissionReminder24h`) et :
+1. Look-up préférences utilisateur (MVP : tous les canaux actifs).
+2. Render template email + payload push court (titre + body).
+3. Envoie en parallèle via `EmailService.send()` + `PushService.sendToUser()`.
+
+---
+
+## Variables d'environnement (Zod boot)
+
+| Variable | Validation | Exemple |
+|---|---|---|
+| `RESEND_API_KEY` | `z.string().startsWith('re_').min(20)` en prod, optional en dev | `re_xxxxxxxxxxxxxx` |
+| `EMAIL_FROM` | `z.string().email()` | `noreply@cleanconnect.fr` |
+| `EMAIL_FROM_NAME` | `z.string().min(1).max(80)` | `Clean Connect` |
+| `EMAIL_REPLY_TO` | `z.string().email()` | `support@cleanconnect.fr` |
+| `EXPO_ACCESS_TOKEN` | `z.string().min(20).optional()` | `expo_xxxxxxx` |
+
+---
+
+## Feature flags — env vars (Q15)
+
+```
+FF_AUTO_RELEASE_ENABLED       # active escrow.auto-release T+48h ouvrées
+FF_DISPUTES_ENABLED           # active POST /missions/:id/report-problem
+FF_PAYOUTS_ENABLED            # active Stripe Transfer
+FF_PHOTO_GPS_ENFORCEMENT      # bloque finish si gpsMissing=true (default OFF)
+```
+
+Validées **Zod boot** (`z.coerce.boolean()`). Pas de service externe MVP (LaunchDarkly = backlog post-MVP).
+
+---
+
+## Sécurité — checklist notifications
+
+```
+☐ DTO Zod sur POST /me/push-tokens (token, platform)
+☐ RBAC self : un user ne peut enregistrer/supprimer QUE son token (JWT user_id)
+☐ Filtre Expo.isExpoPushToken AVANT envoi
+☐ Désactivation token (active=false) sur DeviceNotRegistered
+☐ Aucun PII sensible (mot de passe, token JWT) dans titre/body push (visible lock screen mobile)
+☐ Mock dev obligatoire (NODE_ENV=development)
+☐ Resend RESEND_API_KEY au format `re_*` validé Zod
+☐ Pino : email.send.success / .failed, push.send.success / .ticket.error
+☐ Email templates type-safe (TSX), preview locale via `pnpm email:preview`
+☐ Pas de fetch direct vers exp.host ou api.resend.com (toujours via SDK officiel)
+```
+
+---
+
+## Interdictions
+
+- Envoi push/email réel en `NODE_ENV=development` (utiliser le mock)
+- Push body contenant des secrets (token, code OTP en clair, montant carte…)
+- `console.log` (toujours Pino)
+- Notifications SMS MVP (Q9 refus net)
+- Stockage de tokens push expirés `active=true` (handleTickets désactive)
+- Send email sans `X-Clean-Connect-Template` header (audit dashboard Resend)
+- Templates Email avec `dangerouslySetInnerHTML` non-trusted (XSS)
+- Feature flags hardcodés dans le code (toujours via `env.FF_*`)
