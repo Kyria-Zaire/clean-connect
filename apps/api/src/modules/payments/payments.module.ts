@@ -20,10 +20,11 @@
  */
 
 import { BullModule } from '@nestjs/bullmq'
-import { Module } from '@nestjs/common'
+import { forwardRef, Module } from '@nestjs/common'
 
 import { AuthModule } from '../auth/auth.module'
 import { MissionsModule } from '../missions/missions.module'
+import { MissionsCompletionModule } from '../missions-completion/missions-completion.module'
 
 import { AdminPaymentsController } from './admin-payments.controller'
 import { STRIPE_WEBHOOK_QUEUE } from './payments.constants'
@@ -42,6 +43,12 @@ import { StripeWebhookProcessor } from './webhooks/stripe-webhook.processor'
     // PRD-003 Ticket 3.2 — réutilise `MissionsRepository` + `MissionEventService`
     // + `MatchingService` (exposés via `MissionsModule.exports`).
     MissionsModule,
+    // PRD-003 Ticket 3.4 — `PaymentDomainHandler.onCaptured` (webhook
+    // `payment_intent.succeeded`) appelle `AutoReleaseService.cancel`.
+    // Cycle inverse : `MissionCompletionService.validate` appelle
+    // `PaymentsService.requestCapture`. `forwardRef` côté DI au niveau
+    // service + module pour casser le cycle d'évaluation Nest.
+    forwardRef(() => MissionsCompletionModule),
     BullModule.registerQueue({
       name: STRIPE_WEBHOOK_QUEUE,
       defaultJobOptions: {

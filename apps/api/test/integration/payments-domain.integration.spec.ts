@@ -165,6 +165,11 @@ describe('PaymentDomainHandler (PRD-003 Ticket 3.2)', () => {
         })
         const missionIds = missions.map((m) => m.id)
         if (missionIds.length > 0) {
+          // PRD-003 Ticket 3.4 — purge des AutoReleaseJob créés par les
+          // tests `payment_intent.succeeded` avant le cleanup missions.
+          await prisma.autoReleaseJob.deleteMany({
+            where: { missionId: { in: missionIds } },
+          })
           await prisma.payment.deleteMany({ where: { missionId: { in: missionIds } } })
         }
       }
@@ -173,12 +178,16 @@ describe('PaymentDomainHandler (PRD-003 Ticket 3.2)', () => {
     }
   })
 
-  it('shouldHandle filtre les types non gérés en 3.2', () => {
+  it('shouldHandle filtre les types non gérés en 3.2 + 3.4', () => {
     expect(handler.shouldHandle('payment_intent.amount_capturable_updated')).toBe(true)
     expect(handler.shouldHandle('payment_intent.payment_failed')).toBe(true)
     expect(handler.shouldHandle('payment_intent.canceled')).toBe(true)
+    // PRD-003 Ticket 3.4 — `payment_intent.succeeded` doit être routé
+    // (Payment CAPTURED + Mission COMPLETED + cancel AutoReleaseJob).
+    expect(handler.shouldHandle('payment_intent.succeeded')).toBe(true)
     expect(handler.shouldHandle('payment_intent.created')).toBe(false)
     expect(handler.shouldHandle('charge.succeeded')).toBe(false)
+    // Ticket 3.5 — transfer.* pas encore routé.
     expect(handler.shouldHandle('transfer.created')).toBe(false)
   })
 
@@ -293,6 +302,104 @@ describe('PaymentDomainHandler (PRD-003 Ticket 3.2)', () => {
     expect(events.length).toBe(1)
     const payload = events[0]!.payload as { isAuthorizationExpired?: boolean }
     expect(payload.isAuthorizationExpired).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // PRD-003 Ticket 3.4 — payment_intent.succeeded
+  // ---------------------------------------------------------------------------
+
+  it('payment_intent.succeeded → Payment CAPTURED + Mission COMPLETED + AutoReleaseJob CANCELLED', async () => {
+    const fixture = await createIntentForMission(app)
+    const prisma = app.get(PrismaService)
+
+    // 1. Pré-requis : autoriser le Payment puis bascule manuelle de la
+    //    mission en CLIENT_VALIDATION_PENDING (l'integration HTTP `/complete`
+    //    nécessiterait un prestataire + des photos, hors-scope ce test
+    //    focalisé webhook).
+    await handler.handle(
+      makeEvent('payment_intent.amount_capturable_updated', {
+        id: fixture.intentId,
+        amount: 15_000,
+      }),
+    )
+    await prisma.mission.update({
+      where: { id: fixture.missionId },
+      data: { status: 'CLIENT_VALIDATION_PENDING' },
+    })
+    await prisma.autoReleaseJob.create({
+      data: {
+        missionId: fixture.missionId,
+        bullJobId: `auto-release-mission-${fixture.missionId}`,
+        idempotencyKey: `capture-mission-${fixture.missionId}`,
+        scheduledFor: new Date(Date.now() + 48 * 60 * 60 * 1_000),
+        status: 'SCHEDULED',
+      },
+    })
+
+    // 2. Webhook succeeded
+    await handler.handle(
+      makeEvent('payment_intent.succeeded', {
+        id: fixture.intentId,
+        amount: 15_000,
+        amount_received: 15_000,
+        status: 'succeeded',
+      }),
+    )
+
+    const payment = await prisma.payment.findUnique({ where: { id: fixture.paymentId } })
+    expect(payment!.status).toBe('CAPTURED')
+    expect(payment!.amountCapturedCents).toBe(15_000)
+
+    const mission = await prisma.mission.findUnique({ where: { id: fixture.missionId } })
+    expect(mission!.status).toBe('COMPLETED')
+
+    const arJob = await prisma.autoReleaseJob.findFirst({
+      where: { missionId: fixture.missionId },
+    })
+    expect(arJob!.status).toBe('CANCELLED')
+    expect(arJob!.cancelReason).toBe('payment_captured')
+
+    const events = await prisma.missionEvent.findMany({
+      where: { missionId: fixture.missionId },
+      orderBy: { createdAt: 'asc' },
+    })
+    const types = events.map((e) => e.type)
+    expect(types).toContain('PAYMENT_CAPTURED')
+    expect(types).toContain('MISSION_COMPLETED')
+  })
+
+  it('replay du même payment_intent.succeeded → idempotent (Payment reste CAPTURED, pas d\'audit doublon)', async () => {
+    const fixture = await createIntentForMission(app)
+    const prisma = app.get(PrismaService)
+
+    await handler.handle(
+      makeEvent('payment_intent.amount_capturable_updated', {
+        id: fixture.intentId,
+        amount: 15_000,
+      }),
+    )
+    await prisma.mission.update({
+      where: { id: fixture.missionId },
+      data: { status: 'CLIENT_VALIDATION_PENDING' },
+    })
+
+    const succeededEvent = makeEvent('payment_intent.succeeded', {
+      id: fixture.intentId,
+      amount: 15_000,
+      amount_received: 15_000,
+      status: 'succeeded',
+    })
+    await handler.handle(succeededEvent)
+    await handler.handle(succeededEvent) // replay
+
+    const events = await prisma.missionEvent.findMany({
+      where: { missionId: fixture.missionId, type: 'PAYMENT_CAPTURED' },
+    })
+    expect(events.length).toBe(1)
+    const completedEvents = await prisma.missionEvent.findMany({
+      where: { missionId: fixture.missionId, type: 'MISSION_COMPLETED' },
+    })
+    expect(completedEvents.length).toBe(1)
   })
 
   it('event.livemode=true mismatche APP_ENV=recette → erreur livemode + aucune mutation (ajustement CTO Ticket 3.2 #3)', async () => {

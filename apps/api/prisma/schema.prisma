@@ -50,7 +50,7 @@ enum Role {
 }
 
 /// Statuts mission — alignés avec `MissionStatusSchema` (`@cc/shared-types`).
-/// Seules les transitions listées dans `mission-state.machine.ts` sont autorisées en MVP PRD-002.
+/// Seules les transitions listées dans `mission-state.machine.ts` sont autorisées en MVP PRD-002 + PRD-003.
 enum MissionStatus {
   DRAFT
   /// PRD-003 Ticket 3.2 — état intermédiaire entre `DRAFT` et `PUBLISHED` :
@@ -63,10 +63,23 @@ enum MissionStatus {
   ACCEPTED
   EXPIRED
   CANCELLED
-  // États réservés aux PRD aval (aucune transition implémentée en PRD-002 Build)
+  // États réservés PRD aval (PRD-003 Ticket 3.4 active CLIENT_VALIDATION_PENDING,
+  // COMPLETED, DISPUTE_OPEN ; `IN_PROGRESS` reste réservé à un futur /start endpoint
+  // distinct, `REFUNDED` est livré en Ticket 3.5).
   IN_PROGRESS
-  AWAITING_CLIENT_VALIDATION
+  /// PRD-003 Ticket 3.4 — la mission est terminée côté prestataire (≥ 3 BEFORE
+  /// + ≥ 5 AFTER photos syncées) et attend soit la validation manuelle CLIENT
+  /// (`POST /missions/:id/validate`), soit l'auto-release T+48h ouvrées
+  /// (BullMQ delayed job), soit l'ouverture d'un litige
+  /// (`POST /missions/:id/report-problem` → `DISPUTE_OPEN`).
+  CLIENT_VALIDATION_PENDING
+  /// PRD-003 Ticket 3.4 — état terminal succès : `Payment` est `CAPTURED`
+  /// (webhook `payment_intent.succeeded` confirmé). Transfer prestataire =
+  /// Ticket 3.5.
   COMPLETED
+  /// PRD-003 Ticket 3.4 — `POST /missions/:id/report-problem` (CLIENT) ou
+  /// `charge.dispute.created` (Ticket 3.5). Bloque tout auto-release / capture
+  /// future tant que le litige n'est pas instruit (process complet = PRD-005).
   DISPUTE_OPEN
   REFUNDED
 }

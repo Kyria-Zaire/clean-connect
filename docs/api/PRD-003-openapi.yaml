@@ -24,7 +24,7 @@ openapi: 3.1.0
 
 info:
   title: Clean Connect API
-  version: '1.0.6-prd003-photos-cto-merge-followup'
+  version: '1.0.7-prd003-ticket-3.4-mission-completion-capture'
   description: |
     API publique Clean Connect — bloc **Photos & Paiements** (PRD-003).
 
@@ -2192,19 +2192,31 @@ paths:
     post:
       tags: [Mission Completion]
       operationId: completeMission
-      summary: '[PRESTATAIRE] Signaler la fin d''intervention (IN_PROGRESS → CLIENT_VALIDATION_PENDING)'
+      summary: '[PRESTATAIRE] Signaler la fin d''intervention (ACCEPTED → CLIENT_VALIDATION_PENDING)'
       description: |
-        **Réservé au prestataire** (revue CTO). Signifie : le prestataire **a terminé**
-        son passage sur site (pas une validation client).
+        **Réservé au prestataire owner de la mission** (revue CTO Ticket 3.4).
+        Signifie : le prestataire **a terminé** son passage sur site (pas une
+        validation client).
 
-        Préconditions :
-        - Photos **AFTER** valides / syncées (quota ≥ 5 — CTO Q3). Sinon → `422` avec
-          `PHOTO_INSUFFICIENT_AFTER` ou `AFTER_REQUIRES_BEFORE` si ordre métier violé
-          (upload AFTER sans BEFORE minimum requis).
-        - **Ne valide pas** la mission côté client : la mission passe en
-          **`CLIENT_VALIDATION_PENDING`** (attente action client ou auto-release T+48h ouvrées).
+        Précondition d'état (Ticket 3.4) :
+        - `Mission.status === ACCEPTED` (l'endpoint `/start` → `IN_PROGRESS` est
+          réservé à un futur ticket — `TODO(debt) mission-start-endpoint`).
+        - Photos `BEFORE` syncées : quota ≥ 3 (`MissionPhotoQuotaService`).
+        - Photos `AFTER` syncées : quota ≥ 5 (`MissionPhotoQuotaService`).
+        - Photos non syncées (`PhotoUploadSession` en attente de `/confirm`) ne
+          comptent pas — règle « pas de libération séquestre tant que photos
+          AVANT non sync » étendue ici à l'ensemble du quota.
 
-        Déclenche le timer auto-release (`AutoReleaseJob.SCHEDULED`) et notifie le client.
+        Réponses 422 :
+        - `MISSION_PHOTOS_INSUFFICIENT` — quota BEFORE/AFTER non atteint.
+        - `MISSION_NOT_COMPLETABLE` — statut ≠ ACCEPTED.
+
+        Effets :
+        - Mission passe en `CLIENT_VALIDATION_PENDING`.
+        - `AutoReleaseJob` planifié à `now + 48h ouvrées Paris` via BullMQ
+          (`buildAutoReleaseBullJobId(missionId)` — idempotent par mission).
+        - Audit `MISSION_COMPLETED_BY_PRESTATAIRE` + `AUTO_RELEASE_SCHEDULED`.
+        - Notif client (push + email — Ticket 3.5).
       x-rbac: [PRESTATAIRE]
       x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -2240,19 +2252,35 @@ paths:
     post:
       tags: [Mission Completion]
       operationId: validateMissionByClient
-      summary: '[CLIENT] Valider la mission terminée → déclenche capture + Transfer'
+      summary: '[CLIENT] Valider la mission terminée → déclenche capture PaymentIntent'
       description: |
-        **Flow nominal de libération du séquestre** :
-        1. Cancel `AutoReleaseJob` (verrou applicatif via `locked_at`).
-        2. Stripe `paymentIntents.capture` (idempotency-key déterministe
-           `capture-mission-{missionId}`).
-        3. Création `Transfer` Connect (`PENDING` → webhook `transfer.paid` → `SENT`).
-        4. Mission `COMPLETED`.
+        **Flow nominal de libération du séquestre (scope Ticket 3.4 — capture uniquement)** :
 
-        Race conditions couvertes :
-        - Double validation simultanée → 1 seule capture Stripe (idempotency key).
-        - Validation pendant auto-release qui tourne → conflit `409`.
+        1. Cancel `AutoReleaseJob` (verrou applicatif via `locked_at` / `locked_by`).
+        2. Audit `PAYMENT_CAPTURE_REQUESTED` (idempotency-key déterministe
+           `capture-mission-{missionId}`).
+        3. Appel Stripe `paymentIntents.capture(intentId, {}, { idempotencyKey })`.
+        4. Réponse `202 Accepted` — la capture est **asynchrone** : le webhook
+           `payment_intent.succeeded` confirmera `Payment.CAPTURED` puis
+           `Mission.COMPLETED`.
+
+        > **Hors scope Ticket 3.4 (réservé Ticket 3.5)** : `stripe.transfers.create`,
+        > webhooks `transfer.*`, redistribution prestataire (commission/payout).
+        > La capture libère **uniquement** le séquestre côté plateforme.
+
+        Race conditions couvertes (CTO Ticket 3.4) :
+        - Double validation simultanée → 1 seule capture Stripe via idempotency-key.
+        - Validation pendant auto-release qui tourne → conflit `409` côté API
+          (lock applicatif `lockedAt` / `lockedBy` sur `AutoReleaseJob`).
+        - Auto-release vs validation client : la **première** des deux capture
+          déclenchée gagne ; l'autre observe `PAYMENT_NOT_CAPTURABLE` (état non
+          `AUTHORIZED`) et abandonne sans replay Stripe.
         - Autorisation carte expirée (Visa/MC ~7j) → `409 PAYMENT_AUTHORIZATION_EXPIRED`.
+
+        Ownership de la capture (CTO Ticket 3.4) :
+        - `CLIENT` (validation explicite — ce endpoint),
+        - `SYSTEM` (auto-release T+48h ouvrées, processor BullMQ),
+        - `ADMIN` (uniquement en cas d'incident, audité).
       x-rbac: [CLIENT]
       x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
       parameters:
@@ -2409,9 +2437,22 @@ paths:
       summary: '[CLIENT | PRESTATAIRE] Ouvrir un litige sur la mission'
       description: |
         Bascule la mission en `DISPUTE_OPEN`.
-        - Cancel l'`AutoReleaseJob` pendant (verrou + `cancelReason='dispute_opened'`).
-        - Bloque toute libération de séquestre (audit Verify V11).
+
+        - Cancel l'`AutoReleaseJob` pendant (verrou applicatif via `lockedAt` /
+          `lockedBy`, `cancelReason='dispute_opened'`).
+        - **Bloque toute libération de séquestre** : la capture PaymentIntent
+          n'est plus déclenchée tant que le litige n'a pas été statué par
+          `ADMIN`. Le séquestre Stripe reste donc en `AUTHORIZED`.
+        - Race condition **report-problem vs auto-release** (CTO Ticket 3.4) :
+          si le processor d'auto-release tente de capturer alors qu'un
+          `report-problem` est en cours, l'invariant `Mission.status === CLIENT_VALIDATION_PENDING`
+          renvoie `MISSION_NOT_AUTORELEASABLE` côté job et la capture est
+          abandonnée (audit `AUTO_RELEASE_BLOCKED` avec `reason='mission_disputed'`).
         - Notif admin pour traitement.
+
+        > **Hors scope Ticket 3.4 (réservé futur audit admin)** : décision
+        > finale (capture forcée vs `paymentIntents.cancel` + refund) — pas
+        > automatisée en 3.4.
       x-rbac: [CLIENT, PRESTATAIRE]
       x-rate-limit: { strategy: 'token-bucket', max: 10, windowSeconds: 60, scope: 'user' }
       parameters:

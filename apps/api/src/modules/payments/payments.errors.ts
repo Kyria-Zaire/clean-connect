@@ -144,3 +144,34 @@ export class PaymentStripeException extends UnprocessableEntityException {
     super({ error: 'PAYMENT_STRIPE_ERROR', reason })
   }
 }
+
+// ---------------------------------------------------------------------------
+// PRD-003 Ticket 3.4 — erreurs métier capture PaymentIntent
+// (POST /v1/missions/:id/validate, auto-release executor).
+// Codes alignés `paymentErrorCodeSchema` (`@cc/shared-types`).
+// ---------------------------------------------------------------------------
+
+/**
+ * Le `Payment` n'est pas en `AUTHORIZED` (par exemple `AUTHORIZATION_PENDING`,
+ * `CAPTURED`, `FAILED`, `CANCELLED`, `REFUNDED`). Levé sync par `requestCapture`,
+ * 409 pour bien signaler au client (ou à l'auto-release) que l'action n'est
+ * pas (ou plus) légitime — l'invariant DB est revérifié systématiquement.
+ */
+export class PaymentNotCapturableException extends ConflictException {
+  constructor(reason: string) {
+    super({ error: 'PAYMENT_NOT_CAPTURABLE', reason })
+  }
+}
+
+/**
+ * Stripe a annulé automatiquement l'autorisation après 7 j sans capture
+ * (`cancellation_reason='automatic'`). Le Payment est en `CANCELLED` avec
+ * `failureCode='authorization_expired'`. Le client doit relancer un nouvel
+ * Idempotency-Key (Ticket 3.5 — orchestration retry). 422 distinct du 409
+ * `PAYMENT_NOT_CAPTURABLE` pour clarifier côté UI mobile.
+ */
+export class PaymentAuthorizationExpiredException extends UnprocessableEntityException {
+  constructor(reason = "Autorisation Stripe expirée (7 jours sans capture). Relancez un paiement.") {
+    super({ error: 'PAYMENT_AUTHORIZATION_EXPIRED', reason })
+  }
+}

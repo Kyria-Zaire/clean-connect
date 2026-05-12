@@ -374,6 +374,71 @@ export class MissionsRepository {
     return result.count
   }
 
+  /**
+   * PRD-003 Ticket 3.4 — transition `ACCEPTED → CLIENT_VALIDATION_PENDING`
+   * (POST /v1/missions/:id/complete, prestataire assigné).
+   *
+   * Lock optimiste : `prestataireId` est revérifié dans la `WHERE` pour
+   * couper court à toute race entre `accept()` concurrent et `complete()`.
+   * Renvoie 0 si la mission n'est plus en ACCEPTED, n'appartient plus
+   * au prestataire, ou a déjà été basculée en CLIENT_VALIDATION_PENDING.
+   */
+  async transitionAcceptedToClientValidationPendingTx(
+    tx: Prisma.TransactionClient,
+    opts: { missionId: string; prestataireId: string },
+  ): Promise<number> {
+    const result = await tx.mission.updateMany({
+      where: {
+        id: opts.missionId,
+        status: 'ACCEPTED',
+        prestataireId: opts.prestataireId,
+      },
+      data: { status: 'CLIENT_VALIDATION_PENDING' },
+    })
+    return result.count
+  }
+
+  /**
+   * PRD-003 Ticket 3.4 — transition `CLIENT_VALIDATION_PENDING → DISPUTE_OPEN`
+   * (POST /v1/missions/:id/report-problem, client owner).
+   *
+   * `clientId` re-vérifié pour anti-cross-mission. Bloque l'auto-release
+   * (BullMQ job sera annulé par `AutoReleaseService.cancel` dans la
+   * même transaction côté caller).
+   */
+  async transitionClientValidationPendingToDisputeOpenTx(
+    tx: Prisma.TransactionClient,
+    opts: { missionId: string; clientId: string },
+  ): Promise<number> {
+    const result = await tx.mission.updateMany({
+      where: {
+        id: opts.missionId,
+        status: 'CLIENT_VALIDATION_PENDING',
+        clientId: opts.clientId,
+      },
+      data: { status: 'DISPUTE_OPEN' },
+    })
+    return result.count
+  }
+
+  /**
+   * PRD-003 Ticket 3.4 — transition `CLIENT_VALIDATION_PENDING → COMPLETED`
+   * (webhook `payment_intent.succeeded`, jamais sync HTTP).
+   *
+   * Idempotent : renvoie 0 si la mission a déjà été basculée (replay
+   * webhook ou cron safety-net Ticket 3.5).
+   */
+  async transitionClientValidationPendingToCompletedTx(
+    tx: Prisma.TransactionClient,
+    opts: { missionId: string; now: Date },
+  ): Promise<number> {
+    const result = await tx.mission.updateMany({
+      where: { id: opts.missionId, status: 'CLIENT_VALIDATION_PENDING' },
+      data: { status: 'COMPLETED', updatedAt: opts.now },
+    })
+    return result.count
+  }
+
   async findExpiredPublishedIds(opts: { now: Date; limit: number }): Promise<string[]> {
     const rows = await this.prisma.mission.findMany({
       where: {

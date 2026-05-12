@@ -27,9 +27,12 @@ import {
   MissionForbiddenException,
   MissionNotFoundException,
   PaymentAmountRequiredException,
+  PaymentAuthorizationExpiredException,
   PaymentIdempotencyConflictException,
   PaymentInvalidStateException,
   PaymentMissingIdempotencyKeyException,
+  PaymentNotCapturableException,
+  PaymentStripeException,
   PaymentsDisabledException,
 } from './payments.errors'
 import type { PaymentsRepository } from './payments.repository'
@@ -89,8 +92,10 @@ interface ServiceHarness {
   service: PaymentsService
   stripeCreate: jest.Mock
   stripeRetrieve: jest.Mock
+  stripeCapture: jest.Mock
   paymentsRepo: jest.Mocked<PaymentsRepository>
   missionsRepo: jest.Mocked<MissionsRepository>
+  missionEvents: { recordTx: jest.Mock }
   prismaTransaction: jest.Mock
 }
 
@@ -130,6 +135,7 @@ function buildHarness(opts: {
 
   const paymentsRepo = {
     findByIdempotencyKey: jest.fn().mockResolvedValue(opts.existingPayment ?? null),
+    findByMissionId: jest.fn().mockResolvedValue(opts.existingPayment ?? null),
     createPendingPaymentTx: jest.fn().mockImplementation(async (_tx, input) =>
       buildPayment({
         missionId: input.missionId,
@@ -152,9 +158,14 @@ function buildHarness(opts: {
     client_secret: 'pi_test_unit_001_secret_bbb',
     object: 'payment_intent',
   })
+  const stripeCapture = jest.fn().mockResolvedValue({
+    id: opts.existingPayment?.stripePaymentIntentId ?? 'pi_test_unit_001',
+    object: 'payment_intent',
+    status: 'succeeded',
+  })
 
   const stripe = {
-    paymentIntents: { create: stripeCreate, retrieve: stripeRetrieve },
+    paymentIntents: { create: stripeCreate, retrieve: stripeRetrieve, capture: stripeCapture },
   }
 
   const prismaTransaction = jest
@@ -166,17 +177,26 @@ function buildHarness(opts: {
 
   const missionEvents = {
     recordTx: jest.fn().mockResolvedValue(undefined),
-  } as unknown as MissionEventService
+  }
 
   const service = new PaymentsService(
     prisma,
     paymentsRepo,
     missionsRepo,
-    missionEvents,
+    missionEvents as unknown as MissionEventService,
     stripe as never,
   )
 
-  return { service, stripeCreate, stripeRetrieve, paymentsRepo, missionsRepo, prismaTransaction }
+  return {
+    service,
+    stripeCreate,
+    stripeRetrieve,
+    stripeCapture,
+    paymentsRepo,
+    missionsRepo,
+    missionEvents,
+    prismaTransaction,
+  }
 }
 
 describe('PaymentsService.createIntent (PRD-003 Ticket 3.2)', () => {
@@ -321,5 +341,155 @@ describe('PaymentsService.createIntent (PRD-003 Ticket 3.2)', () => {
         OTHER_KEY,
       ),
     ).rejects.toBeInstanceOf(PaymentInvalidStateException)
+  })
+})
+
+// =============================================================================
+// PRD-003 Ticket 3.4 — PaymentsService.requestCapture
+// =============================================================================
+
+describe('PaymentsService.requestCapture (PRD-003 Ticket 3.4)', () => {
+  it('lève 409 PAYMENT_NOT_CAPTURABLE si aucun payment lié à la mission', async () => {
+    const harness = buildHarness({ existingPayment: null })
+    await expect(
+      harness.service.requestCapture(MISSION_ID, {
+        kind: 'SYSTEM',
+        trigger: 'CLIENT_VALIDATION',
+      }),
+    ).rejects.toBeInstanceOf(PaymentNotCapturableException)
+    expect(harness.stripeCapture).not.toHaveBeenCalled()
+  })
+
+  it('lève 422 PAYMENT_AUTHORIZATION_EXPIRED si payment CANCELLED avec failureCode=authorization_expired', async () => {
+    const harness = buildHarness({
+      existingPayment: buildPayment({
+        status: 'CANCELLED',
+        failureCode: 'authorization_expired',
+      }),
+    })
+    await expect(
+      harness.service.requestCapture(MISSION_ID, {
+        kind: 'SYSTEM',
+        trigger: 'AUTO_RELEASE',
+      }),
+    ).rejects.toBeInstanceOf(PaymentAuthorizationExpiredException)
+    expect(harness.stripeCapture).not.toHaveBeenCalled()
+  })
+
+  it('idempotent : si payment déjà CAPTURED → no-op (pas de capture Stripe rejouée)', async () => {
+    const harness = buildHarness({
+      existingPayment: buildPayment({ status: 'CAPTURED' }),
+    })
+    const result = await harness.service.requestCapture(MISSION_ID, {
+      kind: 'SYSTEM',
+      trigger: 'CLIENT_VALIDATION',
+    })
+    expect(result.status).toBe('CAPTURED')
+    expect(harness.stripeCapture).not.toHaveBeenCalled()
+  })
+
+  it('lève 409 PAYMENT_NOT_CAPTURABLE si payment AUTHORIZATION_PENDING / FAILED / REFUNDED', async () => {
+    for (const status of ['AUTHORIZATION_PENDING', 'FAILED', 'REFUNDED'] as const) {
+      const harness = buildHarness({
+        existingPayment: buildPayment({ status }),
+      })
+      await expect(
+        harness.service.requestCapture(MISSION_ID, {
+          kind: 'SYSTEM',
+          trigger: 'AUTO_RELEASE',
+        }),
+      ).rejects.toBeInstanceOf(PaymentNotCapturableException)
+      expect(harness.stripeCapture).not.toHaveBeenCalled()
+    }
+  })
+
+  it('happy path SYSTEM/CLIENT_VALIDATION → capture Stripe avec idempotencyKey déterministe + audit PAYMENT_CAPTURE_REQUESTED', async () => {
+    const harness = buildHarness({
+      existingPayment: buildPayment({ status: 'AUTHORIZED' }),
+    })
+    await harness.service.requestCapture(MISSION_ID, {
+      kind: 'SYSTEM',
+      trigger: 'CLIENT_VALIDATION',
+    })
+
+    expect(harness.stripeCapture).toHaveBeenCalledTimes(1)
+    const [intentId, body, opts] = harness.stripeCapture.mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+      { idempotencyKey: string },
+    ]
+    expect(intentId).toBe('pi_test_unit_001')
+    expect(body).toEqual({})
+    expect(opts.idempotencyKey).toBe(`capture-mission-${MISSION_ID}`)
+
+    expect(harness.missionEvents.recordTx).toHaveBeenCalledTimes(1)
+    const auditPayload = harness.missionEvents.recordTx.mock.calls[0]?.[1] as {
+      type: string
+      actorUserId: string | null
+      payload: Record<string, unknown>
+    }
+    expect(auditPayload.type).toBe('PAYMENT_CAPTURE_REQUESTED')
+    expect(auditPayload.actorUserId).toBeNull() // SYSTEM
+    expect(auditPayload.payload['trigger']).toBe('CLIENT_VALIDATION')
+    expect(auditPayload.payload['idempotencyKey']).toBe(`capture-mission-${MISSION_ID}`)
+  })
+
+  it('happy path ADMIN → capture avec actorUserId=admin (audit override)', async () => {
+    const harness = buildHarness({
+      existingPayment: buildPayment({ status: 'AUTHORIZED' }),
+    })
+    const adminId = '00000000-0000-4000-8000-00000000a0a0'
+    await harness.service.requestCapture(MISSION_ID, { kind: 'ADMIN', userId: adminId })
+
+    const auditPayload = harness.missionEvents.recordTx.mock.calls[0]?.[1] as {
+      actorUserId: string | null
+      payload: Record<string, unknown>
+    }
+    expect(auditPayload.actorUserId).toBe(adminId)
+    expect(auditPayload.payload['trigger']).toBe('ADMIN_OVERRIDE')
+  })
+
+  it('même Idempotency-Key pour validate et auto-release (race) → garantie côté Stripe', async () => {
+    const harness = buildHarness({
+      existingPayment: buildPayment({ status: 'AUTHORIZED' }),
+    })
+
+    await harness.service.requestCapture(MISSION_ID, {
+      kind: 'SYSTEM',
+      trigger: 'CLIENT_VALIDATION',
+    })
+    await harness.service.requestCapture(MISSION_ID, {
+      kind: 'SYSTEM',
+      trigger: 'AUTO_RELEASE',
+    })
+
+    expect(harness.stripeCapture).toHaveBeenCalledTimes(2)
+    const opts1 = harness.stripeCapture.mock.calls[0]?.[2] as { idempotencyKey: string }
+    const opts2 = harness.stripeCapture.mock.calls[1]?.[2] as { idempotencyKey: string }
+    expect(opts1.idempotencyKey).toBe(opts2.idempotencyKey)
+    expect(opts1.idempotencyKey).toBe(`capture-mission-${MISSION_ID}`)
+  })
+
+  it('erreur réseau Stripe → PaymentStripeException remontée', async () => {
+    const harness = buildHarness({
+      existingPayment: buildPayment({ status: 'AUTHORIZED' }),
+    })
+    harness.stripeCapture.mockRejectedValueOnce(new Error('Stripe network error'))
+    await expect(
+      harness.service.requestCapture(MISSION_ID, {
+        kind: 'SYSTEM',
+        trigger: 'AUTO_RELEASE',
+      }),
+    ).rejects.toBeInstanceOf(PaymentStripeException)
+  })
+
+  it('refuse 503 PAYMENTS_DISABLED quand FF off', async () => {
+    const harness = buildHarness({ paymentsEnabled: false })
+    await expect(
+      harness.service.requestCapture(MISSION_ID, {
+        kind: 'SYSTEM',
+        trigger: 'CLIENT_VALIDATION',
+      }),
+    ).rejects.toBeInstanceOf(PaymentsDisabledException)
   })
 })

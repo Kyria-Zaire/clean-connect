@@ -92,6 +92,66 @@ export const cancelMissionBodySchema = z
 export type CancelMissionBody = z.infer<typeof cancelMissionBodySchema>
 
 // =============================================================================
+// PRD-003 Ticket 3.4 — Mission completion + client validation + report problem
+// =============================================================================
+
+/**
+ * `POST /missions/:id/complete` — PRESTATAIRE assigné signale la fin de la
+ * prestation. Pas de body en MVP (toutes les photos sont déjà uploadées via
+ * `/photos/presign` + `/photos/confirm`). Le service vérifie ≥ 3 BEFORE +
+ * ≥ 5 AFTER photos synchronisées (`syncedAt IS NOT NULL`).
+ */
+export const completeMissionBodySchema = z.object({}).strict()
+export type CompleteMissionBody = z.infer<typeof completeMissionBodySchema>
+
+/**
+ * `POST /missions/:id/validate` — CLIENT owner valide la mission et déclenche
+ * la capture du PaymentIntent (idempotent côté serveur via
+ * `serverIdempotencyKey = capture-mission-${missionId}`). Pas de transfer
+ * prestataire en 3.4 (réservé Ticket 3.5).
+ */
+export const validateMissionBodySchema = z.object({}).strict()
+export type ValidateMissionBody = z.infer<typeof validateMissionBodySchema>
+
+/**
+ * `POST /missions/:id/report-problem` — CLIENT owner ouvre un litige pendant
+ * la fenêtre `CLIENT_VALIDATION_PENDING`. Le motif est obligatoire (max 1000
+ * char.) et redacté dans les logs (rule securite — pas de PII).
+ */
+export const reportMissionProblemBodySchema = z
+  .object({
+    /** Catégorie produit (UI mobile présente des choix prédéfinis). */
+    category: z.enum([
+      'PRESTATION_NOT_DONE',
+      'PRESTATION_INCOMPLETE',
+      'DAMAGE_REPORTED',
+      'OTHER',
+    ]),
+    /** Description libre — 10 à 1000 caractères (UX : pas de litige sans détail). */
+    description: z.string().trim().min(10).max(1_000),
+  })
+  .strict()
+export type ReportMissionProblemBody = z.infer<typeof reportMissionProblemBodySchema>
+
+/**
+ * Réponse `POST /complete` et `POST /validate` et `POST /report-problem` —
+ * `MissionView` enrichi du flag `idempotent` (true si la transition avait déjà
+ * été effectuée — retry safe).
+ */
+export const missionCompletionResponseSchemaFactory = <T extends z.ZodTypeAny>(view: T) =>
+  z
+    .object({
+      mission: view,
+      /**
+       * - `false` : la transition vient d'être effectuée par cet appel.
+       * - `true` : la mission était déjà dans l'état cible (replay /
+       *   retry mobile / second clic). Aucun side-effect supplémentaire.
+       */
+      idempotent: z.boolean(),
+    })
+    .strict()
+
+// =============================================================================
 // Address view — policy masquage RGPD avant acceptation
 // =============================================================================
 
@@ -207,6 +267,23 @@ export const missionErrorCodeSchema = z.enum([
   'MISSION_NOT_ELIGIBLE',
   'MISSION_GEOCODING_FAILED',
   'MISSION_VALIDATION_FAILED',
+  // PRD-003 Ticket 3.4 — mission completion + client validation + dispute.
+  /** ≥ 3 BEFORE et ≥ 5 AFTER photos syncées requises (`syncedAt IS NOT NULL`). */
+  'MISSION_PHOTOS_INSUFFICIENT',
+  /** Mission n'est pas en `ACCEPTED` (ou `IN_PROGRESS`) au moment du POST /complete. */
+  'MISSION_NOT_COMPLETABLE',
+  /** Mission n'est pas en `CLIENT_VALIDATION_PENDING` au moment du POST /validate ou /report-problem. */
+  'MISSION_NOT_VALIDATABLE',
+  /** `POST /validate` ou `/report-problem` appelé par un autre user que `mission.clientId`. */
+  'MISSION_CLIENT_ONLY',
+  /** `POST /complete` appelé par un autre user que `mission.prestataireId`. */
+  'MISSION_PRESTATAIRE_ONLY',
+  /** Litige déjà ouvert — `POST /report-problem` retourné en idempotent. */
+  'MISSION_DISPUTE_ALREADY_OPEN',
+  /** Autorisation Stripe expirée (~7 j) au moment de la capture — alerte ops + intervention manuelle. */
+  'PAYMENT_AUTHORIZATION_EXPIRED',
+  /** Payment introuvable ou pas en `AUTHORIZED` (état initial requis pour `paymentIntents.capture`). */
+  'PAYMENT_NOT_CAPTURABLE',
 ])
 export type MissionErrorCode = z.infer<typeof missionErrorCodeSchema>
 
@@ -237,5 +314,33 @@ export const missionEventTypeSchema = z.enum([
   /** PRD-003 Ticket 3.3 — événements photo (presign + confirm). */
   'PHOTO_UPLOAD_PRESIGNED',
   'PHOTO_CONFIRMED',
+  // PRD-003 Ticket 3.4 — completion + validation + capture + auto-release.
+  /** Prestataire a marqué la mission terminée (≥ 3 BEFORE + ≥ 5 AFTER syncées). */
+  'CLIENT_VALIDATION_PENDING',
+  /** Client a validé manuellement la mission (déclenche capture). */
+  'CLIENT_VALIDATED',
+  /** Client a signalé un problème (transition `→ DISPUTE_OPEN`). */
+  'DISPUTE_OPENED',
+  /** Stripe `paymentIntents.capture()` appelée (idempotent côté serveur). */
+  'PAYMENT_CAPTURE_REQUESTED',
+  /** Webhook `payment_intent.succeeded` confirmé — Payment `CAPTURED`. */
+  'PAYMENT_CAPTURED',
+  /** Mission `COMPLETED` après capture confirmée (transition state machine). */
+  'MISSION_COMPLETED',
+  /** Job BullMQ auto-release planifié (T+48 h ouvrées Europe/Paris). */
+  'AUTO_RELEASE_SCHEDULED',
+  /** Worker auto-release a démarré le traitement (lock applicatif posé). */
+  'AUTO_RELEASE_STARTED',
+  /** Auto-release a déclenché la capture avec succès (invariants OK). */
+  'AUTO_RELEASE_TRIGGERED',
+  /**
+   * Worker auto-release a bloqué la capture : invariants `canReleaseEscrow`
+   * non remplis (photos manquantes, payment expired, litige actif, etc.).
+   */
+  'AUTO_RELEASE_BLOCKED',
+  /** Job annulé (client validate ou report-problem). */
+  'AUTO_RELEASE_CANCELLED',
+  /** Job en erreur Stripe (`authorization_expired`, `card_declined`, …). */
+  'AUTO_RELEASE_FAILED',
 ])
 export type MissionEventType = z.infer<typeof missionEventTypeSchema>
