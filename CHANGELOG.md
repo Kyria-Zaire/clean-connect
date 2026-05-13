@@ -12,6 +12,48 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Discover ouvert — PRD-005 Product Experience (Mobile + Admin) — Sprint 5 — 2026-05-13
+
+🟡 **Statut** : `DISCOVER_DRAFT` — doc-only, aucun code runtime modifié, validation CTO requise pour passage en Design.
+
+Ouverture de [PRD-005 — Product Experience](docs/prd/PRD-005-product-experience.md) sur la branche `discover/prd-005-product-experience`. Objectif Sprint 5 : faire passer Clean Connect d'une plateforme technique stable à un produit utilisateur visible (Mobile Client + Mobile Prestataire dans un binaire unique + Admin Web Console + vue Support).
+
+**Portée Discover (15 sections rédigées)** :
+
+- **Vision produit** : le backend a fini son sprint, le produit commence le sien
+- **5 personas** : Client / Prestataire / Admin Ops / Support / Finance
+- **3 surfaces produit** : Mobile App (binaire unique RoleGuard, cf. cahier v1.4 §2), Admin Web Console (Vite + shadcn/ui), Support intégré au Web Admin
+- **12 user stories** réparties par persona
+- **5 flows critiques** documentés (Client signup→validation, Prestataire signup→encaissement, Admin disputes, Admin DLQ replay, Admin Finance Monitoring)
+- **10 UX principles non négociables** : mobile-first, boring UX > flashy, zero confusion finance, explicit statuses, optimistic UI limitée, skeleton loaders, offline tolerance minimale (photos uniquement), WCAG AA, error clarity, destructive actions confirmées
+- **Architecture frontend cible** : Expo + expo-router + TanStack Query + Zustand + NativeWind (mobile) ; Vite + shadcn/ui + TanStack Query + Tailwind (admin)
+- **Design System** : fondations actées cahier v1.4 (vert `#22c55e`, blanc, sobre, radius 16-20 px) — composants maison mobile, shadcn/ui admin
+- **Découpage proposé en 4 sous-PRDs** :
+  - `PRD-005A — Mobile Core UX` (P0, Sprint 5)
+  - `PRD-005B — Admin Tooling UX` (P1, Sprint 5/6)
+  - `PRD-005C — Realtime + Notifications` (P2, Sprint 6/7)
+  - `PRD-005D — Growth & Onboarding optimization` (P3, Sprint 7+)
+- **Inventaire dépendances backend** : 19 endpoints existants réutilisables ; 15 endpoints manquants ou à confirmer (aucun codé en Discover)
+- **Risks** : 6 UX (dont 3 🔴 confusion paiement / double-tap / KYC abandon), 8 tech, 4 process
+- **15 Open Questions CTO** : 4 RESOLVED dès Discover (mono-app, offline scope, commission, renumérotation), 11 à trancher avant Design
+
+**Renumérotation backlog** :
+
+- `PRD-005` initial (Disputes / Litiges) → renuméroté en **`PRD-006`** (Sprint 6/7)
+- `PRD-006` initial (Notifications avancées + reporting) → renuméroté en **`PRD-007`** (Sprint 8+)
+
+**Gates Discover → Design** (rappel PRD §12.2) :
+
+1. PRD-004 Verify opérationnel `STABLE` ou `Go prod éligible`
+2. Open questions §10 toutes `RESOLVED`
+3. Owner produit nommé (Q12)
+4. Décision designer (Q8)
+5. Sign-off CTO explicite
+
+**Garde-fou Build** : aucun fichier sous `apps/mobile/**` ou `apps/admin/**` ne peut être modifié tant que Discover n'est pas `DISCOVER_DONE` ET Design 005A n'est pas `DESIGN_DONE` ET PRD-004 n'est pas activé `FF=true` validé production (ou recette 72h `STABLE`). Tout commit `feat(*)` avant ces 3 conditions = `revert` immédiat.
+
+Mise à jour [`docs/prd/README.md`](docs/prd/README.md) : PRD-005 = Product Experience, schéma de dépendances actualisé, Sprint 5 rattaché à PRD-005.
+
 ### Verify (fermeture engineering `FIN-ITER2-DEBTS`) — PRD-004 §4.15.17 — 2026-05-13
 
 ✅ **Les 5 sous-dettes `FIN-ITER2-DEBTS` sont closes en code** sur la branche `feat/fin-iter2-debts` (PR unique) :
