@@ -25,7 +25,7 @@
 | [PRD-002](PRD-002-missions-geolocalisation.md) | `missions-geolocalisation` | Missions & Géolocalisation (entity, états, scheduling, matching PostGIS) | ✅ `DONE` | S2 | CTO | `senior-dev` + `architecte-api` + `mobile` | [`v0.2.0-missions-foundation`](../../CHANGELOG.md) |
 | [PRD-003](PRD-003-photos-paiements.md) | `photos-paiements` | Photos AVANT/APRÈS + Stripe Connect Express (capture manual + delayed transfer + auto-release T+48h ouvrées + DLQ + reconcile + refunds admin) | 🟧 `RELEASE_CANDIDATE` (Build + Verify validés CTO PR #11 #12 #13 — étapes humaines restantes : smoke recette/preprod, perf §6.3, sign-off RGPD, tag) | S3 | CTO | `architecte-api` + `securite` + `stripe` + `photos-rgpd` | _en attente tag `v3.0.0-prd003`_ |
 | [PRD-004](PRD-004-hardening-ops-compliance.md) | `hardening-ops-compliance` | Hardening, Ops & Compliance (Sentry/OTel + retry/recovery BullMQ + admin tooling UI + RGPD avancé + monitoring financier) — 5 tickets (4.1 → 4.5) | 🟧 `BUILD_DONE_PENDING_VERIFY_OPS` (engineering `READY` PR #29 mergée — Verify opérationnel recette 72h en cours sous `FF_FINANCE_MONITORING_ENABLED=true`) | S4 | _à désigner_ | `ingenieur` + `architecte-api` + `photos-rgpd` + `stripe` | — |
-| [PRD-005](PRD-005-product-experience.md) | `product-experience` | Product Experience (Mobile + Admin) — backend stable, on construit l'expérience utilisateur. Découpage en sous-PRDs 005A (Mobile Core UX), 005B (Admin Tooling UX), 005C (Realtime + Notifications), 005D (Growth) | 🟡 `DISCOVER_DRAFT` (ouvert 2026-05-13 — validation CTO requise, dépendant PRD-004 `DONE`) | S5 | _à désigner_ | `seniordev-frontend` + `mobile` (Build) ; `product-architect` + `ux-strategist` (Discover) | — |
+| [PRD-005](PRD-005-product-experience.md) | `product-experience` | Product Experience (Mobile + Admin) — backend stable, on construit l'expérience utilisateur. Découpage en sous-PRDs 005A (Mobile Core UX), 005B (Admin Tooling UX), 005C (Realtime + Notifications), 005D (Growth) | ✅ `DISCOVER_DONE` (2026-05-13 — arbitrages CTO §10 ; ouverture Design 005A soumise aux **gates §12.2** du PRD-005) | S5 | **Kyria** (PO) | `seniordev-frontend` + `mobile` (Build) ; `product-architect` + `ux-strategist` (Discover) | — |
 
 ---
 
@@ -36,7 +36,7 @@ PRD-001 (Auth)                                ← ✅ DONE
    └─→ PRD-002 (Missions & Géolocalisation)   ← ✅ DONE
           └─→ PRD-003 (Photos + Paiements Stripe Connect escrow)   ← 🟧 Release-candidate
                  └─→ PRD-004 (Hardening, Ops & Compliance)   ← 🟧 Verify ops 72h en cours (FF=true recette)
-                        └─→ PRD-005 (Product Experience — Mobile + Admin) ← 🟡 Discover Draft
+                        └─→ PRD-005 (Product Experience — Mobile + Admin) ← ✅ Discover Done (Design bloqué gates §12.2)
                                ├─→ PRD-005A (Mobile Core UX)        — Sprint 5 P0
                                ├─→ PRD-005B (Admin Tooling UX)      — Sprint 5/6 P1
                                ├─→ PRD-005C (Realtime + Notifications) — Sprint 6/7 P2
@@ -62,7 +62,7 @@ PRD-004 doit atteindre `DONE` (production validée `FF_FINANCE_MONITORING_ENABLE
 | **Sprint 2** | PRD-002 Missions & Géolocalisation | ✅ Terminé (`v0.2.0-missions-foundation` — sign-off CTO 2026-05-12) | [PRD-002](PRD-002-missions-geolocalisation.md) + [audit Verify](../security-reviews/2026-05-12-prd-002-missions-build-verify.md) |
 | **Sprint 3** | PRD-003 Photos AVANT/APRÈS + Stripe Connect Express | 🟧 Release-candidate (Build + Verify validés CTO PR #11 #12 #13 — étapes humaines restantes avant tag `v3.0.0-prd003`) | [PRD-003](PRD-003-photos-paiements.md) + [audit Verify final](../verify/PRD-003-audit-securite-ticket-3-6.md) + [runbook release](../release/v3.0.0-prd003.md) |
 | **Sprint 4** | PRD-004 Hardening, Ops & Compliance (Sentry/OTel + retry/recovery + admin UI + RGPD + monitoring financier) | 🟧 Build engineering `READY` (PR #29 mergée 2026-05-13) — Verify opérationnel 72h en cours sous `FF=true` recette | [PRD-004](PRD-004-hardening-ops-compliance.md) + [package observation 72h](../security-reviews/operational-72h-final-report.md) |
-| **Sprint 5** | PRD-005 Product Experience (Mobile + Admin) — Discover ouvert, Build conditionnel à PRD-004 `DONE` | 🟡 Discover Draft 2026-05-13 — découpage 005A/B/C/D proposé | [PRD-005](PRD-005-product-experience.md) |
+| **Sprint 5** | PRD-005 Product Experience (Mobile + Admin) — Discover **clôturé** ; Design 005A **non ouvert** tant que gates §12.2 (Sprint 4 + FF prod + sign-offs) | ✅ `DISCOVER_DONE` 2026-05-13 — Build front **interdit** §12.3 | [PRD-005](PRD-005-product-experience.md) §12.2–12.3 |
 | Sprint 6+ | PRD-006 (Disputes / Litiges) → PRD-007 (Notifications avancées + reporting) — bloqués tant que PRD-005A/B non `DONE` | ⏳ Backlog | — |
 
 ---
