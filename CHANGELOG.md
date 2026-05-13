@@ -12,6 +12,23 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### PRD-005 Discover finalized — Product Experience — Sprint 5 — 2026-05-13
+
+✅ **Statut** : `DISCOVER_DONE` (PRD-005 v0.2) — doc-only ; **aucun** code `apps/mobile` ni `apps/admin`.
+
+Clôture officielle de la phase Discover après **arbitrages CTO** intégrés dans [PRD-005 — Product Experience](docs/prd/PRD-005-product-experience.md) :
+
+- **§10** : 15 Open Questions → toutes `RESOLVED` (tableau avec décision, rationale, impacts)
+- **§5.11** : Principes MVP Produit (boring UX, stabilité > innovation, polling > realtime, finance clarity, observability-first, …)
+- **§5.12** : Frontend Non-Goals MVP (pas chat temps réel, pas WebSocket, pas live tracking GPS continu, pas offline complexe, pas analytics SDK, …)
+- **§12.2** : Gates avant Design 005A (Sprint 4 clos, `FF=true` prod stable, observation runtime, rollback testé, sign-offs DPO + CTO Sprint 4)
+- **§12.3** : Interdiction de Build prématuré (`feat(*)` interdit sur mobile/admin avant gates + Design 005A)
+- **Métadonnées** : Owner produit **Kyria** ; version PRD **0.2**
+
+Arbitrages notables : **Realtime + push FCM → PRD-005C uniquement** ; **Admin Web MVP → VPN/internal** ; **pas de designer ni copywriter MVP** ; **analytics → PRD-005D** ; **validation manuelle avant T+48h confirmée** ; **pas de GPS continu MVP**.
+
+Mise à jour [`docs/prd/README.md`](docs/prd/README.md) : PRD-005 → `DISCOVER_DONE`, Owner produit Kyria, arbre de dépendances et ligne Sprint 5.
+
 ### Discover ouvert — PRD-005 Product Experience (Mobile + Admin) — Sprint 5 — 2026-05-13
 
 🟡 **Statut** : `DISCOVER_DRAFT` — doc-only, aucun code runtime modifié, validation CTO requise pour passage en Design.
