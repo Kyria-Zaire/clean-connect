@@ -367,20 +367,41 @@ export class FinanceRepository {
   /**
    * Build itération 2 — Liste les Payment modifiés/créés sur la fenêtre [from, to]
    * (modulo les missions DISPUTE_OPEN qui sont volontairement exclues — ADR-018 §2.8 cas A).
-   * Ordonné par `updatedAt` desc pour permettre une fenêtre glissante stable.
+   * Ordonné par `updatedAt` desc, `id` desc pour une pagination cursor stable
+   * (`FIN-RECONCILE-PAGING` PRD §4.15.17).
+   *
+   * Cursor (keyset) : première page `cursor=null` ; pages suivantes
+   * `cursor = { updatedAt, id }` du **dernier** élément de la page précédente
+   * (tuple strictement plus petit que le curseur dans l'ordre desc).
    */
   async listRecentPaymentsForReconcile(args: {
     from: Date
     to: Date
     limit: number
+    cursor?: { updatedAt: Date; id: string } | null
   }): Promise<readonly PaymentBundle[]> {
     const take = Math.min(Math.max(args.limit, 1), 1000)
+    const cursorWhere: Prisma.PaymentWhereInput | undefined =
+      args.cursor != null
+        ? {
+            OR: [
+              { updatedAt: { lt: args.cursor.updatedAt } },
+              {
+                AND: [{ updatedAt: args.cursor.updatedAt }, { id: { lt: args.cursor.id } }],
+              },
+            ],
+          }
+        : undefined
+
     const rows = await this.prisma.payment.findMany({
       where: {
-        updatedAt: { gte: args.from, lte: args.to },
-        mission: { status: { not: 'DISPUTE_OPEN' } },
+        AND: [
+          { updatedAt: { gte: args.from, lte: args.to } },
+          { mission: { status: { not: 'DISPUTE_OPEN' } } },
+          ...(cursorWhere ? [cursorWhere] : []),
+        ],
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       take,
       include: {
         transfer: true,

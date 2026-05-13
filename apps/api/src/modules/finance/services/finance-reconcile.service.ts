@@ -31,24 +31,14 @@ import { FinanceMismatchService } from './finance-mismatch.service'
  *    garantit qu'un re-run sur le même runId est sans effet.
  *  - **Anti-overlap (Verify F1)** — le manual run et le cron passent par le même
  *    `FINANCE_LOCK_KEYS.reconcile`.
- *  - **Resource cap** — fenêtre 7j + `RECONCILE_BATCH_SIZE` plafonné pour éviter
- *    une charge incontrôlée. Les itérations suivantes traitent le reste.
- *
- * TODO(debt) iteration-3 :
- *  - Si > batch size, planifier un sous-run pour la suite (curseur `updatedAt`)
- *  - Mode "missing-only" pour redémarrer sans tout retrebrasser
- *  - Détection MISSING_DB côté Stripe (Transfers/Refunds créés directement
- *    depuis le dashboard) — nécessite un `stripe.events.list` ⇒ ADR future.
+ *  - **Pagination bornée (`FIN-RECONCILE-PAGING` PRD §4.15.17)** — fenêtre 7j +
+ *    boucle cursor `updatedAt,id` avec `FINANCE_RECONCILE_BATCH_SIZE` ×
+ *    `FINANCE_RECONCILE_MAX_PAGES` plafond absolu. Log `window_truncated` si la
+ *    fenêtre dépasse le budget (aucune correction automatique).
  */
 @Injectable()
 export class FinanceReconcileService {
   private readonly logger = new Logger(FinanceReconcileService.name)
-  /**
-   * Plafond de Payments scannés par run reconcile. Borne dure pour éviter une
-   * dégradation Stripe (max 25 req/s × 3 retrieve par Payment = ~8 Payments/s).
-   * 600 Payments = ~5 min worst-case en respectant le rate-limit.
-   */
-  private static readonly RECONCILE_BATCH_SIZE = 600
   private readonly clock: InvariantClock = { now: () => new Date() }
 
   constructor(
@@ -169,31 +159,66 @@ export class FinanceReconcileService {
     let resourcesScanned = 0
 
     try {
-      const bundles = await this.repo.listRecentPaymentsForReconcile({
-        from: windowFrom,
-        to: windowTo,
-        limit: FinanceReconcileService.RECONCILE_BATCH_SIZE,
-      })
-      resourcesScanned = bundles.length
+      const env = loadEnv()
+      const batchSize = env.FINANCE_RECONCILE_BATCH_SIZE
+      const maxPages = env.FINANCE_RECONCILE_MAX_PAGES
 
-      for (const bundle of bundles) {
-        const stripeBundle = await this.fetchStripeBundle(bundle)
-        const input: PaymentInvariantInput = {
-          payment: bundle.payment,
-          transfer: bundle.transfer,
-          refunds: bundle.refunds,
-          stripe: stripeBundle,
+      let cursor: { updatedAt: Date; id: string } | undefined
+      let pagesProcessed = 0
+      let lastBatchLen = 0
+
+      while (pagesProcessed < maxPages) {
+        const bundles = await this.repo.listRecentPaymentsForReconcile({
+          from: windowFrom,
+          to: windowTo,
+          limit: batchSize,
+          cursor: cursor ?? null,
+        })
+        lastBatchLen = bundles.length
+        if (bundles.length === 0) break
+
+        resourcesScanned += bundles.length
+
+        for (const bundle of bundles) {
+          const stripeBundle = await this.fetchStripeBundle(bundle)
+          const input: PaymentInvariantInput = {
+            payment: bundle.payment,
+            transfer: bundle.transfer,
+            refunds: bundle.refunds,
+            stripe: stripeBundle,
+          }
+
+          for (const inv of RECONCILE_INVARIANTS) {
+            const result = inv.apply(input, this.clock)
+            if (!result) continue
+            const persisted = await this.mismatches.persist({
+              runId,
+              invariantBreak: result,
+            })
+            if (persisted.persisted === 'created') mismatchesFound += 1
+            if (persisted.alerted) alertsEmitted += 1
+          }
         }
 
-        for (const inv of RECONCILE_INVARIANTS) {
-          const result = inv.apply(input, this.clock)
-          if (!result) continue
-          const persisted = await this.mismatches.persist({
-            runId,
-            invariantBreak: result,
-          })
-          if (persisted.persisted === 'created') mismatchesFound += 1
-          if (persisted.alerted) alertsEmitted += 1
+        pagesProcessed += 1
+        if (bundles.length < batchSize) break
+
+        const last = bundles[bundles.length - 1]
+        if (!last) break
+        cursor = { updatedAt: last.payment.updatedAt, id: last.payment.id }
+      }
+
+      if (pagesProcessed === maxPages && lastBatchLen === batchSize) {
+        const peek = await this.repo.listRecentPaymentsForReconcile({
+          from: windowFrom,
+          to: windowTo,
+          limit: 1,
+          cursor: cursor ?? null,
+        })
+        if (peek.length > 0) {
+          this.logger.warn(
+            `finance.reconcile.run.window_truncated runId=${runId} maxPages=${maxPages} batchSize=${batchSize} scanned=${resourcesScanned}`,
+          )
         }
       }
 

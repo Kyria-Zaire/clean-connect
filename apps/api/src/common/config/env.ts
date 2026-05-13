@@ -233,6 +233,20 @@ const envSchema = z
     FINANCE_MANUAL_RUN_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(1).max(60).default(1),
 
     /**
+     * PRD-004 §4.15.17 `FIN-RECONCILE-PAGING` — taille max d'une page de Payments
+     * scannés par run `RECONCILE` (borne Stripe + DB). Default 600 (Design
+     * itération 2). Tests intégration peuvent descendre à 2–10.
+     */
+    FINANCE_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(600).default(600),
+
+    /**
+     * PRD-004 §4.15.17 `FIN-RECONCILE-PAGING` — nombre max d'itérations cursor
+     * (`batchSize` × `maxPages` = plafond absolu de Payments par run). Default
+     * 100 ⇒ 60 000 rows worst-case (largement > fenêtre 7j attendue MVP).
+     */
+    FINANCE_RECONCILE_MAX_PAGES: z.coerce.number().int().min(1).max(500).default(100),
+
+    /**
      * PRD-004 Ticket 4.5 — Rétention `FinanceMismatch` RESOLVED/IGNORED (jours).
      * OQ-12. Default 90 j. `0` ⇒ purge désactivée (debug only).
      */
