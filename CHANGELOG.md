@@ -30,6 +30,12 @@ Rapport complémentaire : [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-
 
 **Verify final** : [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md`](docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md) — verdict **engineering READY** (0 Critical / 0 Important), checklists smoke recette + DPO + CTO incluses.
 
+**Package opérationnel activation FF=true** (PR #29) :
+
+- 🛠️ [`docs/runbooks/finance-monitoring-activation.md`](docs/runbooks/finance-monitoring-activation.md) — runbook activation recette/prod + rollback immédiat (FF=false en < 2 min)
+- 📋 [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md`](docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md) — template rapport smoke (à dupliquer par exécution)
+- 🛡️ [`docs/dpo/finance-monitoring-rgpd-summary.md`](docs/dpo/finance-monitoring-rgpd-summary.md) — package DPO (inventaire données + rétention + sous-traitants + sign-off)
+
 ### Verify (sign-off CTO intermédiaire) — PRD-004 Ticket 4.5 Monitoring financier — 2026-05-13
 
 🟡 **Statut : `READY WITH DEBT` — merge autorisé sous `FF_FINANCE_MONITORING_ENABLED=false` par défaut. Activation production interdite tant que `FIN-ITER2-DEBTS` n'est pas clos.**
