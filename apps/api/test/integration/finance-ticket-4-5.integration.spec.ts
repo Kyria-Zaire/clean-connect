@@ -186,6 +186,8 @@ describe('PRD-004 Ticket 4.5 — finance monitoring (integration)', () => {
     const reconcile = app.get(FinanceReconcileService)
     const locks = app.get(FinanceSchedulerLockService)
     const key = FINANCE_LOCK_KEYS.reconcile
+    /** UUID frais : le quota manuel 1/h est par admin ; un id fixe collisionne avec d'autres specs DB partagée. */
+    const adminUserId = randomUUID()
 
     const beforeRunCount = await prisma.financeReconciliationRun.count({
       where: { type: 'RECONCILE' },
@@ -195,9 +197,7 @@ describe('PRD-004 Ticket 4.5 — finance monitoring (integration)', () => {
     expect(handle).not.toBeNull()
 
     try {
-      await expect(reconcile.runManual('00000000-0000-4000-8000-000000000abc')).rejects.toMatchObject(
-        { status: 409 },
-      )
+      await expect(reconcile.runManual(adminUserId)).rejects.toMatchObject({ status: 409 })
     } finally {
       await locks.release(handle!)
     }
@@ -205,6 +205,21 @@ describe('PRD-004 Ticket 4.5 — finance monitoring (integration)', () => {
     const afterRunCount = await prisma.financeReconciliationRun.count({
       where: { type: 'RECONCILE' },
     })
-    expect(afterRunCount).toBe(beforeRunCount)
+    // FIN-MANUAL-RATELIMIT : réservation atomique (1 row RUNNING) avant le lock ;
+    // lock busy → failRun(`lock_busy`) — une ligne d'audit FAILED, pas de zombie RUNNING.
+    expect(afterRunCount).toBe(beforeRunCount + 1)
+
+    const failedLockBusy = await prisma.financeReconciliationRun.findFirst({
+      where: {
+        type: 'RECONCILE',
+        status: 'FAILED',
+        failureMessage: 'lock_busy',
+        triggeredByUserId: adminUserId,
+      },
+      orderBy: { startedAt: 'desc' },
+      select: { id: true, completedAt: true },
+    })
+    expect(failedLockBusy).not.toBeNull()
+    expect(failedLockBusy!.completedAt).not.toBeNull()
   })
 })
