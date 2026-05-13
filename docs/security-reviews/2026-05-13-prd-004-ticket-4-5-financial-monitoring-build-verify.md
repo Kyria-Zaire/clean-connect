@@ -339,3 +339,27 @@ Activation production **interdite** tant que :
 ---
 
 *Section itération 2 produite le 2026-05-13 — `feat/prd-004-ticket-4.5-financial-monitoring-build` @ HEAD post-itération 2.*
+
+---
+
+# Fermeture engineering `FIN-ITER2-DEBTS` — branche `feat/fin-iter2-debts` (2026-05-13)
+
+**Périmètre** : PR unique fermant les 5 sous-dettes PRD §4.15.17 (`#24`–`#28`).
+
+| Dette | Livrable principal | Tests |
+|---|---|---|
+| **FIN-MANUAL-RATELIMIT** | `pg_advisory_xact_lock` + `count+INSERT` transactionnel (`FinanceRepository.tryReserveManualRun`) ; `429` / `409` documentés | `finance-iter2-debts.integration.spec.ts` |
+| **FIN-STALE-RUNS** | `markAllStaleRunningRunsFailed` + `FINANCE_RUN_TYPE_MAX_AGE_MS` ; pre-tick sur **tous** les schedulers finance | idem |
+| **FIN-RECONCILE-PAGING** | Cursor keyset `updatedAt,id` + `FINANCE_RECONCILE_BATCH_SIZE` / `FINANCE_RECONCILE_MAX_PAGES` (Zod) | `finance-reconcile-paging.integration.spec.ts` |
+| **FIN-WEBHOOK-TESTS** | Concurrence `Promise.all` 2× POST identiques → 1 row DB + `idempotent` mixte | `payments-webhook.integration.spec.ts` |
+| **FIN-DAILY-EMAIL** | `fetch` HTTPS Resend + alerte P1 `finance_daily_report_failed` (email **ou** génération) | `finance-daily-report-email.integration.spec.ts` |
+
+**Verdict engineering (hors gate DPO / activation prod)** : ✅ **`FIN-ITER2-DEBTS` clos en code** — sous réserve de **CI verte** + **STOP CTO** sur la PR.
+
+**Verdict activation `FF_FINANCE_MONITORING_ENABLED=true` (recette puis prod)** : ⏳ inchangé — exige encore **smoke recette**, **Verify final** (0 Critical / 0 Important), **DPO** + **CTO** sign-off (cf. PRD §4.15.17).
+
+**Limites résiduelles (hors scope dettes)** :
+
+- `MISSING_STRIPE` **mismatch reconcile** (objet Stripe 404 vs DB) : pas d’invariant dédié `FIN-I-012` dans cette PR — la dette `FIN-WEBHOOK-TESTS` est levée sur **l’axe idempotence webhook concurrent** ; la piste invariant `MISSING_STRIPE` reste `TODO(debt)` / ADR si besoin métier.
+- F3 historique (`deepSanitize` strings dans `context` alerte) : non ré-ouverte ; les nouveaux `context` `finance_daily_report_failed` ne contiennent que `stage` + `detail` tronqué.
+

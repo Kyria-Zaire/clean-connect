@@ -247,6 +247,26 @@ const envSchema = z
     FINANCE_RECONCILE_MAX_PAGES: z.coerce.number().int().min(1).max(500).default(100),
 
     /**
+     * PRD-004 §4.15.17 `FIN-DAILY-EMAIL` — Resend REST (`api.resend.com/emails`).
+     * Tous optionnels : absence totale ⇒ email daily report désactivé (silent skip).
+     */
+    RESEND_API_KEY: z
+      .string()
+      .min(8)
+      .optional()
+      .or(z.literal('').transform(() => undefined)),
+    FINANCE_DAILY_REPORT_EMAIL_TO: z
+      .string()
+      .email()
+      .optional()
+      .or(z.literal('').transform(() => undefined)),
+    RESEND_FROM_EMAIL: z
+      .string()
+      .email()
+      .optional()
+      .or(z.literal('').transform(() => undefined)),
+
+    /**
      * PRD-004 Ticket 4.5 — Rétention `FinanceMismatch` RESOLVED/IGNORED (jours).
      * OQ-12. Default 90 j. `0` ⇒ purge désactivée (debug only).
      */

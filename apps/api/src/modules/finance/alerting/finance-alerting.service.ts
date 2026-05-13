@@ -51,6 +51,7 @@ export const FINANCE_ALERT_KINDS = [
   'finance_reconcile_failed',
   'finance_report_missing',
   'finance_payout_anomaly',
+  'finance_daily_report_failed',
 ] as const
 
 export type FinanceAlertKind = (typeof FINANCE_ALERT_KINDS)[number]
@@ -66,6 +67,7 @@ const COOLDOWN_TABLE_MS: Record<FinanceAlertKind, number> = {
   finance_reconcile_failed: 30 * 60_000,
   finance_report_missing: 24 * 60 * 60_000,
   finance_payout_anomaly: 24 * 60 * 60_000,
+  finance_daily_report_failed: 60 * 60_000,
 }
 
 export interface FinanceAlertPayload {

@@ -381,9 +381,8 @@ export class FinanceRepository {
     cursor?: { updatedAt: Date; id: string } | null
   }): Promise<readonly PaymentBundle[]> {
     const take = Math.min(Math.max(args.limit, 1), 1000)
-    const cursorWhere: Prisma.PaymentWhereInput | undefined =
-      args.cursor != null
-        ? {
+    const cursorWhere: Prisma.PaymentWhereInput | undefined = args.cursor
+      ? {
             OR: [
               { updatedAt: { lt: args.cursor.updatedAt } },
               {
