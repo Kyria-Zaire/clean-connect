@@ -1299,6 +1299,15 @@ Tous mitigations applicables au **Build** — aucun risque ne bloque le passage 
 | **FIN-STALE-RUNS** | Étendre `markStaleRunningRunsFailed` aux `FinanceRunType.STUCK_FUNDS`, `INVARIANTS`, `PAYOUT_ANOMALY`, `DAILY_REPORT` (aujourd'hui appliqué surtout au `RECONCILE`). Test dédié simulant un run `RUNNING` orphelin pour chaque type. | ✅ **Oui** | `apps/api/src/modules/finance/finance.repository.ts` + schedulers concernés (S3 Verify itération 1) |
 | **FIN-WEBHOOK-TESTS** | Couverture intégration : (a) duplicate `stripe_event_id` côté webhook consommé sans créer de doublon, (b) `MISSING_STRIPE` (objet présent côté Stripe absent côté DB). Validation explicite que la reconcile produit le `mismatchCode` attendu sans correction. | ✅ **Oui** | `apps/api/test/integration/*.spec.ts` (à compléter) |
 
+> **Mise à jour 2026-05-13 — branche `feat/fin-iter2-debts`** : les cinq lignes ci-dessus sont **implémentées et testées** (dette `FIN-WEBHOOK-TESTS` partiellement : **idempotence concurrente** ✅ ; invariant reconcile `MISSING_STRIPE` dédié = `TODO(debt)` métier / ADR). Le **ticket documentaire** `FIN-ITER2-DEBTS` reste la checklist jusqu’au merge CI + STOP CTO ; l’activation `FF=true` reste soumise au bloc « Conditions de levée du ticket » ci-dessous (Verify final **READY**, DPO, CTO).
+
+> **Verify final 2026-05-13** : rapport [`2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md`](../security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md) — verdict **engineering READY** (0 Critical / 0 Important). Gates restants pour activation production : **CI verte PR**, **smoke recette FF=true**, **DPO sign-off**, **CTO sign-off** (cf. §6/§7/§8 du rapport).
+>
+> **Package opérationnel 2026-05-13** (PR #29) :
+> - 🛠️ **Runbook activation** : [`docs/runbooks/finance-monitoring-activation.md`](../runbooks/finance-monitoring-activation.md) — procédure FF=true recette/prod + rollback immédiat
+> - 📋 **Template smoke recette** : [`2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md`](../security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md) — à dupliquer par exécution
+> - 🛡️ **Package DPO** : [`docs/dpo/finance-monitoring-rgpd-summary.md`](../dpo/finance-monitoring-rgpd-summary.md) — inventaire données, rétention, sous-traitants, sign-off requis
+
 **Conditions de levée du ticket** :
 
 1. Les 5 sous-dettes ci-dessus sont closes (PR + tests verts + relecture sécu spot).

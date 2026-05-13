@@ -104,6 +104,32 @@ export class FinanceRepository {
     return res.count
   }
 
+  /**
+   * `FIN-STALE-RUNS` (PRD-004 §4.15.17) — Variante générique qui couvre tous
+   * les `FinanceRunType`. Utile en début de tick `@Cron` pour nettoyer un run
+   * orphelin laissé par un worker crashé avant le `release` du lock (le lock
+   * lui-même expire seul via TTL, mais le row `FinanceReconciliationRun`
+   * resterait `RUNNING` indéfiniment sans ce cleanup).
+   *
+   * Le `maxAgeMs` est par-type pour rester cohérent avec `FINANCE_LOCK_TTL_MS`
+   * (ex. `report` = 10 min, `reconcile` = 15 min). On reprend le mapping
+   * `FINANCE_RUN_TYPE_TO_LOCK_KEY` et `FINANCE_LOCK_TTL_MS` côté caller.
+   *
+   * Retourne le total de rows mis en `FAILED` (tous types confondus).
+   */
+  async markAllStaleRunningRunsFailed(
+    maxAgeByType: Readonly<Record<FinanceRunType, number>>,
+  ): Promise<number> {
+    let total = 0
+    const types = Object.keys(maxAgeByType) as FinanceRunType[]
+    for (const t of types) {
+      const maxAgeMs = maxAgeByType[t]
+      if (typeof maxAgeMs !== 'number' || maxAgeMs <= 0) continue
+      total += await this.markStaleRunningRunsFailed(t, maxAgeMs)
+    }
+    return total
+  }
+
   async createMismatch(args: {
     runId: string
     mismatchCode: FinanceInvariantCode
@@ -229,6 +255,61 @@ export class FinanceRepository {
     })
   }
 
+  /**
+   * `FIN-MANUAL-RATELIMIT` (PRD-004 §4.15.17) — Réservation atomique d'un
+   * `FinanceReconciliationRun` manuel pour ADMIN, OQ-13 (1 run/heure/admin).
+   *
+   * Pattern : `pg_advisory_xact_lock(hashtext('finance.manual_rate:<userId>'))`
+   *  → toute autre TX qui tente `tryReserveManualRun` pour le **même user**
+   *  est sérialisée derrière la 1ère. Lock relâché à `COMMIT` / `ROLLBACK`.
+   *
+   * Pourquoi pas `SERIALIZABLE` global : on veut éviter la contention
+   * inter-utilisateurs et les `SerializationError` aléatoires. L'advisory
+   * lock scope `userId` est plus précis et compatible 1 instance / N admins.
+   *
+   * Retourne :
+   *  - `{ ok: true, runId }` si quota disponible (row `RUNNING` créée).
+   *  - `{ ok: false, reason: 'rate_limited' }` si `count >= limit`.
+   *
+   * Le runId créé reste `RUNNING` jusqu'à `completeRun` / `failRun` —
+   * c'est `FIN-STALE-RUNS` qui couvre les crashs.
+   */
+  async tryReserveManualRun(args: {
+    userId: string
+    limit: number
+    since: Date
+    windowFrom: Date
+    windowTo: Date
+  }): Promise<{ ok: true; runId: string } | { ok: false; reason: 'rate_limited' }> {
+    return this.prisma.$transaction(async (tx) => {
+      const lockKey = `finance.manual_rate:${args.userId}`
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`
+
+      const count = await tx.financeReconciliationRun.count({
+        where: {
+          type: 'RECONCILE',
+          triggeredByUserId: args.userId,
+          startedAt: { gte: args.since },
+        },
+      })
+      if (count >= args.limit) {
+        return { ok: false as const, reason: 'rate_limited' as const }
+      }
+
+      const row = await tx.financeReconciliationRun.create({
+        data: {
+          type: 'RECONCILE',
+          status: 'RUNNING',
+          windowFrom: args.windowFrom,
+          windowTo: args.windowTo,
+          triggeredByUserId: args.userId,
+        },
+        select: { id: true },
+      })
+      return { ok: true as const, runId: row.id }
+    })
+  }
+
   async upsertDailyReport(args: {
     reportDate: Date
     windowFrom: Date
@@ -286,20 +367,40 @@ export class FinanceRepository {
   /**
    * Build itération 2 — Liste les Payment modifiés/créés sur la fenêtre [from, to]
    * (modulo les missions DISPUTE_OPEN qui sont volontairement exclues — ADR-018 §2.8 cas A).
-   * Ordonné par `updatedAt` desc pour permettre une fenêtre glissante stable.
+   * Ordonné par `updatedAt` desc, `id` desc pour une pagination cursor stable
+   * (`FIN-RECONCILE-PAGING` PRD §4.15.17).
+   *
+   * Cursor (keyset) : première page `cursor=null` ; pages suivantes
+   * `cursor = { updatedAt, id }` du **dernier** élément de la page précédente
+   * (tuple strictement plus petit que le curseur dans l'ordre desc).
    */
   async listRecentPaymentsForReconcile(args: {
     from: Date
     to: Date
     limit: number
+    cursor?: { updatedAt: Date; id: string } | null
   }): Promise<readonly PaymentBundle[]> {
     const take = Math.min(Math.max(args.limit, 1), 1000)
+    const cursorWhere: Prisma.PaymentWhereInput | undefined = args.cursor
+      ? {
+            OR: [
+              { updatedAt: { lt: args.cursor.updatedAt } },
+              {
+                AND: [{ updatedAt: args.cursor.updatedAt }, { id: { lt: args.cursor.id } }],
+              },
+            ],
+          }
+        : undefined
+
     const rows = await this.prisma.payment.findMany({
       where: {
-        updatedAt: { gte: args.from, lte: args.to },
-        mission: { status: { not: 'DISPUTE_OPEN' } },
+        AND: [
+          { updatedAt: { gte: args.from, lte: args.to } },
+          { mission: { status: { not: 'DISPUTE_OPEN' } } },
+          ...(cursorWhere ? [cursorWhere] : []),
+        ],
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       take,
       include: {
         transfer: true,

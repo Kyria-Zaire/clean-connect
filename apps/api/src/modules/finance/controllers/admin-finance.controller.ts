@@ -14,7 +14,6 @@ import {
   Controller,
   Get,
   HttpCode,
-  HttpException,
   HttpStatus,
   NotFoundException,
   Param,
@@ -29,7 +28,6 @@ import { FinanceMismatchStatus, Prisma, Role } from '@prisma/client'
 import { createZodDto } from 'nestjs-zod'
 import { z } from 'zod'
 
-import { loadEnv } from '../../../common/config/env'
 import { PrismaService } from '../../../common/prisma/prisma.service'
 import { deepSanitize } from '../../../common/security/sanitize'
 import { CurrentUser } from '../../auth/decorators/current-user.decorator'
@@ -168,17 +166,14 @@ export class AdminFinanceController {
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({ summary: 'Déclencher un run finance manuel (ADMIN — OQ-13)' })
   async manualRun(@CurrentUser() user: AuthenticatedUser): Promise<{ accepted: true; runId: string }> {
-    const env = loadEnv()
-    const since = new Date(Date.now() - 60 * 60_000)
-    const count = await this.repo.countManualRunsSince(user.id, since)
-    if (count >= env.FINANCE_MANUAL_RUN_RATE_LIMIT_PER_HOUR) {
-      throw new HttpException({ error: 'FINANCE_MANUAL_RUN_RATE_LIMIT' }, HttpStatus.TOO_MANY_REQUESTS)
-    }
-
-    // TODO(debt): rendre `count` + `createRun` atomique (transaction SERIALIZABLE
-    // ou compteur Redis) pour éviter une race entre 2 requêtes simultanées du
-    // même admin. MVP : risque acceptable (1 → 2 dans le pire cas, atténué par
-    // le lock `reconcile` côté `FinanceReconcileService.runManual`).
+    /*
+     * `FIN-MANUAL-RATELIMIT` (PRD-004 §4.15.17) — la garde rate-limit OQ-13
+     * (`429`) est désormais **atomique** côté service :
+     *   `reconcile.runManual` → `repo.tryReserveManualRun` (advisory lock
+     *   user-scoped + `count + INSERT` même transaction Postgres).
+     * Le `409 FINANCE_RECONCILE_BUSY` reste géré par le même service (lock
+     * global reconcile). On laisse remonter telles quelles via NestJS.
+     */
     const { runId } = await this.reconcile.runManual(user.id)
 
     await this.writeMissionAuditEvent({

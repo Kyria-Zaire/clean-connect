@@ -12,6 +12,30 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Verify (fermeture engineering `FIN-ITER2-DEBTS`) — PRD-004 §4.15.17 — 2026-05-13
+
+✅ **Les 5 sous-dettes `FIN-ITER2-DEBTS` sont closes en code** sur la branche `feat/fin-iter2-debts` (PR unique) :
+
+| Code | Résumé |
+|---|---|
+| `FIN-MANUAL-RATELIMIT` | Rate-limit OQ-13 atomique (`pg_advisory_xact_lock` + transaction `count+INSERT`) |
+| `FIN-STALE-RUNS` | `markAllStaleRunningRunsFailed` tous `FinanceRunType` + pre-tick schedulers |
+| `FIN-RECONCILE-PAGING` | Cursor `updatedAt,id` + `FINANCE_RECONCILE_BATCH_SIZE` / `MAX_PAGES` (Zod) |
+| `FIN-WEBHOOK-TESTS` | Test concurrence duplicate `stripe_event_id` (webhook) |
+| `FIN-DAILY-EMAIL` | Envoi Resend (`fetch` HTTPS) + alerte P1 `finance_daily_report_failed` |
+
+**Rappel** : l'activation **`FF_FINANCE_MONITORING_ENABLED=true`** en recette puis prod reste soumise à **smoke recette**, **Verify final** (0 Critical / 0 Important), **DPO** + **CTO** — cf. PRD §4.15.17.
+
+Rapport complémentaire : [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md`](docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md) — section « Fermeture engineering `FIN-ITER2-DEBTS` ».
+
+**Verify final** : [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md`](docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md) — verdict **engineering READY** (0 Critical / 0 Important), checklists smoke recette + DPO + CTO incluses.
+
+**Package opérationnel activation FF=true** (PR #29) :
+
+- 🛠️ [`docs/runbooks/finance-monitoring-activation.md`](docs/runbooks/finance-monitoring-activation.md) — runbook activation recette/prod + rollback immédiat (FF=false en < 2 min)
+- 📋 [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md`](docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md) — template rapport smoke (à dupliquer par exécution)
+- 🛡️ [`docs/dpo/finance-monitoring-rgpd-summary.md`](docs/dpo/finance-monitoring-rgpd-summary.md) — package DPO (inventaire données + rétention + sous-traitants + sign-off)
+
 ### Verify (sign-off CTO intermédiaire) — PRD-004 Ticket 4.5 Monitoring financier — 2026-05-13
 
 🟡 **Statut : `READY WITH DEBT` — merge autorisé sous `FF_FINANCE_MONITORING_ENABLED=false` par défaut. Activation production interdite tant que `FIN-ITER2-DEBTS` n'est pas clos.**
