@@ -12,6 +12,31 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Ops package observation 72 h — PRD-004 §4.15.17 — 2026-05-13 (post-merge PR #29)
+
+Préparation de la **fenêtre d'observation 72 h** sous `FF_FINANCE_MONITORING_ENABLED=true` en recette. Artefacts uniquement (aucune modification code applicatif, aucune migration). Cible : passer recette **STABLE → Go prod éligible**.
+
+Documents ajoutés sur la branche `chore/finance-recette-ops-package` :
+
+- 📊 [`docs/security-reviews/operational-72h-final-report.md`](docs/security-reviews/operational-72h-final-report.md) — template rapport final 72 h (indicateurs agrégés, mismatches, schedulers, sécurité, incidents, rollback, verdict Go/No-Go)
+- 📋 [`docs/security-reviews/operational-72h-checkpoint-template.md`](docs/security-reviews/operational-72h-checkpoint-template.md) — template **checkpoint** à dupliquer 7× (T+15min, T+1h, T+4h, T+12h, T+24h, T+48h, T+72h)
+- 🆘 [`docs/runbooks/finance-monitoring-incident-playbook.md`](docs/runbooks/finance-monitoring-incident-playbook.md) — playbook incident P0/P1/P2/P3 + procédure rollback < 2 min + template post-mortem
+- 🔧 [`scripts/finance-monitoring-snapshot.sh`](scripts/finance-monitoring-snapshot.sh) + [`scripts/finance-monitoring-snapshot.ps1`](scripts/finance-monitoring-snapshot.ps1) — collecte automatique des 9 indicateurs de surveillance (cardinalité Prom, alertes/h, retries, zombies, locks PG, memory, Redis, schedulers, PII sample) — **read-only**, pas de side effect
+
+**Cadence d'exécution attendue par SRE** : 7 checkpoints sur 72 h, snapshot scripté à chaque cadence, agrégation finale dans le rapport `operational-72h-final-report-rec-YYYY-MM-DD.md`, décision Go/No-Go via [`docs/runbooks/finance-monitoring-go-no-go-prod.md`](docs/runbooks/finance-monitoring-go-no-go-prod.md).
+
+**Garde-fou** : interdictions strictes pendant les 72 h (aucune nouvelle feature, aucun refactor, aucun fix opportuniste, aucune migration) — cf. `incident-playbook.md` §5.
+
+### Ops package recette — PRD-004 §4.15.17 — 2026-05-13 (post-merge PR #29)
+
+PR #29 mergée en squash sur `main` (commit `c3cbb06`). Issues #24-#28 fermées automatiquement. **Aucune migration Prisma** dans le merge → rollback `FF=false` trivial.
+
+Artefacts ops complémentaires (branche `chore/finance-recette-ops-package`) :
+
+- 📋 [`docs/security-reviews/operational-smoke-rec-2026-05-13.md`](docs/security-reviews/operational-smoke-rec-2026-05-13.md) — rapport smoke recette pré-rempli (à compléter par SRE en exécution réelle)
+- 👁️ [`docs/runbooks/finance-monitoring-72h-surveillance.md`](docs/runbooks/finance-monitoring-72h-surveillance.md) — checklist surveillance 72 h (cardinalité, alert fatigue, drift, memory, locks)
+- 🚦 [`docs/runbooks/finance-monitoring-go-no-go-prod.md`](docs/runbooks/finance-monitoring-go-no-go-prod.md) — grille décision Go/No-Go production (10 critères Go + 8 critères No-Go + sign-offs)
+
 ### Verify (fermeture engineering `FIN-ITER2-DEBTS`) — PRD-004 §4.15.17 — 2026-05-13
 
 ✅ **Les 5 sous-dettes `FIN-ITER2-DEBTS` sont closes en code** sur la branche `feat/fin-iter2-debts` (PR unique) :
