@@ -204,5 +204,31 @@ describe('POST /api/v1/webhooks/stripe (PRD-003 Ticket 3.1)', () => {
       expect(rows).toHaveLength(1)
       await cleanupEvent(eventId)
     })
+
+    /**
+     * `FIN-WEBHOOK-TESTS` (PRD-004 §4.15.17 #28) — concurrence : 2 POST
+     * identiques simultanés ⇒ exactement **une** insertion DB + l'autre
+     * retourne `idempotent: true` (race sur contrainte unique PK).
+     */
+    it('concurrence 2× POST identiques → 1 insert + 1 idempotent (pas de double side-effect DB)', async () => {
+      const eventId = `evt_int_concurrent_${Date.now()}`
+      const { rawBody, signature } = buildSignedRequest({ eventId, livemode: false })
+
+      const [a, b] = await Promise.all([
+        postWebhook(rawBody, signature),
+        postWebhook(rawBody, signature),
+      ])
+      expect(a.status).toBe(202)
+      expect(b.status).toBe(202)
+
+      const idempFlags = [a.body.idempotent, b.body.idempotent].sort()
+      expect(idempFlags).toEqual([false, true])
+
+      const rows = await prisma!.stripeWebhookEvent.findMany({
+        where: { stripeEventId: eventId },
+      })
+      expect(rows).toHaveLength(1)
+      await cleanupEvent(eventId)
+    })
   })
 })
