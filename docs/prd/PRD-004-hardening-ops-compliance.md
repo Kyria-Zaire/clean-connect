@@ -1307,6 +1307,12 @@ Tous mitigations applicables au **Build** — aucun risque ne bloque le passage 
 > - 🛠️ **Runbook activation** : [`docs/runbooks/finance-monitoring-activation.md`](../runbooks/finance-monitoring-activation.md) — procédure FF=true recette/prod + rollback immédiat
 > - 📋 **Template smoke recette** : [`2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md`](../security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-operational-smoke.md) — à dupliquer par exécution
 > - 🛡️ **Package DPO** : [`docs/dpo/finance-monitoring-rgpd-summary.md`](../dpo/finance-monitoring-rgpd-summary.md) — inventaire données, rétention, sous-traitants, sign-off requis
+>
+> **Package observation 72 h** (branche `chore/finance-recette-ops-package`) :
+> - 📊 **Rapport final 72 h** : [`docs/security-reviews/operational-72h-final-report.md`](../security-reviews/operational-72h-final-report.md) — template à finaliser à T+72h
+> - 📋 **Checkpoint template** : [`docs/security-reviews/operational-72h-checkpoint-template.md`](../security-reviews/operational-72h-checkpoint-template.md) — à dupliquer 7× (T+15min → T+72h)
+> - 🆘 **Playbook incident** : [`docs/runbooks/finance-monitoring-incident-playbook.md`](../runbooks/finance-monitoring-incident-playbook.md) — classification P0/P1/P2/P3 + rollback < 2 min + post-mortem
+> - 🔧 **Snapshot script** : `scripts/finance-monitoring-snapshot.{sh,ps1}` — collecte automatique 9 indicateurs (read-only)
 
 **Conditions de levée du ticket** :
 
