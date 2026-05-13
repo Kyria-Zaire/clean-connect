@@ -2,7 +2,7 @@
 
 > **PRD** = *Product Requirements Document*
 > Sprint 5 — Product Experience.
-> Méthode appliquée : [BMAD-light](../method/BMAD.md) — phase **Discover** uniquement.
+> Méthode appliquée : [BMAD-light](../method/BMAD.md) — phase **Discover clôturée** (`DISCOVER_DONE`). **Design 005A non ouvert** tant que les gates §12.2 ne sont pas remplis.
 > Référence métier : [Cahier des charges v1.4](../CAHIER-DES-CHARGES-v1.4.md).
 
 ---
@@ -14,20 +14,21 @@
 | **ID** | `PRD-005` |
 | **Slug** | `product-experience` |
 | **Titre** | Product Experience (Mobile + Admin) |
-| **Version PRD** | `0.1` |
-| **Statut** | `DISCOVER_DRAFT` |
-| **Owner produit** | *à désigner — CTO valide en sortie Discover* |
+| **Version PRD** | `0.2` |
+| **Statut** | `DISCOVER_DONE` |
+| **Owner produit** | **Kyria** (Product Owner — arbitrage CTO Q12) |
 | **Owner technique** | `seniordev-frontend` + `mobile` (Build) ; `product-architect` (Discover) |
 | **Persona pilote (Discover)** | `product-architect` + `mobile-lead` + `frontend-lead` + `ux-strategist` |
 | **Créé le** | 2026-05-13 |
 | **Mis à jour le** | 2026-05-13 |
-| **Cible de release** | MVP produit (post-PRD-004 `DONE`) |
+| **Discover clôturé le** | 2026-05-13 (arbitrages CTO intégrés — doc-only) |
+| **Cible de release** | MVP produit (post-PRD-004 `DONE` + gates §12.2) |
 | **T-shirt size** | `XL` (Discover découpé en sous-PRDs 005A → 005D) |
 | **Lien Cahier v1.4** | §1 (Vision), §2 (App unique mobile), §3 (Stack), §10 (Roadmap MVP), §11 (Critères MVP) |
-| **Dépendances amont** | PRD-001 ✅ DONE, PRD-002 ✅ DONE, PRD-003 🟧 RC, PRD-004 ⏳ Verify opérationnel en cours |
+| **Dépendances amont** | PRD-001 ✅ DONE, PRD-002 ✅ DONE, PRD-003 🟧 RC, PRD-004 ⏳ Verify opérationnel en cours (Sprint 4) |
 | **Bloque** | PRD-006 (Disputes/Litiges produit), PRD-007 (Notifications avancées) |
 
-> 🚨 **Garde-fou Discover** : ce PRD est **doc-only**. Aucun écran codé, aucun composant React, aucun changement API, aucune migration, aucun changement runtime. Le Build NE DOIT PAS commencer avant validation CTO + sortie de la phase Verify opérationnelle PRD-004 (FF=true production stable).
+> 🚨 **Garde-fou** : ce PRD reste **doc-only**. Aucun écran codé, aucun composant React, aucun changement API, aucune migration, aucun changement runtime. **Build frontend interdit** tant que §12.2 + §12.3 ne sont pas satisfaits (même avec `DISCOVER_DONE`).
 
 ---
 
@@ -94,6 +95,8 @@ PRD-005 est le sprint où Clean Connect devient une expérience que l'on peut **
 - ❌ **Application web prestataire** (mobile only — décision cahier v1.4 §2)
 - ❌ **Multi-langue** (français uniquement MVP — zone Soissons)
 - ❌ **Disputes/litiges process complet** (renvoyé en PRD-006 — un PRD dédié, trop transverse)
+- ❌ **Notifications push FCM** en MVP 005A/005B (renvoyé **exclusivement** en PRD-005C — Q3 CTO)
+- ❌ **SDK analytics produit** (PostHog, Mixpanel, etc.) en MVP 005A/005B (renvoyé en PRD-005D — Q9 CTO)
 
 ---
 
@@ -154,7 +157,7 @@ PRD-005 est le sprint où Clean Connect devient une expérience que l'on peut **
 | # | Surface | Technologie (cahier v1.4) | Personas | Statut actuel |
 |---|---|---|---|---|
 | **A** | **Mobile App** (binaire unique) | Expo SDK 51+ + expo-router + RoleGuard | Client + Prestataire | Bootstrap PRD-001/002, écrans à construire |
-| **B** | **Admin Web Console** | Vite + React + TS strict + TanStack Query | Admin Ops + Finance | Pas démarrée ; certaines routes API admin existent déjà (`/admin/dlq/*`, `/admin/finance/*`) |
+| **B** | **Admin Web Console** | Vite + React + TS strict + TanStack Query — **accès MVP : VPN / réseau interne uniquement** (Q4 CTO) | Admin Ops + Finance | Pas démarrée ; certaines routes API admin existent déjà (`/admin/dlq/*`, `/admin/finance/*`) |
 | **C** | **Site marketing** | *Hors scope MVP* | Visiteurs | Out of scope PRD-005 |
 | **D** | **Support console** | Inclus dans Admin Web (RBAC `SUPPORT`) | Support | Out of scope MVP — vue Support déléguée à Admin en lecture seule pour MVP |
 
@@ -208,6 +211,8 @@ apps/mobile/
 
 ### 3.3 Architecture frontend cible — Admin Web
 
+> **Arbitrage CTO Q4 (DISCOVER_DONE)** : l’Admin Web MVP est servi **derrière VPN / réseau interne** (pas d’exposition Internet publique en MVP). Réduction de la surface d’attaque ; friction support acceptée (accès VPN obligatoire). Passage Internet public + JWT (recommandation Discover initiale) = **hors scope MVP**, réévaluable post-005B si DPO + `reviewer-securite-code` valident.
+
 | Couche | Choix Discover | Justification |
 |---|---|---|
 | Framework | **Vite + React + TS strict** | acté cahier v1.4 §3 |
@@ -215,7 +220,8 @@ apps/mobile/
 | State serveur | **TanStack Query** | cohérent mobile |
 | Formulaires | **react-hook-form + zod** | cohérent mobile |
 | Auth | **JWT cookies HttpOnly** ou Bearer header (à trancher en Design) | RBAC `ADMIN` / `FINANCE` / `SUPPORT` |
-| Composants | **shadcn/ui + Tailwind** | rapide à mettre en place, themable cohérent vert `#22c55e` |
+| Exposition réseau MVP | **VPN / internal only** | Q4 CTO — moindre surface d’attaque ; doc infra (ingress, IP allowlist, ou Zero Trust) en Design 005B |
+| Composants | **shadcn/ui + Tailwind** (Q7 CTO) | rapide à mettre en place, themable cohérent vert `#22c55e` |
 | Tables / data grid | **TanStack Table** | mismatches, runs, transfers, payouts, users |
 | Charts (finance) | **Recharts** ou **visx** | dashboards Finance Monitoring (build sur PRD-004) |
 | Dashboards finance | **Grafana embed** (iframe / link-out) | dashboards Grafana existants restent source de vérité ops |
@@ -249,7 +255,7 @@ apps/admin/
 | Sécurité | 3/5 | Surfaces front consomment APIs déjà durcies (JWT, RBAC, sanitize) ; nouveau surface admin = vecteur d'IDOR si mal géré | Audit `reviewer-securite-code` sur RBAC admin en Design |
 | RGPD | 4/5 | Support a accès à des données users — *minimisation* obligatoire (pas de carte, pas d'IBAN, pas de PII en logs front) | Cadrage Support read-only + DPO sign-off avant Build admin |
 | Financier | 2/5 | Aucune logique finance nouvelle ; uniquement lectures + actions admin déjà supportées par API | — |
-| UX (régression) | 4/5 | C'est *l'objet* du PRD : la moindre confusion paiement = perte de confiance | Maquettes Figma + tests utilisateurs en Design ; **zero confusion finance** = principe UX dur |
+| UX (régression) | 4/5 | C'est *l'objet* du PRD : la moindre confusion paiement = perte de confiance | Wireframes / specs écran + revue PO (Kyria) en Design — **pas de designer MVP** (Q8 CTO) ; **zero confusion finance** = principe UX dur |
 | Performance | 3/5 | Listes longues admin (mismatches, missions, users) — virtualisation + pagination | EXPLAIN ANALYZE des routes admin appelées (déjà keyset paging PRD-004) |
 | Disponibilité | 2/5 | Surfaces dégradent gracieusement (offline mobile partiel) | Plan d'erreur UI typé par feature |
 
@@ -261,7 +267,7 @@ apps/admin/
 - ☐ `apps/admin/**` — bootstrap Vite + premières pages
 - ☐ `apps/api/src/modules/users/**` — quelques endpoints admin read-only à compléter (P2 search, mission filter — à confirmer en §9)
 - ☐ `apps/api/src/modules/missions/**` — endpoint *audit timeline* (lecture seule, agrégation) — à confirmer en §9
-- ☐ `apps/api/src/modules/notifications/**` — endpoint topic subscription FCM (existant ?) à vérifier en §9
+- ☐ `apps/api/src/modules/notifications/**` — endpoint topic subscription FCM (existant ?) — **hors MVP 005A/005B**, cadré en PRD-005C (Q3 CTO)
 - ☐ `packages/shared-types` — DTOs réutilisés mobile + admin
 - ☐ `docs/api/PRD-003-openapi.yaml` ou nouveau fichier OpenAPI dédié admin
 
@@ -282,20 +288,22 @@ Signup ──► Login ──► Onboarding rôle (Client / Both)
               │
               └► Récap mission ──► Stripe SetupIntent (CB) ──► Confirmation
                     │
-                    └► État "Proposée" ──► Notification "Acceptée" ──► État "En cours"
+                    └► État "Proposée" ──► Rafraîchissement / badge in-app "Acceptée" ──► État "En cours"
                           │
                           └► Photos AVANT visibles ──► État "Terminée" ──► Photos APRÈS visibles
                                 │
-                                └► CTA "Valider" (libère séquestre) OU "Contester"
+                                └► CTA "Valider maintenant" (libère séquestre avant T+48h ouvrées si client le souhaite) OU "Contester"
                                       │
                                       └► Historique
 ```
+
+> **Arbitrage CTO Q14** : le bouton **« Valider maintenant »** (validation manuelle **avant** l’auto-release T+48h ouvrées) est **confirmé** — visible sur l’écran de détail mission terminée (secondaire visuellement par rapport à l’information « séquestre / auto-validation »), libellé clair, jamais ambigu avec « payer à nouveau ».
 
 **Points de friction Discover** :
 - 🟡 *Choix d'adresse* : autocomplete (API ? Mapbox ? Adresse.gouv.fr ?) → à trancher en Design 005A
 - 🟡 *Estimation prix* : affichage panier à l'écran avant CB → format `(durée × tarif horaire) + supplément urgence + 18 % commission` → décision Discover : on affiche **prix TTC client** sans détailler la commission (commission visible uniquement côté prestataire)
 - 🔴 *Séquestre* : message d'éducation explicite (« Votre paiement est mis en attente et libéré uniquement après votre validation ») — à co-écrire avec un copywriter
-- 🟡 *Photos visibles* : push notification ou simple badge in-app ?
+- 🟡 *Photos visibles* : rafraîchissement via **TanStack Query** (polling / focus) — **pas de push FCM en MVP** (Q3 CTO) ; push en PRD-005C
 - 🟡 *Bouton "Contester"* : doit être moins visible que "Valider" pour ne pas inciter (UX principle §5)
 
 ### 4.2 Flow Prestataire — Signup → 1ʳᵉ mission encaissée
@@ -307,7 +315,7 @@ Signup ──► Login ──► Onboarding rôle (Prestataire / Both)
               │
               └► Statut "En attente justificatifs" / "Actif"
                     │
-                    └► Tab "Tableau de bord" ──► Toggle disponibilité ──► Notification "Mission proche"
+                    └► Tab "Tableau de bord" ──► Toggle disponibilité (sans GPS continu — Q15 CTO) ──► Rafraîchissement liste « missions proches »
                           │
                           └► Détail mission (distance, prix, durée) ──► CTA "Accepter" ──► Navigation
                                 │
@@ -322,7 +330,7 @@ Signup ──► Login ──► Onboarding rôle (Prestataire / Both)
 
 **Points de friction Discover** :
 - 🔴 *Stripe Connect Express link* : abandon massif possible — préparer page "Pourquoi cette étape" + recovery email (PRD-007 ?)
-- 🟡 *Toggle disponibilité* : visible dès l'app launch ? écran dédié ? — UX strategist à trancher en Design
+- 🟢 *Toggle disponibilité* : **pas de tracking GPS continu en MVP** (Q15 CTO) — toggle binaire ; géoloc capturée à l’**acceptation** de mission et pendant la **navigation** vers le lieu (flux ponctuels), pas de watchPosition en arrière-plan.
 - 🟡 *Photos AVANT obligatoires* : règle dure backend (cahier §2 + PRD-003) → UI doit empêcher "Démarrer" sans photos AVANT sync ou en queue offline
 - 🔴 *Mode offline* : déjà cadré par PRD-003 — l'UI doit *signaler* clairement (banner "Mode hors-ligne — votre mission peut démarrer, photos en attente d'envoi") sans bloquer le travail
 - 🟡 *Suivi paiement* : différencier visuellement *En séquestre* (orange ?) vs *Payé* (vert) — terminologie utilisateur à valider
@@ -464,6 +472,37 @@ Toute action destructive (refund, suspendre user, ack DLQ, supprimer compte) :
 - Saisie texte de confirmation pour les montants > 200 € ou suppression de compte
 - Audit log systématique côté backend
 
+### 5.11 Principes MVP Produit
+
+> **Synthèse exécutive** — alignement CTO Discover closure. Ces principes priment sur toute tentation de « feature creep » avant stabilisation Sprint 4.
+
+| Principe | Signification opérationnelle |
+|---|---|
+| **Boring UX > fancy UX** | Pas d’animations décoratives, pas de micro-interactions « wow » ; lisibilité et prévisibilité avant tout (cf. §5.2). |
+| **Stabilité > innovation** | Pas de WebSocket, pas de realtime, pas d’IA matching tant que le cœur mission/paiement n’est pas irréprochable en prod. |
+| **Simplicité > exhaustivité** | Moins d’écrans bien faits que de demi-fonctionnalités ; parcours linéaires, CTA uniques par intention. |
+| **Polling > realtime** | TanStack Query `refetchInterval` / focus refetch / pull-to-refresh ; pas de socket MVP (Q2 CTO). |
+| **Explicit states** | Un statut mission + un statut paiement lisibles partout (cf. §5.4). |
+| **Finance clarity** | Zéro jargon Stripe côté utilisateur ; TTC client ; commission visible prestataire uniquement (§5.3, Q13). |
+| **Low operational complexity** | Admin derrière VPN ; pas d’infra push/analytics supplémentaire en MVP 005A/005B. |
+| **Fast iteration** | Petites PRs reviewables ; feature flags si besoin ; pas de big-bang release sans rollback documenté. |
+| **Observability-first** | Sentry + métriques existantes ; toute régression doit être visible avant que l’utilisateur ne tweete. |
+
+### 5.12 Frontend Non-Goals MVP (005A / 005B)
+
+> Liste **exhaustive des exclusions** pour les livrables Mobile Core + Admin Tooling tant que PRD-005C n’est pas ouvert.
+
+- ❌ **Chat temps réel** in-app (client ↔ prestataire)
+- ❌ **WebSocket** ou connexion longue durée quelconque
+- ❌ **Live tracking** / suivi GPS continu du prestataire (Q15 CTO — capture ponctuelle à l’acceptation / navigation mission uniquement)
+- ❌ **Offline complexe** au-delà de photos + lecture cache + démarrage mission (cf. §5.7)
+- ❌ **Animations lourdes** (Lottie, parallax, splash cinématique)
+- ❌ **Marketplace avancée** (multi-offres, enchères, scoring prestataire)
+- ❌ **IA / matching intelligent** (renvoyé backlog V2 / PRD-005D)
+- ❌ **Gamification** (badges, streaks, leaderboards)
+- ❌ **SDK analytics tiers** (PostHog, Mixpanel, etc.) — Q9 CTO → post-MVP / PRD-005D
+- ❌ **Copywriter / designer externes** — Q8/Q10 CTO : **copy et wireframes assurés en interne** (équipe + PO) pour MVP
+
 ---
 
 ## 6. Design System — fondations Discover
@@ -532,10 +571,10 @@ Discover-level decision : la **mission card** est le composant central de l'app.
 
 | Priorité | Sous-PRD | Périmètre | Justification |
 |---|---|---|---|
-| **P0** | `PRD-005A — Mobile Core UX` | Flow Client (S1-S4) + Flow Prestataire (S5-S8) end-to-end | Sans ça, *aucun* utilisateur réel possible. Cœur produit. |
-| **P1** | `PRD-005B — Admin Tooling UX` | Disputes (lecture + actions), DLQ, Payments, Finance Monitoring (intégration PRD-004) | Sans ça, l'équipe Ops ne peut pas traiter un seul incident sans `psql`. Bloquant production. |
-| **P2** | `PRD-005C — Realtime + Notifications` | Push FCM différencié, badges in-app, chat client↔prestataire **basique** (statuts + notes courtes), notifications email transactionnelles | Améliore conversion sans bloquer le MVP. Peut être lancé avec push minimal en P0 + iterer. |
-| **P3** | `PRD-005D — Growth & Onboarding optimization` | Tracking analytics fin, onboarding KYC recovery, in-app messaging, A/B testing infra | Optimisation. Backlog post-launch immédiat. |
+| **P0** | `PRD-005A — Mobile Core UX` | Flow Client (S1-S4) + Flow Prestataire (S5-S8) end-to-end — **sans push FCM, sans WebSocket, sans analytics SDK** | Sans ça, *aucun* utilisateur réel possible. Cœur produit. |
+| **P1** | `PRD-005B — Admin Tooling UX` | Disputes (lecture + actions), DLQ, Payments, Finance Monitoring (intégration PRD-004) — **accès VPN/internal** | Sans ça, l'équipe Ops ne peut pas traiter un seul incident sans `psql`. Bloquant production. |
+| **P2** | `PRD-005C — Realtime + Notifications` | **Push FCM** topic-based, badges in-app, chat client↔prestataire **basique** (statuts + notes courtes), notifications email transactionnelles, **éventuellement** WebSocket si justifié post-MVP | Tout le **temps réel** et la **notification proactive** sont reportés ici (Q2 + Q3 CTO). |
+| **P3** | `PRD-005D — Growth & Onboarding optimization` | **SDK analytics** typés, dashboards conversion, recovery KYC avancée, in-app messaging, A/B testing infra | Q9 CTO : analytics **post-MVP** ; optimisation après preuve de traction. |
 
 ### 7.2 P0 — `PRD-005A` (Mobile Core UX)
 
@@ -543,29 +582,29 @@ Discover-level decision : la **mission card** est le composant central de l'app.
 
 **T-shirt size** : `L`
 **Dépendances backend** : ✅ Toutes existantes (PRD-001/002/003)
-**Dépendances UX** : maquettes Figma complètes par écran avant Build
+**Dépendances UX** : **pas de designer MVP** (Q8 CTO) — wireframes légers (Whimsical / Excalidraw / Figma minimal) + specs écran + revue **Product Owner (Kyria)** avant Build ; tests utilisateurs informels possibles en recette.
 
 ### 7.3 P1 — `PRD-005B` (Admin Tooling UX)
 
-**Doit livrer** : console admin Vite déployable, pages disputes / payments / DLQ / finance-monitoring, RBAC strict.
+**Doit livrer** : console admin Vite déployable **derrière VPN/internal**, pages disputes / payments / DLQ / finance-monitoring, RBAC strict.
 
 **T-shirt size** : `M`
 **Dépendances backend** : 2-3 endpoints admin à compléter (cf. §9) — **à confirmer Discover next iter**.
-**Dépendances UX** : maquettes admin (densité forte, table-heavy) — un designer différent du mobile recommandé
+**Dépendances UX** : wireframes **densité forte** (tables, filtres) — **pas de designer dédié** ; pair design dev + PO (Kyria).
 
 ### 7.4 P2 — `PRD-005C` (Realtime + Notifications)
 
-**Doit livrer** : push FCM topic-based, notifications email transactionnelles via SendGrid/Postmark, chat basique async.
+**Doit livrer** : push FCM topic-based, notifications email transactionnelles via SendGrid/Postmark, chat basique async, badges in-app — **première itération où le temps réel / push est autorisé** (Q2 + Q3 CTO).
 
 **T-shirt size** : `M`
-**Dépendances backend** : module `notifications` existant (vérifier exhaustivité Discover next iter) + nouveaux endpoints messages
+**Dépendances backend** : module `notifications` (exhaustivité à valider en Design 005C) + endpoints messages / topics FCM
 
 ### 7.5 P3 — `PRD-005D` (Growth & Onboarding optimization)
 
-**Doit livrer** : SDK analytics typés, dashboards conversion, recovery KYC, in-app messaging.
+**Doit livrer** : **SDK analytics** (choix DPO-safe en Design), dashboards conversion, recovery KYC avancée, in-app messaging, A/B testing infra.
 
 **T-shirt size** : `S`
-**Dépendances backend** : analytics côté API (events Pino → sink ? PostHog ? Mixpanel ?)
+**Dépendances backend** : instrumentation events (schéma à figer en Design 005D) — **post-MVP** (Q9 CTO)
 
 ### 7.6 Recommandation d'enchaînement Sprint 5+
 
@@ -636,9 +675,7 @@ Sprint 8+ ───► PRD-005D (Growth)                    ←  P3
 
 ### 8.3 WebSocket / realtime
 
-Discover-level decision : **pas de WebSocket en MVP PRD-005**.
-- Push FCM + polling court (TanStack `refetchInterval`) suffit pour MVP
-- WebSocket évalué dans `PRD-005C` (Realtime + Notifications) ou `PRD-006` (Disputes) — pas avant
+**Arbitrage CTO Q2 (DISCOVER_DONE)** : **pas de WebSocket** en MVP `PRD-005A` / `PRD-005B`. Polling TanStack Query (`refetchInterval`, focus refetch, pull-to-refresh) + invalidation explicite après mutations. **WebSocket / realtime** = périmètre **PRD-005C** uniquement, et seulement si un besoin métier le justifie après usage terrain.
 
 ### 8.4 APIs à stabiliser
 
@@ -658,7 +695,7 @@ Discover-level decision : **pas de WebSocket en MVP PRD-005**.
 | UX-3 | Photos AVANT non synchronisées au démarrage mission | 🟡 | UI offline banner clair + queue MMKV existante (PRD-003) + retry visible |
 | UX-4 | Échec upload photo lors prestation | 🟡 | Retry transparent + fallback "Réessayer plus tard" sans bloquer clôture |
 | UX-5 | Navigation profonde > 3 niveaux | 🟡 | expo-router stack rule : max 3 niveaux ; admin = 2 max |
-| UX-6 | Friction onboarding KYC Stripe → abandon prestataire | 🔴 | Recovery email + re-engagement push (PRD-005D) + page "Pourquoi" pré-redirect |
+| UX-6 | Friction onboarding KYC Stripe → abandon prestataire | 🔴 | Page « Pourquoi cette étape » + **copy interne** (Q10 CTO — pas de copywriter MVP) ; recovery avancée + push **en PRD-005C** (Q3) |
 
 ### 9.2 Tech risks
 
@@ -669,7 +706,7 @@ Discover-level decision : **pas de WebSocket en MVP PRD-005**.
 | T-3 | TanStack Query cache key collision multi-rôle BOTH | 🟡 | Préfixer cache keys par rôle actif (`['mode:client', ...]` / `['mode:presta', ...]`) |
 | T-4 | RBAC frontend bypassable (admin) | 🟢 | Frontend ne fait jamais autorité — backend RBAC déjà strict (PRD-004 audit) |
 | T-5 | Image upload reliability sur 3G | 🟡 | Compression 1600 px JPEG q75 (existant PRD-003) + chunked upload si > 500 KB |
-| T-6 | State consistency entre push notification reçue / écran ouvert | 🟡 | TanStack Query `invalidateQueries` au reçu push (handler natif) |
+| T-6 | State consistency entre notification push et écran ouvert | 🟢 | **MVP sans push** (Q3) : `invalidateQueries` sur focus / polling ; push + handler natif = **005C** |
 | T-7 | Memory leaks listes longues (admin) | 🟡 | TanStack Table + virtualisation (TanStack Virtual) |
 | T-8 | Différence iOS/Android comportement SecureStore | 🟢 | Déjà éprouvé PRD-001 |
 
@@ -677,35 +714,34 @@ Discover-level decision : **pas de WebSocket en MVP PRD-005**.
 
 | # | Risk | Sévérité | Mitigation Discover |
 |---|---|:-:|---|
-| P-1 | Sprint 5 démarre avant fin Verify opérationnel PRD-004 | 🔴 | Gate explicite : Discover OK, Design peut commencer dès FF=true validé recette, **Build interdit** avant `FF=true` validé prod ou recette 72h `STABLE` |
-| P-2 | Design dérive en Build (composants non figés) | 🟡 | Design 005A doit livrer Figma + spec composants + stories Storybook |
-| P-3 | Pas de designer dédié | 🔴 | **Open question §11** — décision CTO requise |
-| P-4 | Build commence sans copywriter | 🟡 | Copywriter freelance pour onboarding/séquestre/erreurs critiques au moins |
+| P-1 | Sprint 5 Build démarre avant fin Verify opérationnel PRD-004 | 🔴 | Gates §12.2 : **Sprint 4 clos**, `FF=true` prod stable, observation validée, rollback testé, sign-offs DPO+CTO ; **Build interdit** tant que non cochés |
+| P-2 | Design dérive en Build (composants non figés) | 🟡 | Design 005A doit livrer wireframes + spec composants + plan tests (pas d’exigence Figma lourd — Q8) |
+| P-3 | Pas de designer dédié | 🟢 | **Résolu Q8 CTO** : pas de designer MVP — wireframes légers + revue PO |
+| P-4 | Build commence sans copywriter | 🟢 | **Résolu Q10 CTO** : copy **interne** MVP ; affiner en PRD-005D si besoin |
 
 ---
 
-## 10. Open Questions CTO (à résoudre AVANT Design)
+## 10. Open Questions CTO — **toutes résolues** (clôture Discover 2026-05-13)
 
-> Aucune question ne peut rester `OPEN` au moment de basculer en Design.
-> Les décisions ci-dessous ont des implications structurantes (cost, time-to-market, dette).
+> **DISCOVER_DONE** : les 15 questions sont **`RESOLVED`**. Le passage en **Design 005A** reste **bloqué** par les gates §12.2 (Sprint 4 + prod + sign-offs), pas par des questions ouvertes.
 
-| # | Question | Statut | Réponse provisoire Discover | Owner |
-|---|---|---|---|---|
-| **Q1** | Mono-app vs app séparées Client / Prestataire ? | ✅ **RESOLVED** | **Mono-app** — décidé cahier v1.4 §2. Non rouvert. | CTO (déjà tranché) |
-| **Q2** | Realtime maintenant (WebSocket) ou plus tard ? | 🟡 OPEN | **Plus tard** (PRD-005C) — push FCM + polling court suffisent MVP | CTO |
-| **Q3** | Notifications push dans MVP (005A) ou dédiées (005C) ? | 🟡 OPEN | **Push minimal en 005A** (statuts critiques mission/paiement) + **élaboration 005C** | CTO |
-| **Q4** | Web Admin : public internet ou VPN/IP whitelist ? | 🟡 OPEN | Recommandation Discover : **internet public + JWT + RBAC + audit log** (pas VPN). VPN ajoute friction support sans gain de sécurité réel si auth solide. | CTO + reviewer-securite-code |
-| **Q5** | React Native Paper / Tamagui vs Design System maison ? | 🟡 OPEN | **DS maison NativeWind** — cf. §6.5. Refus libs opiniâtres. | mobile-lead + ux-strategist |
-| **Q6** | Profondeur support offline ? | ✅ **PARTIELLEMENT RESOLVED** | Offline limité aux photos + démarrage mission (cf. §5.7). Reste fermé. | senior-dev (BMAD) |
-| **Q7** | shadcn/ui vs Material UI vs Mantine pour admin ? | 🟡 OPEN | **shadcn/ui** — cf. §6.5 | seniordev-frontend |
-| **Q8** | Designer dédié à recruter ? Freelance ? Agence ? | 🔴 OPEN | À trancher CTO — Discover ne peut pas répondre seul. Bloque livraison maquettes Design. | CTO |
-| **Q9** | Analytics SDK : PostHog self-host vs Mixpanel SaaS vs maison ? | 🟡 OPEN | Renvoyé PRD-005D — pas bloquant 005A/B | CTO + DPO (impact RGPD) |
-| **Q10** | Copywriting : interne vs freelance ? | 🟡 OPEN | Recommandation : **freelance copywriter** au moins pour onboarding/séquestre/erreurs critiques | CTO |
-| **Q11** | Le PRD-005 actuel "Disputes/Litiges" listé dans README est renuméroté en PRD-006 ? | ✅ **RESOLVED** | **Oui** — Disputes/Litiges devient PRD-006, Notifications avancées devient PRD-007 (cf. mise à jour `docs/prd/README.md` dans cette même PR) | CTO (à confirmer) |
-| **Q12** | Maquettes Figma : qui les valide produit-side ? | 🔴 OPEN | Owner produit à désigner — bloque sortie Discover | CTO |
-| **Q13** | Détail commission (18%) visible aux 2 côtés ou prestataire seul ? | ✅ **RESOLVED** (cf. §5.3) | **Prestataire seul**. Client voit TTC final. | CTO valide en Design 005A |
-| **Q14** | Validation manuelle pré-T+48h ouvrées : bouton "Valider maintenant" client visible ou caché ? | 🟡 OPEN | Recommandation Discover : **visible** mais secondaire au sous-écran "Détail mission terminée". Validation principale = auto T+48h. | ux-strategist + CTO |
-| **Q15** | Toggle disponibilité prestataire : géoloc continue requise ? | 🟡 OPEN | Recommandation Discover : **non**. Toggle binaire (Disponible/Non) + geo capturée uniquement au moment d'accepter. Sinon dérive RGPD/batterie. | mobile-lead + DPO |
+| # | Question | Statut | Décision finale | Rationale | Impacts |
+|---:|---|---|---|---|---|
+| **Q1** | Mono-app vs apps séparées ? | ✅ **RESOLVED** | **Mono-app** (cahier v1.4 §2) | Décision structurante déjà actée | Un binaire, RoleGuard, code partagé |
+| **Q2** | Realtime / WebSocket MVP ? | ✅ **RESOLVED** | **Realtime uniquement en PRD-005C** | Stabilité > innovation ; réduit complexité ops et états concurrents | 005A/005B : **polling TanStack Query** uniquement (cf. §8.3) |
+| **Q3** | Push notifications MVP ? | ✅ **RESOLVED** | **Push uniquement en PRD-005C** | Aligné Q2 ; évite dépendance FCM + handlers natifs avant UX core stable | 005A : pas d’`expo-notifications` métier ; 005C : FCM + topics |
+| **Q4** | Admin Web exposition ? | ✅ **RESOLVED** | **VPN / réseau interne MVP** | Surface d’attaque minimale ; acceptable pour équipe restreinte | Ingress / Zero Trust / doc accès ; friction support assumée |
+| **Q5** | DS mobile ? | ✅ **RESOLVED** | **NativeWind + composants maison** | Contrôle total, alignement cahier « boring » | Pas de Paper / Tamagui |
+| **Q6** | Offline ? | ✅ **RESOLVED** | **Photos + démarrage mission + cache lecture** (§5.7) | Inchangé | Pas d’élargissement offline MVP |
+| **Q7** | Admin UI lib ? | ✅ **RESOLVED** | **shadcn/ui** | Déjà recommandé Discover ; arbitrage CTO confirme | Stack admin homogène |
+| **Q8** | Designer MVP ? | ✅ **RESOLVED** | **Pas de designer MVP** | Coût / délai ; MVP fonctionnel avant polish | Wireframes légers + specs + revue **PO (Kyria)** |
+| **Q9** | Analytics SDK ? | ✅ **RESOLVED** | **Post-MVP → PRD-005D** | Simplicité ; évite DPO/third-party avant traction | Pas d’instrumentation analytics produit en 005A/005B |
+| **Q10** | Copywriter MVP ? | ✅ **RESOLVED** | **Pas de copywriter MVP** | Aligné Q8 ; itération rapide | Copy **interne** ; revue PO |
+| **Q11** | Renumérotation PRD Disputes / Notif ? | ✅ **RESOLVED** | Disputes → **PRD-006**, Notif avancées → **PRD-007** | Cohérence index | Cf. `docs/prd/README.md` |
+| **Q12** | Owner produit / validation Design ? | ✅ **RESOLVED** | **Product Owner = Kyria** | Gouvernance claire | Kyria valide wireframes, specs, copy MVP avant Build |
+| **Q13** | Commission visible client ? | ✅ **RESOLVED** | **Prestataire seul** ; client TTC | Évite confusion tarifaire | Inchangé §5.3 |
+| **Q14** | Validation manuelle avant T+48h ? | ✅ **RESOLVED** | **Confirmée** — CTA « Valider maintenant » visible (secondaire) | Contrôle utilisateur ; réduit attente perçue | Flow §4.1 ; copy à soigner en Design |
+| **Q15** | GPS continu si disponible ? | ✅ **RESOLVED** | **Pas de tracking GPS continu MVP** | RGPD + batterie + complexité | Géoloc **ponctuelle** : acceptation mission, navigation vers lieu |
 
 ---
 
@@ -715,8 +751,8 @@ Discover-level decision : **pas de WebSocket en MVP PRD-005**.
 
 | Sous-PRD | Sprint cible | Périmètre | Dépendances |
 |---|---|---|---|
-| **`PRD-005A — Mobile Core UX`** | S5 | Flow Client (S1-S4) + Flow Prestataire (S5-S8) end-to-end, mobile uniquement | PRD-004 `DONE` + maquettes Figma |
-| **`PRD-005B — Admin Tooling UX`** | S5 (parallèle) ou S6 | Console Vite admin : disputes (lecture), DLQ, payments, finance-monitoring | PRD-005A en cours OK (équipes différentes mobile/admin) |
+| **`PRD-005A — Mobile Core UX`** | S5 | Flow Client (S1-S4) + Flow Prestataire (S5-S8) end-to-end, mobile uniquement — **sans push, sans designer MVP** | PRD-004 `DONE` + gates §12.2 + wireframes/specs validés PO |
+| **`PRD-005B — Admin Tooling UX`** | S5 (parallèle) ou S6 | Console Vite admin **VPN/internal** : disputes (lecture), DLQ, payments, finance-monitoring | PRD-005A en cours OK (équipes différentes mobile/admin) + infra VPN documentée |
 | **`PRD-005C — Realtime + Notifications`** | S6 ou S7 | Push FCM différencié, badges, chat basique, emails transactionnels | PRD-005A `DONE` |
 | **`PRD-005D — Growth & Onboarding optimization`** | S7+ | Analytics fin, recovery KYC, in-app messaging, A/B testing | PRD-005A `DONE` + observability mature |
 | **`PRD-006 — Disputes & Litiges`** (renumérotation ex-PRD-005) | S6 ou S7 | Process complet client / prestataire / admin / arbitrage / split paiement | PRD-005A + PRD-005B `DONE` |
@@ -724,42 +760,59 @@ Discover-level decision : **pas de WebSocket en MVP PRD-005**.
 
 ---
 
-## 12. Phase DESIGN — Non démarrée
+## 12. Phase DESIGN — **non ouverte** (gates §12.2)
 
-> Cette section reste vide. **Aucun élément Design ne peut être rempli ici** tant que la phase Discover n'est pas validée par le CTO et tant que la phase Verify opérationnelle de PRD-004 n'est pas close (FF=true validé prod).
+> `DISCOVER_DONE` **ne signifie pas** que le Design a commencé. Aucun livrable Design (wireframes détaillés, contrats UI, Zod, OpenAPI delta) n’est produit tant que les **gates §12.2** ne sont pas tous cochés et signés.
 
-### 12.1 Definition of Done — Discover (avant passage Design)
+### 12.1 Definition of Done — Discover (**clôturé**)
 
-- [x] PRD instancié avec ID, slug, statut `DISCOVER_DRAFT`
+- [x] PRD instancié avec ID, slug, statut `DISCOVER_DONE` (v0.2)
 - [x] Lien explicite vers cahier v1.4 (§1, §2, §3, §10, §11)
 - [x] ≥ 1 user story par persona (12 stories rédigées §2)
 - [x] Risk assessment renseigné (§3.4 + §9)
 - [x] Métriques de succès quantifiables (§1.3)
 - [x] Out of scope listé (§1.4)
-- [ ] Open questions toutes résolues (15 questions ouvertes — Q2/Q3/Q4/Q5/Q7/Q8/Q9/Q10/Q12/Q14/Q15 restent à trancher CTO)
-- [x] T-shirt size estimé (`XL` global, découpage proposé en sous-PRDs)
-- [ ] **Validation humaine** (CTO) : *en attente*
+- [x] Open questions **toutes** `RESOLVED` (§10 — 15/15)
+- [x] T-shirt size estimé (`XL` global, découpage en sous-PRDs)
+- [x] **Principes MVP Produit** + **Frontend Non-Goals MVP** documentés (§5.11, §5.12)
+- [x] **Gates avant Design 005A** + **Interdiction de Build prématuré** documentés (§12.2, §12.3)
+- [x] **Owner produit** nommé : **Kyria** (Q12)
+- [x] **Arbitrages CTO** intégrés au PRD (2026-05-13)
 
-> ⏳ **Validation Discover attendue** : CTO, date à fixer post-revue.
+> ✍️ **Discover clôturé** : arbitrages CTO documentés §10 — **signature humaine CTO** attendue sur la PR de merge (trace GitHub / sign-off interne).
 
-### 12.2 Conditions de passage en Design
+### 12.2 Gates avant Design 005A
 
-1. **PRD-004 status** : Verify opérationnel `STABLE` ou `Go prod éligible` (cf. `docs/security-reviews/operational-72h-final-report-rec-*.md`)
-2. **Open questions §10** : Q2, Q3, Q4, Q5, Q7, Q8, Q9, Q10, Q12, Q14, Q15 → toutes `RESOLVED`
-3. **Owner produit nommé** (Q12)
-4. **Désignation designer** (Q8) — produit ou outsourcing décidé
-5. **Sign-off CTO** explicite sur ce document, statut `DISCOVER_DONE`
+> **Conditions obligatoires** — toutes doivent être **satisfaites et traçables** avant d’ouvrir officiellement le document de Design `PRD-005A` (branche `design/prd-005a-*`, maquettes légères, contrats).
+
+| # | Gate | Preuve attendue |
+|---:|---|---|
+| G1 | **Sprint 4 officiellement clos** | PRD-004 en statut `DONE` (ou équivalent documenté équipe) + pas de dette Critical ouverte sans plan |
+| G2 | **`FF_FINANCE_MONITORING_ENABLED=true` stable en production** | Rapport ops / Grafana / absence d’incident P0 finance sur fenêtre définie |
+| G3 | **Runtime observation validée** | Rapport [`operational-72h-final-report-rec-*.md`](../security-reviews/operational-72h-final-report.md) complété — verdict **STABLE** ou **Go prod éligible** |
+| G4 | **Rollback testé** | Exercice ou incident documenté : `FF=false` + redémarrage + stabilité — durée cible **< 2 min** (cf. runbooks PRD-004) |
+| G5 | **DPO sign-off Sprint 4** | Trace écrite (email / outil interne) référencée dans le dossier release |
+| G6 | **CTO sign-off Sprint 4** | Idem — aligné Go/No-Go prod PRD-004 |
+
+> Tant qu’**une seule** ligne du tableau est non cochée → **Design 005A interdit** ; seule la poursuite Discover/ops (sans code front) est permise.
+
+### 12.3 Interdiction de Build prématuré
+
+> **Règle dure** — non négociable tant que **Design 005A** n’est pas officiellement ouvert **et** que les gates §12.2 ne sont pas remplis.
+
+- **Interdit** : tout commit `feat(*)` (ou équivalent fonctionnel) touchant `apps/mobile/**` ou `apps/admin/**`.
+- **Interdit** : tout scaffold d’écran, composant UI, route Expo, page Vite, hors branche **explicitement** `design/prd-005a-*` **après** ouverture Design constatée en réunion.
+- **Toléré** sur `main` / branches hors scope 005A : docs, scripts, config **sans** impact runtime front (cf. BMAD).
+
+**Sanction** : `revert` immédiat + post-mortem léger si violation.
 
 ---
 
 ## 13. Phase BUILD — Strictement interdite
 
-> **STOP CTO**. Aucun écran ne peut être codé tant que :
-> - Discover n'est pas `DISCOVER_DONE` (signature CTO)
-> - Design 005A (au moins) n'est pas `DESIGN_DONE` (maquettes Figma + composants + plan tests)
-> - PRD-004 n'est pas activé `FF=true` validé en production (ou à minima en recette 72h `STABLE`)
+> **Rappel** : même avec `DISCOVER_DONE`, le **Build frontend** reste **interdit** jusqu’aux gates §12.2 + ouverture Design 005A + `DESIGN_DONE` 005A. Voir **§12.3**.
 
-Tout commit `feat(*)` sur des fichiers `apps/mobile/**` ou `apps/admin/**` avant ces 3 conditions = à `revert`.
+Référence ops amont : PRD-004 Verify / [`finance-monitoring-go-no-go-prod.md`](../runbooks/finance-monitoring-go-no-go-prod.md).
 
 ---
 
@@ -774,10 +827,11 @@ Tout commit `feat(*)` sur des fichiers `apps/mobile/**` ou `apps/admin/**` avant
 | Tamagui | Trop de magic compile-time + courbe d'apprentissage ; NativeWind plus simple |
 | Material UI admin | Lourd, opiniâtre — shadcn/ui plus customisable |
 | Next.js pour admin | Pas besoin de SSR/SSG côté outil interne — Vite plus simple |
-| WebSocket dès MVP | Complexité ops vs gain UX limité ; push FCM + polling suffit |
+| WebSocket / push FCM en MVP 005A/005B | **Interdits** (Q2 + Q3 CTO) — réservés **PRD-005C** ; MVP = polling TanStack Query |
 | Multi-langue MVP | Zone de lancement Soissons seulement |
 | Chat realtime MVP | Renvoyé PRD-005C |
-| Analytics maison | Renvoyé PRD-005D — pas bloquant produit |
+| Analytics SDK (PostHog, etc.) en MVP 005A/005B | **Interdit** (Q9 CTO) — PRD-005D |
+| Admin Web exposé Internet public MVP | **Non retenu** (Q4 CTO) — VPN/internal |
 
 ### 14.2 Glossaire
 
@@ -809,12 +863,12 @@ Tout commit `feat(*)` sur des fichiers `apps/mobile/**` ou `apps/admin/**` avant
 
 ## 15. Checklist BMAD globale (à cocher au fil des phases)
 
-- [ ] **Discover** : DoD ✅ (§12.1) + validation humaine CTO — *en attente*
-- [ ] **Design** : par sous-PRD (005A/B/C/D)
-- [ ] **Build** : par sous-PRD — *strictement interdit avant Design done*
+- [x] **Discover** : DoD ✅ (§12.1) + arbitrages CTO intégrés — *signature CTO sur PR de merge (trace)*
+- [ ] **Design** : par sous-PRD (005A/B/C/D) — **bloqué** gates §12.2
+- [ ] **Build** : par sous-PRD — *strictement interdit avant §12.2 + Design 005A ouvert + `DESIGN_DONE` 005A* (§12.3)
 - [ ] **Verify** : par sous-PRD
 - [ ] PRD archivé, statut `DONE` global, version finale taguée
 
 ---
 
-*PRD-005 Clean Connect — Discover Draft v0.1 — créé le 2026-05-13 — méthode [BMAD-light](../method/BMAD.md) — cahier [v1.4](../CAHIER-DES-CHARGES-v1.4.md)*
+*PRD-005 Clean Connect — **DISCOVER_DONE** v0.2 — créé le 2026-05-13 — clôture Discover (arbitrages CTO) le 2026-05-13 — méthode [BMAD-light](../method/BMAD.md) — cahier [v1.4](../CAHIER-DES-CHARGES-v1.4.md)*
