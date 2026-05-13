@@ -28,6 +28,8 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 Rapport complémentaire : [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md`](docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md) — section « Fermeture engineering `FIN-ITER2-DEBTS` ».
 
+**Verify final** : [`docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md`](docs/security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md) — verdict **engineering READY** (0 Critical / 0 Important), checklists smoke recette + DPO + CTO incluses.
+
 ### Verify (sign-off CTO intermédiaire) — PRD-004 Ticket 4.5 Monitoring financier — 2026-05-13
 
 🟡 **Statut : `READY WITH DEBT` — merge autorisé sous `FF_FINANCE_MONITORING_ENABLED=false` par défaut. Activation production interdite tant que `FIN-ITER2-DEBTS` n'est pas clos.**

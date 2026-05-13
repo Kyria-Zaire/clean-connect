@@ -1301,6 +1301,8 @@ Tous mitigations applicables au **Build** — aucun risque ne bloque le passage 
 
 > **Mise à jour 2026-05-13 — branche `feat/fin-iter2-debts`** : les cinq lignes ci-dessus sont **implémentées et testées** (dette `FIN-WEBHOOK-TESTS` partiellement : **idempotence concurrente** ✅ ; invariant reconcile `MISSING_STRIPE` dédié = `TODO(debt)` métier / ADR). Le **ticket documentaire** `FIN-ITER2-DEBTS` reste la checklist jusqu’au merge CI + STOP CTO ; l’activation `FF=true` reste soumise au bloc « Conditions de levée du ticket » ci-dessous (Verify final **READY**, DPO, CTO).
 
+> **Verify final 2026-05-13** : rapport [`2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md`](../security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-verify-final.md) — verdict **engineering READY** (0 Critical / 0 Important). Gates restants pour activation production : **CI verte PR**, **smoke recette FF=true**, **DPO sign-off**, **CTO sign-off** (cf. §6/§7/§8 du rapport).
+
 **Conditions de levée du ticket** :
 
 1. Les 5 sous-dettes ci-dessus sont closes (PR + tests verts + relecture sécu spot).
