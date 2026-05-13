@@ -12,6 +12,22 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### UX Mapping Preparation — PRD-005 pré-Design 005A — Sprint 5 — 2026-05-13
+
+🧭 **Doc-only** — cartographie UX métier alignée sur le backend mergé (`schema.prisma`, state machines, exceptions HTTP). **Aucun** fichier `apps/mobile/**` ni `apps/admin/**`.
+
+Livrables :
+
+- [`docs/ux/README.md`](docs/ux/README.md) — index
+- [`docs/ux/state-glossary.md`](docs/ux/state-glossary.md) — glossaire back → front (MissionStatus, PaymentStatus, TransferStatus, RefundStatus, photos dérivées, FinanceMismatch*, AutoReleaseJob*, ProviderPayoutStatus, …)
+- [`docs/ux/mission-lifecycle-map.md`](docs/ux/mission-lifecycle-map.md) — graphe ASCII, transitions, tableaux par état, vue croisée paiement/transfer, schedulers, DLQ, idempotence, RACI actions critiques
+- [`docs/ux/client-user-flows.md`](docs/ux/client-user-flows.md) — flows client (onboarding, mission, paiement, validation, litige, refund passif, historique, erreurs)
+- [`docs/ux/provider-user-flows.md`](docs/ux/provider-user-flows.md) — flows prestataire (onboarding Connect, acceptation, upload offline-first, géoloc ponctuelle, `/complete`, transferts, support) + **TODO Design 005A** : endpoint liste missions assignées absent sur `main`
+- [`docs/ux/admin-operational-flows.md`](docs/ux/admin-operational-flows.md) — flows admin (finance, mismatches, run manuel `POST /v1/admin/finance/runs/manual` sans body, DLQ Stripe `GET/POST …/stripe-dead-letters`, refunds, observabilité)
+- [`docs/ux/error-and-edge-cases.md`](docs/ux/error-and-edge-cases.md) — offline / réseau instable (recommandations PRD-005), catalogue edge cases, mapping HTTP → UX incl. `FINANCE_MANUAL_RUN_RATE_LIMIT`, `FINANCE_RECONCILE_BUSY`, `FINANCE_MISMATCH_*`
+
+Contraintes respectées : boring UX, polling, pas WebSocket / push / IA / maquettes graphiques.
+
 ### Verify (fermeture engineering `FIN-ITER2-DEBTS`) — PRD-004 §4.15.17 — 2026-05-13
 
 ✅ **Les 5 sous-dettes `FIN-ITER2-DEBTS` sont closes en code** sur la branche `feat/fin-iter2-debts` (PR unique) :
