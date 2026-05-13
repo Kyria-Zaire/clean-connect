@@ -12,6 +12,27 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Sprint 4 — Decision Record de clôture (PENDING_OPS_EVIDENCE) — 2026-05-13
+
+🟡 **Statut** : `PENDING_OPS_EVIDENCE` — *aucune* étape humaine de clôture Sprint 4 n'a encore été exécutée. Doc-only.
+
+Ajout de [`docs/sprint-closure/sprint-4-closure-decision-record.md`](docs/sprint-closure/sprint-4-closure-decision-record.md) — **document unique** de clôture officielle Sprint 4, à remplir par CTO + DPO + SRE primaire + Reviewer sécu au fur et à mesure des actes humains :
+
+1. **§3** Recette : activation `FF_FINANCE_MONITORING_ENABLED=true` + rapport smoke
+2. **§4** Recette : observation 72h (7 checkpoints + rapport final + rollback testé)
+3. **§5** DPO : 5 questions + sign-off
+4. **§6** Réunion Go/No-Go (10 critères Go + 8 No-Go + 4 sign-offs)
+5. **§7** Production : activation `FF=true` + monitoring J+1 / J+7
+6. **§8** Verdict final Sprint 4 : `DONE` / `READY_WITH_DEBT` / `HOLD_RECETTE` / `BLOCKED`
+
+**Aucune valeur inventée** — tous les emplacements sont vides (`_`, ☐, « à compléter »). Aucune simulation d'ops.
+
+Conséquences en aval (§9) : si verdict = `DONE`/`READY_WITH_DEBT`, alors gates §12.2 PRD-005 G1-G6 sont franchies → Design 005A déblocable.
+
+> ⚠️ Cette PR ne ferme **pas** Sprint 4. Elle pose le **dossier vierge** que CTO + équipe rempliront. Tant que §3 → §8 ne sont pas remplis avec preuves traçables, le statut PRD-004 reste `BUILD_DONE_PENDING_VERIFY_OPS`.
+
+> 💡 Pré-requis recommandés avant remplissage du Decision Record : merger PR #30 (ops package) + PR #32 (PRD-005 Discover Done). Toutes deux MERGEABLE, CI verte.
+
 ### Verify (fermeture engineering `FIN-ITER2-DEBTS`) — PRD-004 §4.15.17 — 2026-05-13
 
 ✅ **Les 5 sous-dettes `FIN-ITER2-DEBTS` sont closes en code** sur la branche `feat/fin-iter2-debts` (PR unique) :
