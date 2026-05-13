@@ -73,7 +73,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         error = exception.name
       }
     } else if (exception instanceof Error) {
-      this.logger.error({ err: exception }, 'Unhandled exception')
+      this.logger?.error({ err: exception }, 'Unhandled exception')
     }
 
     // PRD-004 Ticket 4.1 (A1) — capture Sentry pour 5xx + non-HTTP exceptions.

@@ -40,6 +40,7 @@ export const STRIPE_OPERATIONS = [
   'payment_intents.capture',
   'payment_intents.retrieve',
   'refunds.create',
+  'refunds.retrieve',
   'transfers.create',
   'transfers.retrieve',
   'events.retrieve',

@@ -26,6 +26,20 @@
 
 ---
 
+## Dépendances critiques (Build Ticket 4.5 — ajustement CTO)
+
+> Si l'une de ces briques est indisponible, **le monitoring finance se dégrade** (pas forcément le paiement client immédiat). Utilisez cette section pour prioriser le diagnostic quand plusieurs alertes arrivent en même temps.
+
+| Dépendance | Impact monitoring finance | Symptômes typiques | Mitigation immédiate |
+|---|---|---|---|
+| **Stripe API** | impossible de comparer Stripe↔DB (`MISSING_STRIPE` / timeouts) | spikes `cleanconnect_stripe_api_failures_total`, runs `FAILED`, mismatches `MISSING_STRIPE` | vérifier statut Stripe + quotas ; **ne pas** multiplier les retries manuels ; attendre restore + relancer `POST /v1/admin/finance/runs/manual` (rate-limit) |
+| **Redis** | BullMQ / workers dégradés (webhooks / retries) — **pas** le lock finance DB | alertes 4.2 `dlq_growth` / `bullmq_failed_jobs` | isoler incident Redis ; vérifier que l'API reste healthy ; finance DB-only continue partiellement |
+| **PostgreSQL** | **bloquant** : pas de persistance `Finance*` / pas de lock anti-overlap | erreurs 5xx API, cron `FAILED`, `/metrics` OK mais DB down | bascule maintenance ; restaurer DB ; **ne pas** patcher en SQL direct hors runbook |
+| **Prometheus / Grafana** | perte de visibilité — **pas** de perte de détection côté DB | “silence radio” dashboards | vérifier scrape `/api/internal/metrics` + bearer ; fallback : lire tables `finance_*` + logs structurés |
+| **Resend / email** | daily report email KO — **dashboard/API** reste source de vérité | `finance_report_missing` | vérifier provider + quotas ; regénérer report après fix (pas d'auto-delete) |
+
+---
+
 ## Comment lire un mismatch — flux standard
 
 ```

@@ -1092,8 +1092,8 @@ type WebhookDeadLetterView = {
 
 | Table | Cardinalité estimée MVP | Rétention | Index utiles |
 |---|---|---|---|
-| `FinanceReconciliationRun` | ~4 rows/jour | 90 j si COMPLETED, indéfinie si FAILED | `(type, status, startedAt)` |
-| `FinanceMismatch` | < 5/jour MVP, < 50/jour cible PRD-005 | 90 j si RESOLVED/IGNORED, indéfinie si OPEN | `(status, severity, detectedAt)` + `(resourceKind, resourceId)` |
+| `FinanceReconciliationRun` | ~4 rows/jour | **90 j** si `COMPLETED` ; **conservés** si `FAILED` (investigation) jusqu'à résolution manuelle + purge ultérieure (Verify) | `(type, status, startedAt)` |
+| `FinanceMismatch` | < 5/jour MVP, < 50/jour cible PRD-005 | **90 j max** : `RESOLVED`/`IGNORED` via `resolvedAt` ; `OPEN`/`INVESTIGATING` via `detectedAt` (**pas de rétention indéfinie**, décision CTO OQ-12) | `(status, severity, detectedAt)` + `(resourceKind, resourceId)` |
 | `FinanceDailyReport` | 1 row/jour exactement | 5 ans (pratique comptable interne) | unique sur `reportDate` |
 | `FinanceAlert` | facultatif (cf. ADR-018 §2.4) | 30 j | `(severity, kind, emittedAt)` |
 
@@ -1187,17 +1187,17 @@ Contexte payload alert (whitelist `sanitizeForAlert`) : `mismatchId` (UUID inter
 
 #### 4.15.10 Open Questions CTO — Ticket 4.5 spécifiques
 
-> Numérotation OQ-10 → OQ-16 (suite OQ-1 → OQ-9 du Discover §3.3 PRD-004). À trancher AVANT Build Ticket 4.5.
+> Décisions CTO **tranchées** le 2026-05-12 (Build autorisé). Table d'archive — ne pas rouvrir sans nouvel arbitrage formel.
 
 | # | Question | Owner | Statut | Réponse / Reco |
 |---|---|---|---|---|
-| **OQ-10** | **Daily report** — email + dashboard, dashboard seul, ou email seul ? | CTO + finance | `RECO` | _Reco : **email récap quotidien CTO + finance** (5 KPIs essentiels) **+ dashboard `/admin/finance/daily-report/:date` source de vérité**. Cohérent OQ-7. À confirmer formellement._ |
-| **OQ-11** | **Mismatches** : stocker en DB (tables dédiées) OU se contenter des logs/metrics ? | CTO + ops | `RECO` | _Reco : **DB (4 tables dédiées)**. Justifications ADR-018 §2.4 : investigation > 30 j impossible avec logs, traçabilité audit obligatoire, drill-down UI nécessaire. **Décision Design retenue**._ |
-| **OQ-12** | **Rétention `FinanceMismatch`** : 90 j (RESOLVED/IGNORED) + indéfinie (OPEN) ? | CTO + DPO | `RECO` | _Reco : **90 j RESOLVED/IGNORED + indéfini OPEN + `FinanceDailyReport` 5 ans** (pratique comptable). À valider DPO en Verify (RGPD)._ |
-| **OQ-13** | **Manual run finance** : `POST /v1/admin/finance/runs/manual` ouvert à `ADMIN` ou réservé `SUPER_ADMIN` ? Rôle `SUPER_ADMIN` n'existe pas encore. | CTO | `RECO` | _Reco MVP : **`ADMIN` suffisant** + `RolesGuard(ADMIN)` + rate-limit 1 run/heure + audit `MissionEvent`. Introduire `SUPER_ADMIN` seulement si volume > 10 admins en équipe._ |
-| **OQ-14** | **Export CSV finance MVP** ? `GET /v1/admin/finance/daily-report/:date.csv` | CTO + finance | `OPEN` | _Reco : **non MVP**. JSON via UI suffit ; CSV reportable Ticket 4.3 si besoin réel exprimé. TODO debt si retenu._ |
-| **OQ-15** | **Seuil exact `finance_stuck_captured_funds`** : 24 h ferme ou 12 h (alerte précoce P2) ? | CTO | `RECO` | _Reco : **24 h P1**. Sous 24 h les jobs auto-release T+48h ouvrées peuvent être encore légitimes (jour férié, dimanche). 12 h P2 viendrait masquer le signal P1._ |
-| **OQ-16** | **Correction automatique conservatrice** au MVP (ex. forcer Transfer.SENT si Stripe dit SENT) ? | CTO + sécurité | `RECO` | _Reco : **non MVP** (ADR-018 §2.6). Réévaluation T+90 j prod via ADR dédiée si patterns reproduisibles._ |
+| **OQ-10** | **Daily report** — email + dashboard, dashboard seul, ou email seul ? | CTO + finance | `TRANCHÉ` | **Email + dashboard** (dashboard = source de vérité). |
+| **OQ-11** | **Mismatches** : stocker en DB (tables dédiées) OU se contenter des logs/metrics ? | CTO + ops | `TRANCHÉ` | **DB (tables dédiées)** — décision Design retenue + lock scheduler. |
+| **OQ-12** | **Rétention `FinanceMismatch` + `FinanceDailyReport`** | CTO + DPO | `TRANCHÉ` | **`FinanceMismatch` 90 j** (RESOLVED/IGNORED via `resolvedAt` ; OPEN/INVESTIGATING via `detectedAt`) — **pas de rétention indéfinie**. **`FinanceDailyReport` 5 ans**. |
+| **OQ-13** | **Manual run finance** : `POST /v1/admin/finance/runs/manual` ouvert à `ADMIN` ou réservé `SUPER_ADMIN` ? Rôle `SUPER_ADMIN` n'existe pas encore. | CTO | `TRANCHÉ` | **`ADMIN`** + rate-limit **1/h/utilisateur** + audit. |
+| **OQ-14** | **Export CSV finance MVP** ? `GET /v1/admin/finance/daily-report/:date.csv` | CTO + finance | `TRANCHÉ` | **Reporté Ticket 4.3** (pas MVP). |
+| **OQ-15** | **Seuil exact `finance_stuck_captured_funds`** : 24 h ferme ou 12 h (alerte précoce P2) ? | CTO | `TRANCHÉ` | **> 24 h = P1** (seuil ferme). |
+| **OQ-16** | **Correction automatique conservatrice** au MVP (ex. forcer Transfer.SENT si Stripe dit SENT) ? | CTO + sécurité | `TRANCHÉ` | **Non MVP** — aucune correction automatique destructive ; observation T+90 j via ADR dédiée si besoin. |
 
 #### 4.15.11 Modules Nest à créer Build (préfiguration)
 
@@ -1251,22 +1251,67 @@ Tous mitigations applicables au **Build** — aucun risque ne bloque le passage 
 - [x] Runbook ops `docs/ops/finance-reconciliation-runbook.md`
 - [x] CHANGELOG mis à jour (entrée Design Ticket 4.5)
 - [x] **Aucun code runtime écrit, aucune migration Prisma lancée** (PR doc-only)
-- [ ] **Sign-off CTO Design Ticket 4.5** ⏳ (PR ouverte, STOP avant Build)
-- [ ] OQ-10 à OQ-16 confirmées par CTO (réponses figées dans le PRD au sign-off)
+- [x] **Sign-off CTO Design Ticket 4.5** ✅ (2026-05-12 — PR #22 merge autorisé ; OQ-10..OQ-16 tranchées)
+- [x] OQ-10 à OQ-16 confirmées par CTO (réponses figées dans le PRD au sign-off)
 
 #### 4.15.14 Definition of Done — Build Ticket 4.5 (préfiguration)
 
 > Référence Build. Pas atteignable en Design — figée ici pour servir de check Build.
 
-- [ ] Migration Prisma : 4 tables `Finance*` + 5 enums créés (`prisma migrate dev` en local OK, `migrate deploy` validé recette)
-- [ ] `FinanceMetricsTracker` typed facade (whitelists strictes + assertions cardinalité unit tests)
-- [ ] 5 schedulers `@Cron` opérationnels + tests intégration par cron
-- [ ] 11 invariants couverts par `finance-invariants.integration.spec.ts`
-- [ ] `sanitizeForFinanceSnapshot` unit tests (whitelist + PII fuzzing)
-- [ ] `AlertKind` enum enrichi + `AlertingService.emit` tests no-PII
-- [ ] Endpoints admin `/v1/admin/finance/*` (mismatchs CRUD + daily report + manual run) — RBAC ADMIN + audit MissionEvent
-- [ ] Runbook ops actualisé (procédures réelles vs procédures théoriques)
+- [x] Migration Prisma : tables `finance_*` + enums + lock `finance_scheduler_locks` (`20260513020000_prd004_ticket_4_5_financial_monitoring`)
+- [x] `FinanceMetricsTracker` typed facade (whitelists strictes + tests unitaires)
+- [x] 6 schedulers `@Cron` (5 PRD + `retention`) + lock anti-overlap DB + feature flag `FF_FINANCE_MONITORING_ENABLED`
+- [ ] 11 invariants + reconcile Stripe↔DB fenêtre 7j — **implémentation métier complète** (commits suivants ; actuellement placeholders `TODO(debt)` dans services)
+- [x] `sanitizeForFinanceSnapshot` unit tests (whitelist + fuzzing 200 itérations)
+- [x] `FinanceAlertingService` cooldown tests (intégration)
+- [x] Endpoints admin `/v1/admin/finance/*` (listing mismatch + transition + manual run + daily report) — RBAC ADMIN + audit `MissionEvent` quand mission résolvable
+- [x] Runbook ops — section **Dépendances critiques** (Stripe/Redis/DB/Prometheus-Grafana/Resend)
 - [ ] Verify (Phase 4) — rapport `reviewer-securite-code` + sign-off CTO
+
+#### 4.15.16 Build Ticket 4.5 — Notes d’implémentation (état courant)
+
+> Branche : `feat/prd-004-ticket-4.5-financial-monitoring-build`.
+
+- **Ajustements CTO intégrés** :
+  - Lock **DB** `finance_scheduler_locks` (anti-overlap schedulers, TTL par cron, `INSERT … ON CONFLICT … WHERE expires_at < …`).
+  - CI / tests : fuzz `sanitizeForFinanceSnapshot`, whitelist labels finance (`FinanceMetricsTracker`), RBAC `/v1/admin/finance/*`, cooldown alertes, purge rétention.
+  - Runbook : section dépendances critiques.
+- **Itération 2 livrée (2026-05-13)** — cœur métier :
+  - Codes invariants versionnés `FIN-I-001`…`FIN-I-011`, `FIN-J-001` ; fichiers atomiques `apps/api/src/modules/finance/invariants/*` + `registry.ts`.
+  - `FinanceReconcileService` : reconcile 7j DB↔Stripe read-only ; `FinanceStuckFundsService` ; `FinanceInvariantsService` (J-1) ; `FinancePayoutAnomalyService` ; `FinanceDailyReportService` (upsert + helper email, pas d’envoi Resend tant que PR #20).
+  - Lifecycle `ACKNOWLEDGED` + machine d’état stricte + filtre `mismatchCode` sur listing admin.
+  - Migration `20260513030000_prd004_ticket_4_5_invariants_lifecycle` (enum + colonnes + unique key).
+  - Readiness Verify : `docs/ops/finance-iteration-2-verify-readiness.md`.
+- **Dette explicite (Build suite / itération 3)** :
+  - `TODO(debt)` : `MISSING_STRIPE` / imports Stripe dashboard ; webhook duplicate idempotence testé E2E ; pagination reconcile si > 600 rows / run.
+  - `TODO(debt)` : brancher `FinanceAlertingService` → `AlertingService` Discord/Resend quand disponible (PR #20).
+  - `TODO(debt)` : `markStaleRunningRunsFailed` sur `STUCK` / `INVARIANTS` / `REPORT` / `PAYOUT_ANOMALY` (actuellement surtout `RECONCILE`).
+
+#### 4.15.17 `FIN-ITER2-DEBTS` — Ticket de dette **bloquant activation production**
+
+> **Décision CTO 2026-05-13** : la Build itération 2 est mergée **uniquement** sous statut `READY WITH DEBT` et **avec `FF_FINANCE_MONITORING_ENABLED=false` par défaut**. L'activation `true` en recette puis prod est **interdite** tant que les dettes critiques listées ci-dessous ne sont pas closes et qu'un Verify final `reviewer-securite-code` n'est pas joint.
+
+| Code | Description | Bloquant `FF=true` ? | Référence |
+|---|---|---|---|
+| **FIN-DAILY-EMAIL** | Brancher le payload daily report sur `AlertingService` (Resend) + alerte P1 si génération du report échoue + tests unitaires & intégration sans PII dans le payload. Actuellement : payload helper construit, **pas d'envoi réseau**. | ✅ **Oui** | `apps/api/src/modules/finance/services/finance-daily-report.service.ts`, `docs/ops/finance-reconciliation-runbook.md` §dépendances |
+| **FIN-RECONCILE-PAGING** | Implémenter pagination / cursor `findMany` (batch fixe ≤ 600) avec borne haute documentée pour le reconcile 7 jours. Garantir absence de boucle non bornée ; conserver `p-limit(25 req/s)` Stripe. | ✅ **Oui** | `apps/api/src/modules/finance/services/finance-reconcile.service.ts` |
+| **FIN-MANUAL-RATELIMIT** | Rendre la limite OQ-13 (1/h/admin) **atomique** (transaction Prisma `SERIALIZABLE` *ou* `@Throttle` `userId`-scoped HTTP). Documenter la sémantique concurrente : `429` si limite dépassée, `409 FINANCE_RECONCILE_BUSY` si lock détenu. Tests intégration des deux cas. | ✅ **Oui** | `apps/api/src/modules/finance/controllers/admin-finance.controller.ts` (F2 Verify itération 1) |
+| **FIN-STALE-RUNS** | Étendre `markStaleRunningRunsFailed` aux `FinanceRunType.STUCK_FUNDS`, `INVARIANTS`, `PAYOUT_ANOMALY`, `DAILY_REPORT` (aujourd'hui appliqué surtout au `RECONCILE`). Test dédié simulant un run `RUNNING` orphelin pour chaque type. | ✅ **Oui** | `apps/api/src/modules/finance/finance.repository.ts` + schedulers concernés (S3 Verify itération 1) |
+| **FIN-WEBHOOK-TESTS** | Couverture intégration : (a) duplicate `stripe_event_id` côté webhook consommé sans créer de doublon, (b) `MISSING_STRIPE` (objet présent côté Stripe absent côté DB). Validation explicite que la reconcile produit le `mismatchCode` attendu sans correction. | ✅ **Oui** | `apps/api/test/integration/*.spec.ts` (à compléter) |
+
+**Conditions de levée du ticket** :
+
+1. Les 5 sous-dettes ci-dessus sont closes (PR + tests verts + relecture sécu spot).
+2. Un **rapport Verify final** est joint en complément de [`2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md`](../security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md) — verdict `READY` (0 Critical / 0 Important non traité).
+3. Smoke recette `FF_FINANCE_MONITORING_ENABLED=true` exécuté selon [`docs/ops/finance-iteration-2-verify-readiness.md`](../ops/finance-iteration-2-verify-readiness.md).
+4. **DPO sign-off** sur rétention (90 j mismatch / 5 ans daily report).
+5. **CTO sign-off** explicite d'activation production.
+
+**Communication interne autorisée** (formulation figée par décision CTO 2026-05-13) :
+
+> « Les fondations métier du monitoring financier sont mergées sous feature flag OFF. L'activation production est bloquée jusqu'à la résolution complète de `FIN-ITER2-DEBTS`. »
+
+Toute communication mentionnant « monitoring financier opérationnel » ou équivalent est **interdite** tant que ce ticket n'est pas clos.
 
 #### 4.15.15 Definition of Done — Verify Ticket 4.5 (préfiguration)
 
@@ -1274,20 +1319,24 @@ Tous mitigations applicables au **Build** — aucun risque ne bloque le passage 
 - [ ] Test charge reconcile cron sur fixture 1 000 Payment/Transfer/Refund → < 5 min runtime
 - [ ] Audit redaction `dbSnapshot/stripeSnapshot` (sanitizeForFinanceSnapshot fuzz test sur 100 payloads PII)
 - [ ] Audit RBAC `/v1/admin/finance/*` (CLIENT / PRESTATAIRE → 401/403, ADMIN → 200)
-- [ ] DPO confirme rétention 90 j RESOLVED + 5 ans `FinanceDailyReport` conforme RGPD + comptable
+- [ ] DPO confirme rétention **90 j `FinanceMismatch`** (tous statuts, fenêtres `resolvedAt` / `detectedAt`) + **5 ans `FinanceDailyReport`** conforme RGPD + comptable
 - [ ] Sign-off CTO Verify Ticket 4.5
 
 ---
 
 ## 5. Phase BUILD
 
-`N/A` — bloquée tant que le Design n'est pas validé.
+**Ticket 4.5 — Monitoring financier** : Build autorisé CTO (2026-05-12). Branche : `feat/prd-004-ticket-4.5-financial-monitoring-build`.
+
+- **Itération 1 livrée** : schéma `finance_*` + lock DB anti-overlap, module Nest, métriques `cleanconnect_finance_*`, endpoints admin, crons câblés, runbook §dépendances critiques.
+- **Itération 2 livrée** : invariants `FIN-*` + reconcile/stuck/invariants/payout/daily report métier + lifecycle `ACKNOWLEDGED` + tests (`invariants.spec.ts`, `finance-iteration-2.integration.spec.ts`) + checklist `docs/ops/finance-iteration-2-verify-readiness.md`.
+- **STOP** : après merge PR Build itération 2 → revue CTO + passage **Verify** (§4.15.15) avant production.
 
 ---
 
 ## 6. Phase VERIFY
 
-`N/A` — bloquée tant que le Build n'est pas validé.
+`N/A` — bloquée tant que le Build Ticket 4.5 n'est pas complété **et** le rapport `reviewer-securite-code` (0 Critical / 0 Important non traité) n'est pas joint.
 
 ---
 

@@ -206,6 +206,48 @@ const envSchema = z
       .union([z.literal('true'), z.literal('false'), z.literal('')])
       .default('false')
       .transform((v) => v === 'true'),
+
+    /**
+     * PRD-004 Ticket 4.5 — Feature flag global du monitoring financier.
+     * Quand `false` (défaut MVP) : les @Cron schedulers se court-circuitent en
+     * début de tick (audit log uniquement), aucun appel Stripe API. Active
+     * quand recette + dashboards Grafana finance prêts.
+     */
+    FF_FINANCE_MONITORING_ENABLED: z
+      .union([z.literal('true'), z.literal('false'), z.literal('')])
+      .default('false')
+      .transform((v) => v === 'true'),
+
+    /**
+     * PRD-004 Ticket 4.5 §4.15.3 AC-4.5.3.3 — seuil détection anomalie payout.
+     * `J-1.amountCents > FINANCE_PAYOUT_ANOMALY_FACTOR × avgLast30dCents` ⇒ flag.
+     * Bornes `[1.5, 5.0]` pour éviter faux positifs (< 1.5) ou désactivation
+     * implicite (> 5.0). Default 2.0 (CTO Design OQ).
+     */
+    FINANCE_PAYOUT_ANOMALY_FACTOR: z.coerce.number().min(1.5).max(5.0).default(2.0),
+
+    /**
+     * PRD-004 Ticket 4.5 — Rate-limit endpoint `POST /v1/admin/finance/runs/manual`
+     * (OQ-13). 1 run / heure / admin. Override pour tests.
+     */
+    FINANCE_MANUAL_RUN_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(1).max(60).default(1),
+
+    /**
+     * PRD-004 Ticket 4.5 — Rétention `FinanceMismatch` RESOLVED/IGNORED (jours).
+     * OQ-12. Default 90 j. `0` ⇒ purge désactivée (debug only).
+     */
+    FINANCE_MISMATCH_RETENTION_DAYS: z.coerce.number().int().min(0).max(365).default(90),
+
+    /**
+     * PRD-004 Ticket 4.5 — Rétention `FinanceDailyReport` (jours). OQ-12.
+     * Default 5 ans = 1825 j (pratique comptable interne).
+     */
+    FINANCE_DAILY_REPORT_RETENTION_DAYS: z.coerce.number().int().min(30).max(3_650).default(1_825),
+
+    /**
+     * PRD-004 Ticket 4.5 — Rétention `FinanceAlert` (jours). Default 30 j.
+     */
+    FINANCE_ALERT_RETENTION_DAYS: z.coerce.number().int().min(7).max(365).default(30),
   })
   .superRefine((data, ctx) => {
     // Garde-fou Stripe ↔ environnement (cf. rule securite + stripe)

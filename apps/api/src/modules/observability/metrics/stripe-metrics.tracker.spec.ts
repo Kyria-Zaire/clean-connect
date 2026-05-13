@@ -71,6 +71,14 @@ describe('StripeMetricsTracker', () => {
         /cleanconnect_stripe_api_calls_total\{operation="transfers.create",status="unknown"\} 1/,
       )
     })
+
+    it('instruments refunds.retrieve (finance read-only)', async () => {
+      const fn = jest.fn().mockResolvedValue({ id: 're_123' })
+      await tracker.time('refunds.retrieve', fn)
+
+      const body = (await metrics.render()).body
+      expect(body).toMatch(/cleanconnect_stripe_api_calls_total\{operation="refunds.retrieve",status="success"\} 1/)
+    })
   })
 
   describe('timeSync() — sync wrapper (webhooks.construct_event)', () => {

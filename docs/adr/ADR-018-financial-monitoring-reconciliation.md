@@ -164,7 +164,7 @@ enum FinanceResourceKind { PAYMENT TRANSFER REFUND INVARIANT }
 enum FinanceMismatchStatus { OPEN INVESTIGATING RESOLVED IGNORED }
 ```
 
-**Rétention** : 90 j sur `FinanceMismatch` resolved/ignored ; rétention **indéfinie** sur les open (auditable). `FinanceDailyReport` conservé 5 ans (obligation comptable indirecte). Cron de purge déclenché Ticket 4.4 (RGPD).
+**Rétention (décision CTO Build, OQ-12)** : `FinanceMismatch` purge après **90 j** — `RESOLVED`/`IGNORED` via `resolvedAt` ; `OPEN`/`INVESTIGATING` via `detectedAt` (**pas de rétention indéfinie**). `FinanceDailyReport` conservé **5 ans**. Cron de purge opéré par le module `finance` (scheduler dédié + lock anti-overlap).
 
 ### 2.5 Frontière avec Tickets 4.1 / 4.2
 
@@ -348,7 +348,7 @@ Toute mutation → entrée `MissionEvent` (ou `AdminAction` Ticket 4.3) avec `ac
 
 - 4 nouvelles tables Prisma (migration coût Build moyen — non bloquant).
 - Pas de correction automatique → charge admin manuelle de résolution mismatch (estimée MVP : < 5 mismatchs/semaine).
-- Risque résiduel : un mismatch ignoré par l'admin reste en DB indéfiniment (état `IGNORED` avec reason mandatory atténue).
+- Risque résiduel : un mismatch `IGNORED` sans investigation réelle peut disparaître après **90 j** (purge) — atténué par notes obligatoires + audit admin + alertes historisées hors table si besoin (Verify).
 - ~50 lignes de cron à maintenir par poste (4 schedulers).
 
 ### Neutres (à surveiller)
