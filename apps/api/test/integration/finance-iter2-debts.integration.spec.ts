@@ -25,6 +25,10 @@ import { AppModule } from '../../src/app.module'
 import { __resetEnvCacheForTests } from '../../src/common/config/env'
 import { AllExceptionsFilter } from '../../src/common/filters/all-exceptions.filter'
 import { PrismaService } from '../../src/common/prisma/prisma.service'
+import {
+  FINANCE_RUN_TYPE_MAX_AGE_MS,
+} from '../../src/modules/finance/finance.constants'
+import { FinanceRepository } from '../../src/modules/finance/finance.repository'
 import { FinanceSchedulerLockService } from '../../src/modules/finance/locking/finance-scheduler-lock.service'
 import { FinanceReconcileService } from '../../src/modules/finance/services/finance-reconcile.service'
 import { StripeFinanceRetrieveService } from '../../src/modules/finance/stripe/stripe-finance-retrieve.service'
@@ -36,6 +40,7 @@ describe('PRD-004 §4.15.17 — FIN-ITER2-DEBTS (Verify final preparation)', () 
   let prisma: PrismaService
   let reconcile: FinanceReconcileService
   let locks: FinanceSchedulerLockService
+  let repo: FinanceRepository
 
   const cleanupRunIds: string[] = []
 
@@ -58,6 +63,7 @@ describe('PRD-004 §4.15.17 — FIN-ITER2-DEBTS (Verify final preparation)', () 
     prisma = app.get(PrismaService)
     reconcile = app.get(FinanceReconcileService)
     locks = app.get(FinanceSchedulerLockService)
+    repo = app.get(FinanceRepository)
   })
 
   afterAll(async () => {
@@ -171,6 +177,96 @@ describe('PRD-004 §4.15.17 — FIN-ITER2-DEBTS (Verify final preparation)', () 
       // Les deux sémantiques sont stables et documentées en PRD §4.15.17.
       const status = (err as HttpException).getStatus()
       expect([429, 409]).toContain(status)
+    })
+  })
+
+  /**
+   * ──────────────────────────────────────────────────────────────────────────
+   * 2. FIN-STALE-RUNS — markAllStaleRunningRunsFailed couvre tous FinanceRunType
+   * ──────────────────────────────────────────────────────────────────────────
+   *
+   * Pre-fix : seul le scheduler `reconcile` appelait `markStaleRunningRunsFailed`
+   * et seulement pour `RECONCILE`. Les zombies `STUCK / INVARIANTS / REPORT /
+   * PAYOUT_ANOMALY` restaient `RUNNING` indéfiniment si un worker crashait.
+   *
+   * Post-fix :
+   *   - `repo.markAllStaleRunningRunsFailed(maxAgeByType)` itère sur tous les
+   *     `FinanceRunType` et fail-safe ceux dont `startedAt < now - TTL`.
+   *   - Chaque scheduler appelle cette méthode AVANT son lock (pre-tick).
+   *
+   * Test : pour CHAQUE `FinanceRunType`, créer 2 rows :
+   *   - 1 "fresh" RUNNING (startedAt = now)        → reste RUNNING
+   *   - 1 "stale" RUNNING (startedAt = now - 2×TTL) → devient FAILED('stale_run_detected')
+   */
+  describe('FIN-STALE-RUNS — markAllStaleRunningRunsFailed', () => {
+    it('fail-safe tous les types : seul le run stale (>TTL) bascule en FAILED', async () => {
+      const types = Object.keys(FINANCE_RUN_TYPE_MAX_AGE_MS) as Array<
+        keyof typeof FINANCE_RUN_TYPE_MAX_AGE_MS
+      >
+      const freshIds: string[] = []
+      const staleIds: string[] = []
+
+      for (const type of types) {
+        const ttl = FINANCE_RUN_TYPE_MAX_AGE_MS[type]
+        const fresh = await prisma.financeReconciliationRun.create({
+          data: {
+            type,
+            status: 'RUNNING',
+            windowFrom: new Date(),
+            windowTo: new Date(),
+            startedAt: new Date(),
+          },
+          select: { id: true },
+        })
+        freshIds.push(fresh.id)
+        cleanupRunIds.push(fresh.id)
+
+        const stale = await prisma.financeReconciliationRun.create({
+          data: {
+            type,
+            status: 'RUNNING',
+            windowFrom: new Date(),
+            windowTo: new Date(),
+            startedAt: new Date(Date.now() - ttl * 2),
+          },
+          select: { id: true },
+        })
+        staleIds.push(stale.id)
+        cleanupRunIds.push(stale.id)
+      }
+
+      const total = await repo.markAllStaleRunningRunsFailed(FINANCE_RUN_TYPE_MAX_AGE_MS)
+      expect(total).toBeGreaterThanOrEqual(types.length)
+
+      // Tous les stale doivent être FAILED('stale_run_detected'), tous les fresh
+      // doivent rester RUNNING.
+      const staleRows = await prisma.financeReconciliationRun.findMany({
+        where: { id: { in: staleIds } },
+        select: { id: true, status: true, failureMessage: true, completedAt: true, type: true },
+      })
+      expect(staleRows).toHaveLength(types.length)
+      for (const r of staleRows) {
+        expect(r.status).toBe('FAILED')
+        expect(r.failureMessage).toBe('stale_run_detected')
+        expect(r.completedAt).toBeTruthy()
+      }
+
+      const freshRows = await prisma.financeReconciliationRun.findMany({
+        where: { id: { in: freshIds } },
+        select: { id: true, status: true, type: true },
+      })
+      expect(freshRows).toHaveLength(types.length)
+      for (const r of freshRows) {
+        expect(r.status).toBe('RUNNING')
+      }
+    })
+
+    it('seconde invocation est idempotente (aucun row déjà FAILED n’est repris)', async () => {
+      // Toutes les rows stale du test précédent sont déjà FAILED.
+      // Un nouvel appel ne doit ni les remettre RUNNING ni en re-faillir d'autres
+      // (aucun row stale supplémentaire dans cette fenêtre).
+      const total = await repo.markAllStaleRunningRunsFailed(FINANCE_RUN_TYPE_MAX_AGE_MS)
+      expect(total).toBe(0)
     })
   })
 })

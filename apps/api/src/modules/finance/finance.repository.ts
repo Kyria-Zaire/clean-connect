@@ -104,6 +104,32 @@ export class FinanceRepository {
     return res.count
   }
 
+  /**
+   * `FIN-STALE-RUNS` (PRD-004 §4.15.17) — Variante générique qui couvre tous
+   * les `FinanceRunType`. Utile en début de tick `@Cron` pour nettoyer un run
+   * orphelin laissé par un worker crashé avant le `release` du lock (le lock
+   * lui-même expire seul via TTL, mais le row `FinanceReconciliationRun`
+   * resterait `RUNNING` indéfiniment sans ce cleanup).
+   *
+   * Le `maxAgeMs` est par-type pour rester cohérent avec `FINANCE_LOCK_TTL_MS`
+   * (ex. `report` = 10 min, `reconcile` = 15 min). On reprend le mapping
+   * `FINANCE_RUN_TYPE_TO_LOCK_KEY` et `FINANCE_LOCK_TTL_MS` côté caller.
+   *
+   * Retourne le total de rows mis en `FAILED` (tous types confondus).
+   */
+  async markAllStaleRunningRunsFailed(
+    maxAgeByType: Readonly<Record<FinanceRunType, number>>,
+  ): Promise<number> {
+    let total = 0
+    const types = Object.keys(maxAgeByType) as FinanceRunType[]
+    for (const t of types) {
+      const maxAgeMs = maxAgeByType[t]
+      if (typeof maxAgeMs !== 'number' || maxAgeMs <= 0) continue
+      total += await this.markStaleRunningRunsFailed(t, maxAgeMs)
+    }
+    return total
+  }
+
   async createMismatch(args: {
     runId: string
     mismatchCode: FinanceInvariantCode

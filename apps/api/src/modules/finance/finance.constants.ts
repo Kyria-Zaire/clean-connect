@@ -281,3 +281,19 @@ export const FINANCE_RUN_TYPE_TO_LOCK_KEY: Record<FinanceRunType, FinanceLockKey
   PAYOUT_ANOMALY: FINANCE_LOCK_KEYS.payoutAnomaly,
   REPORT: FINANCE_LOCK_KEYS.report,
 }
+
+/**
+ * `FIN-STALE-RUNS` (PRD-004 §4.15.17) — Âge max d'un `FinanceReconciliationRun`
+ * en `RUNNING` avant qu'il soit considéré comme zombie (worker crashé entre
+ * `createRun` et `completeRun/failRun`). Alignée sur `FINANCE_LOCK_TTL_MS` pour
+ * cohérence : le lock expire au même moment que le run devient "stale".
+ *
+ * Source de vérité unique pour `repo.markAllStaleRunningRunsFailed(...)`.
+ */
+export const FINANCE_RUN_TYPE_MAX_AGE_MS: Readonly<Record<FinanceRunType, number>> = Object.freeze({
+  RECONCILE: FINANCE_LOCK_TTL_MS.reconcile,
+  STUCK: FINANCE_LOCK_TTL_MS.stuck,
+  INVARIANTS: FINANCE_LOCK_TTL_MS.invariants,
+  PAYOUT_ANOMALY: FINANCE_LOCK_TTL_MS.payoutAnomaly,
+  REPORT: FINANCE_LOCK_TTL_MS.report,
+})
