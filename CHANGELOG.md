@@ -12,6 +12,16 @@ et le rapport sécurité associé (`docs/security-reviews/`).
 
 ## [Unreleased]
 
+### Ops package recette — PRD-004 §4.15.17 — 2026-05-13 (post-merge PR #29)
+
+PR #29 mergée en squash sur `main` (commit `c3cbb06`). Issues #24-#28 fermées automatiquement. **Aucune migration Prisma** dans le merge → rollback `FF=false` trivial.
+
+Artefacts ops complémentaires (branche `chore/finance-recette-ops-package`) :
+
+- 📋 [`docs/security-reviews/operational-smoke-rec-2026-05-13.md`](docs/security-reviews/operational-smoke-rec-2026-05-13.md) — rapport smoke recette pré-rempli (à compléter par SRE en exécution réelle)
+- 👁️ [`docs/runbooks/finance-monitoring-72h-surveillance.md`](docs/runbooks/finance-monitoring-72h-surveillance.md) — checklist surveillance 72 h (cardinalité, alert fatigue, drift, memory, locks)
+- 🚦 [`docs/runbooks/finance-monitoring-go-no-go-prod.md`](docs/runbooks/finance-monitoring-go-no-go-prod.md) — grille décision Go/No-Go production (10 critères Go + 8 critères No-Go + sign-offs)
+
 ### Verify (fermeture engineering `FIN-ITER2-DEBTS`) — PRD-004 §4.15.17 — 2026-05-13
 
 ✅ **Les 5 sous-dettes `FIN-ITER2-DEBTS` sont closes en code** sur la branche `feat/fin-iter2-debts` (PR unique) :
