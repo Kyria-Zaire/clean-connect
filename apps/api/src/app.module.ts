@@ -13,6 +13,7 @@ import { pinoLogFormatter } from './common/logger/log-sanitizer'
 import { REDACTION_CENSOR, REDACTION_PATHS } from './common/logger/redaction'
 import { PrismaModule } from './common/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
+import { FinanceModule } from './modules/finance/finance.module'
 import { HealthModule } from './modules/health/health.module'
 import { MissionsModule } from './modules/missions/missions.module'
 import { MissionsCompletionModule } from './modules/missions-completion/missions-completion.module'
@@ -138,6 +139,12 @@ import { UsersModule } from './modules/users/users.module'
      * report-problem + AutoReleaseJob BullMQ delayed T+48h ouvrées).
      */
     MissionsCompletionModule,
+    /**
+     * PRD-004 Ticket 4.5 — monitoring financier (reconciliation read-only Stripe,
+     * stuck funds, invariants, payout anomaly, daily report, retention/purge,
+     * endpoints admin `/v1/admin/finance/*`).
+     */
+    FinanceModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ConditionalThrottlerGuard },

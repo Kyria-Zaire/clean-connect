@@ -189,6 +189,66 @@ enum PhotoDeletionActor {
 }
 
 // -----------------------------------------------------------------------------
+// PRD-004 Ticket 4.5 — Monitoring financier
+// -----------------------------------------------------------------------------
+
+/// Type de run finance — un par scheduler (cf. PRD-004 §4.15.11).
+enum FinanceRunType {
+  RECONCILE
+  STUCK
+  INVARIANTS
+  REPORT
+  PAYOUT_ANOMALY
+}
+
+/// Cycle de vie d'un run scheduler finance. Pas de `PENDING` — un run est créé
+/// directement en `RUNNING` après acquisition du lock anti-overlap.
+enum FinanceRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+/// Types de mismatch détectés par les schedulers — labels Prometheus alignés
+/// (`cleanconnect_finance_mismatches_total{type}`).
+enum FinanceMismatchType {
+  STATUS
+  AMOUNT
+  CURRENCY
+  MISSING_DB
+  MISSING_STRIPE
+  INVARIANT_SUM
+  STUCK_PENDING
+  STUCK_AUTHORIZATION
+  STUCK_CAPTURED
+  PAYOUT_ANOMALY
+}
+
+/// Ressource finance ciblée par le mismatch.
+enum FinanceResourceKind {
+  PAYMENT
+  TRANSFER
+  REFUND
+  INVARIANT
+}
+
+/// Workflow admin d'un mismatch (PRD §4.15.4 + runbook).
+/// Build itération 2 (Ticket 4.5 §4.15.16) : ajout `ACKNOWLEDGED` — l'admin
+/// reconnaît le mismatch sans encore le résoudre (étape intermédiaire OPEN→ACK→RESOLVED).
+/// Transitions strictes (cf. `FinanceMismatchService.transition`) :
+///   OPEN → ACKNOWLEDGED | INVESTIGATING | RESOLVED | IGNORED
+///   ACKNOWLEDGED → INVESTIGATING | RESOLVED | IGNORED
+///   INVESTIGATING → RESOLVED | IGNORED
+///   RESOLVED / IGNORED ⇒ terminaux (pas de retour OPEN sans nouveau mismatch).
+enum FinanceMismatchStatus {
+  OPEN
+  ACKNOWLEDGED
+  INVESTIGATING
+  RESOLVED
+  IGNORED
+}
+
+// -----------------------------------------------------------------------------
 // User
 // -----------------------------------------------------------------------------
 
@@ -724,4 +784,190 @@ model PhotoDeletionLog {
   @@index([missionId, createdAt])
   @@index([batchId])
   @@map("photo_deletion_logs")
+}
+
+// -----------------------------------------------------------------------------
+// PRD-004 Ticket 4.5 — Finance tables
+// -----------------------------------------------------------------------------
+
+/// Exécution d'un scheduler finance (1 row par run). PRD-004 §4.15.4.
+/// Rétention : 90 j si `COMPLETED` (cron `FinanceRetentionScheduler`).
+/// Les runs `FAILED` sont conservés au-delà jusqu'à résolution manuelle (cf.
+/// PRD-004 §4.15.4 — décision Build CTO OQ-12).
+model FinanceReconciliationRun {
+  id     String           @id @default(uuid()) @db.Uuid
+  type   FinanceRunType
+  status FinanceRunStatus
+
+  /// Fenêtre d'analyse — bornes UTC. Pour `REPORT`, `windowFrom` = J-1 00:00 Europe/Paris (UTC).
+  windowFrom DateTime @map("window_from")
+  windowTo   DateTime @map("window_to")
+
+  startedAt   DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  /// Durée en ms — calculée à la fin du run (alimente l'histogram `cleanconnect_finance_reconciliation_duration_seconds`).
+  durationMs  Int?      @map("duration_ms")
+
+  /// Compteurs agrégés du run — pas de PII (toutes valeurs numériques).
+  resourcesScanned Int @default(0) @map("resources_scanned")
+  mismatchesFound  Int @default(0) @map("mismatches_found")
+  alertsEmitted    Int @default(0) @map("alerts_emitted")
+
+  /// Détail du dernier échec — message sanitizé (`redactSecretsInString` + `deepSanitize`).
+  failureMessage String? @map("failure_message") @db.Text
+
+  /// Acteur du run : `null` = cron automatique ; sinon `User.id` (ADMIN) pour `runs/manual` (audit + RBAC).
+  triggeredByUserId String? @map("triggered_by_user_id") @db.Uuid
+
+  mismatches FinanceMismatch[]
+
+  @@index([type, status, startedAt])
+  @@index([startedAt])
+  @@map("finance_reconciliation_runs")
+}
+
+/// Mismatch détecté entre Stripe (source externe) et DB (source opérationnelle).
+/// Persisté en DB pour drill-down admin (OQ-11 = DB). PRD-004 §4.15.4.
+/// Rétention OQ-12 (CTO Build, pas de rétention indéfinie) : 90 j max — fenêtre
+/// `resolvedAt` pour `RESOLVED/IGNORED`, `detectedAt` pour `OPEN/INVESTIGATING`.
+model FinanceMismatch {
+  id    String                   @id @default(uuid()) @db.Uuid
+  runId String                   @map("run_id") @db.Uuid
+  run   FinanceReconciliationRun @relation(fields: [runId], references: [id], onDelete: Restrict)
+
+  /// Type fonctionnel du mismatch (label Prometheus + filtre admin).
+  type         FinanceMismatchType
+  /// Ressource concernée — utilisée pour le drill-down admin + alerte.
+  resourceKind FinanceResourceKind @map("resource_kind")
+  /// ID interne DB (UUID Payment/Transfer/Refund ou label invariant `FIN-I-XXX`/`FIN-J-XXX`).
+  /// String pour supporter les invariants synthétiques (resourceKind=INVARIANT).
+  resourceId   String              @map("resource_id") @db.VarChar(64)
+
+  /// Code invariant déterministe (Build itération 2) — versionné, stable dans le temps,
+  /// utilisé par dashboards / alertes / runbook / export. Ex. `FIN-I-001`, `FIN-J-001`.
+  /// Source de vérité : `apps/api/src/modules/finance/invariants/registry.ts`.
+  mismatchCode String @map("mismatch_code") @db.VarChar(16)
+
+  /// Sévérité figée (`P1`/`P2`) — label Prometheus + cooldown alerting.
+  severity String @db.VarChar(8)
+
+  /// Delta cents si applicable (`amountDeltaCents`). `null` si statut/type abstrait.
+  amountDeltaCents Int? @map("amount_delta_cents")
+
+  /// Snapshot DB sanitisé (`sanitizeForFinanceSnapshot`) — whitelist ADR-018 §4.1.
+  dbSnapshot     Json  @map("db_snapshot")
+  /// Snapshot Stripe sanitisé (`sanitizeForFinanceSnapshot`) — whitelist ADR-018 §4.1.
+  /// `null` quand `resourceKind=INVARIANT` (pas de pendant Stripe direct).
+  stripeSnapshot Json? @map("stripe_snapshot")
+
+  /// État admin — drives `mismatches_open_count` gauge + alerting cooldown.
+  status FinanceMismatchStatus @default(OPEN)
+
+  detectedAt       DateTime  @default(now()) @map("detected_at")
+  /// Build itération 2 — étape intermédiaire `ACKNOWLEDGED`. Trace l'instant
+  /// où l'admin reconnaît le mismatch (peut précéder ou non la résolution).
+  acknowledgedAt   DateTime? @map("acknowledged_at")
+  acknowledgedByUserId String? @map("acknowledged_by_user_id") @db.Uuid
+  resolvedAt       DateTime? @map("resolved_at")
+  /// ID admin ayant résolu/ignoré — audit (`MissionEvent.actorUserId`). `null` pour OPEN/ACK/INVESTIGATING.
+  resolvedByUserId String?   @map("resolved_by_user_id") @db.Uuid
+  /// Notes admin (max 1 KiB). Validation Zod côté service.
+  resolutionNotes  String?   @map("resolution_notes") @db.VarChar(1024)
+
+  /// Dedup naturelle Build itération 2 — un même run peut détecter plusieurs invariants
+  /// cassés sur la même ressource ⇒ unicité sur `(runId, mismatchCode, resourceKind, resourceId)`.
+  @@unique([runId, mismatchCode, resourceKind, resourceId])
+  @@index([status, severity, detectedAt])
+  @@index([resourceKind, resourceId])
+  @@index([type, detectedAt])
+  @@index([mismatchCode, detectedAt])
+  @@map("finance_mismatches")
+}
+
+/// Snapshot quotidien J-1 (5 KPIs + invariant balance) — PRD-004 §4.15.4 + US-4.5.4.
+/// Rétention : **5 ans** (pratique comptable). Une seule ligne par `reportDate`.
+model FinanceDailyReport {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Date civile J-1 Europe/Paris (date sans heure — `DATE` côté Postgres).
+  reportDate DateTime @unique @map("report_date") @db.Date
+
+  /// Bornes effectives (UTC) — pour l'audit fenêtre exacte agrégée.
+  windowFrom DateTime @map("window_from")
+  windowTo   DateTime @map("window_to")
+
+  /// KPIs J-1 (cents). Agrégats SUM sur `Payment.amountCapturedCents`, etc.
+  /// Aucun userId/missionId/email ici — uniquement des sommes.
+  capturedCents     Int @default(0) @map("captured_cents")
+  transferSentCents Int @default(0) @map("transfer_sent_cents")
+  refundedCents     Int @default(0) @map("refunded_cents")
+  commissionCents   Int @default(0) @map("commission_cents")
+
+  /// `invariantBalanceCents` = capture - transfer - refund - commission. Idéal ≈ 0.
+  invariantBalanceCents Int @map("invariant_balance_cents")
+
+  capturedCount     Int @default(0) @map("captured_count")
+  transferSentCount Int @default(0) @map("transfer_sent_count")
+  refundedCount     Int @default(0) @map("refunded_count")
+  openMismatchCount Int @default(0) @map("open_mismatch_count")
+
+  /// Format embed/email — JSON sanitizé prêt à renvoyer côté admin UI / mailer.
+  /// Whitelist ADR-018 §4.1 appliquée à la génération.
+  snapshot Json
+
+  generatedAt DateTime @default(now()) @map("generated_at")
+
+  @@index([reportDate])
+  @@map("finance_daily_reports")
+}
+
+/// Trace des alertes finance émises — PRD-004 §4.15.4 (OQ-11). Permet audit cooldown
+/// post-mortem (sans dépendre des logs). Rétention : 30 j.
+model FinanceAlert {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// Identifiant logique de l'alerte (cf. PRD-004 §4.15.7) — string libre côté Prisma,
+  /// borné côté Zod / `AlertKind` enum (`finance_mismatch`, `finance_stuck_funds`, …).
+  kind String @db.VarChar(64)
+
+  /// Sévérité (`P1`/`P2`) — corrélée à `AlertingService.routing`.
+  severity String @db.VarChar(8)
+
+  /// Mismatch lié si applicable (FK soft : `SetNull` pour ne pas perdre la trace
+  /// quand un mismatch est purgé à 90 j).
+  mismatchId String? @map("mismatch_id") @db.Uuid
+
+  /// Run lié si applicable (idem soft FK).
+  runId String? @map("run_id") @db.Uuid
+
+  /// Contexte payload **déjà sanitizé** (`sanitizeForAlert`/`sanitizeForFinanceSnapshot`).
+  /// Whitelist : `mismatchId`, `runId`, `resourceKind`, `mismatchType`, `severity`,
+  /// `amountDeltaCents`, `stripeIdTruncated` (24 chars max). PRD-004 §4.15.7.
+  context Json
+
+  emittedAt DateTime @default(now()) @map("emitted_at")
+
+  @@index([severity, kind, emittedAt])
+  @@index([mismatchId])
+  @@map("finance_alerts")
+}
+
+/// Verrou anti-overlap pour les schedulers finance — ajustement CTO obligatoire
+/// (lock DB plutôt que Redis pour traçabilité + indépendance d'infra). PRD-004
+/// §4.15.11 ajusté CTO Build. Acquire : `INSERT … ON CONFLICT DO UPDATE WHERE
+/// expires_at < NOW()`. Release : `DELETE WHERE key = ? AND owner = ?`.
+model FinanceSchedulerLock {
+  /// Clé logique du scheduler (cron) — un seul lock actif par scheduler.
+  /// Ex. `reconcile`, `stuck`, `invariants`, `payout_anomaly`, `report`, `retention`.
+  key String @id @db.VarChar(64)
+
+  /// UUID v4 du propriétaire du lock (worker / pod) — pour debug + `release` sûr.
+  owner String @db.VarChar(64)
+
+  acquiredAt DateTime @map("acquired_at")
+  /// Expiration absolue (UTC). `expires_at < NOW()` ⇒ lock considéré expiré (auto-cleanable).
+  expiresAt  DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("finance_scheduler_locks")
 }

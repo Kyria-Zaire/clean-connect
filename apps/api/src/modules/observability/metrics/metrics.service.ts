@@ -72,6 +72,22 @@ export class MetricsService implements OnModuleDestroy {
   readonly dlqJobsTotal: Gauge<'queue'>
   readonly dlqEventsTotal: Counter<'source' | 'action'>
 
+  // Finance — Ticket 4.5 (PRD-004 §4.15.6). Labels strictement whitelistés via
+  // `FinanceMetricsTracker`. Toute injection brute ici est interdite (cf.
+  // tests unit `finance-metrics.tracker.spec.ts`).
+  readonly financeReconciliationRunsTotal: Counter<'type' | 'status'>
+  readonly financeReconciliationDurationSeconds: Histogram<'type'>
+  readonly financeMismatchesTotal: Counter<'type' | 'severity'>
+  readonly financeMismatchesOpenCount: Gauge<'severity'>
+  readonly financeStuckFundsTotal: Counter<'kind'>
+  readonly financeStuckFundsAmountCents: Gauge<'kind'>
+  readonly financeTransferPendingTotal: Counter
+  readonly financeRefundMismatchTotal: Counter<'kind'>
+  readonly financeInvariantBreakTotal: Counter<'invariant'>
+  readonly financeInvariantBalanceCents: Gauge<'report_date_offset'>
+  readonly financeDailyReportGeneratedTotal: Counter<'status'>
+  readonly financePayoutAnomalyFactor: Histogram
+
   constructor() {
     this.registry = new Registry()
 
@@ -164,6 +180,93 @@ export class MetricsService implements OnModuleDestroy {
       name: `${PREFIX}dlq_events_total`,
       help: 'DLQ lifecycle events (enqueued, replayed, replay_failed) per source.',
       labelNames: ['source', 'action'] as const,
+      registers: [this.registry],
+    })
+
+    // Finance — Ticket 4.5 (PRD-004 §4.15.6).
+    this.financeReconciliationRunsTotal = new Counter({
+      name: `${PREFIX}finance_reconciliation_runs_total`,
+      help: 'Finance reconciliation runs executed per scheduler (terminal states).',
+      labelNames: ['type', 'status'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeReconciliationDurationSeconds = new Histogram({
+      name: `${PREFIX}finance_reconciliation_duration_seconds`,
+      help: 'Finance reconciliation run duration in seconds, per scheduler type.',
+      labelNames: ['type'] as const,
+      // Buckets visent les SLO Design (RD-4.5-1 : reconcile < 5 min cible) +
+      // tail latency 10 min pour cron full-window 7 j sur volume cible PRD-005.
+      buckets: [1, 5, 15, 30, 60, 120, 300, 600] as const,
+      registers: [this.registry],
+    })
+
+    this.financeMismatchesTotal = new Counter({
+      name: `${PREFIX}finance_mismatches_total`,
+      help: 'Total finance mismatches detected and persisted.',
+      labelNames: ['type', 'severity'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeMismatchesOpenCount = new Gauge({
+      name: `${PREFIX}finance_mismatches_open_count`,
+      help: 'Current number of OPEN/INVESTIGATING finance mismatches (refreshed at each scheduler end).',
+      labelNames: ['severity'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeStuckFundsTotal = new Counter({
+      name: `${PREFIX}finance_stuck_funds_total`,
+      help: 'Total stuck funds occurrences detected per kind.',
+      labelNames: ['kind'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeStuckFundsAmountCents = new Gauge({
+      name: `${PREFIX}finance_stuck_funds_amount_cents`,
+      help: 'Current aggregated stuck funds amount (cents) per kind.',
+      labelNames: ['kind'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeTransferPendingTotal = new Counter({
+      name: `${PREFIX}finance_transfer_pending_total`,
+      help: 'Total Transfer.PENDING > 2h occurrences detected by FinanceStuckFundsScheduler.',
+      registers: [this.registry],
+    })
+
+    this.financeRefundMismatchTotal = new Counter({
+      name: `${PREFIX}finance_refund_mismatch_total`,
+      help: 'Total refund mismatches detected (Stripe ↔ DB) per kind.',
+      labelNames: ['kind'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeInvariantBreakTotal = new Counter({
+      name: `${PREFIX}finance_invariant_break_total`,
+      help: 'Total finance invariant break events (I-1..I-11 + J-1).',
+      labelNames: ['invariant'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeInvariantBalanceCents = new Gauge({
+      name: `${PREFIX}finance_invariant_balance_cents`,
+      help: 'Daily invariant balance (cents) — capture - transfer - refund - commission.',
+      labelNames: ['report_date_offset'] as const,
+      registers: [this.registry],
+    })
+
+    this.financeDailyReportGeneratedTotal = new Counter({
+      name: `${PREFIX}finance_daily_report_generated_total`,
+      help: 'Daily finance report generation outcome (success/failed/missing).',
+      labelNames: ['status'] as const,
+      registers: [this.registry],
+    })
+
+    this.financePayoutAnomalyFactor = new Histogram({
+      name: `${PREFIX}finance_payout_anomaly_factor`,
+      help: 'Distribution of payout anomaly factor (J-1 amount / avg last 30d).',
+      buckets: [1.5, 2, 3, 5, 10] as const,
       registers: [this.registry],
     })
   }

@@ -48,3 +48,13 @@ process.env['PHOTO_SIGNED_URL_TTL_SECONDS'] = process.env['PHOTO_SIGNED_URL_TTL_
 
 process.env['THROTTLE_LIMIT'] = process.env['THROTTLE_LIMIT'] ?? '10000'
 process.env['THROTTLE_TTL_SECONDS'] = process.env['THROTTLE_TTL_SECONDS'] ?? '60'
+
+// PRD-004 Ticket 4.5 — finance monitoring defaults (integration).
+process.env['FF_FINANCE_MONITORING_ENABLED'] = process.env['FF_FINANCE_MONITORING_ENABLED'] ?? 'false'
+process.env['FINANCE_PAYOUT_ANOMALY_FACTOR'] = process.env['FINANCE_PAYOUT_ANOMALY_FACTOR'] ?? '2.0'
+process.env['FINANCE_MANUAL_RUN_RATE_LIMIT_PER_HOUR'] =
+  process.env['FINANCE_MANUAL_RUN_RATE_LIMIT_PER_HOUR'] ?? '1'
+process.env['FINANCE_MISMATCH_RETENTION_DAYS'] = process.env['FINANCE_MISMATCH_RETENTION_DAYS'] ?? '90'
+process.env['FINANCE_DAILY_REPORT_RETENTION_DAYS'] =
+  process.env['FINANCE_DAILY_REPORT_RETENTION_DAYS'] ?? '1825'
+process.env['FINANCE_ALERT_RETENTION_DAYS'] = process.env['FINANCE_ALERT_RETENTION_DAYS'] ?? '30'

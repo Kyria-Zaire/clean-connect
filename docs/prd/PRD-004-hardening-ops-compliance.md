@@ -1015,15 +1015,328 @@ type WebhookDeadLetterView = {
 
 ---
 
+### 4.15 Design Ticket 4.5 — Monitoring financier
+
+> Phase **Design — doc only**. Aucun code runtime ajouté, aucune migration Prisma déclenchée.
+> Référence : `ADR-018` (financial monitoring & reconciliation strategy).
+> Pré-revue sécurité : [`docs/security-reviews/2026-05-12-prd-004-financial-monitoring-design-prereview.md`](../security-reviews/2026-05-12-prd-004-financial-monitoring-design-prereview.md).
+> Runbook ops : [`docs/ops/finance-reconciliation-runbook.md`](../ops/finance-reconciliation-runbook.md).
+
+#### 4.15.1 Vision
+
+> Clean Connect manipule des flux financiers réels (Stripe Connect Express). Tant qu'on n'a pas de mécanisme de **détection automatique des dérives** entre Stripe et la DB, **chaque incident silencieux devient un trou comptable**.
+>
+> Le Ticket 4.5 met en place un **monitoring financier** qui détecte (et **alerte**) les divergences, sans **jamais** corriger automatiquement au MVP (cf. ADR-018 §2.6). La correction reste l'apanage d'un admin authentifié, traçable et auditable.
+
+#### 4.15.2 Risques financiers que ce Ticket adresse
+
+| ID | Risque | Probabilité MVP | Impact si non détecté |
+|---|---|---|---|
+| **F-1** | Webhook Stripe perdu malgré retry → DB désynchronisée | Moyen | Mission validée côté Stripe, séquestre non libéré côté DB |
+| **F-2** | Capture Stripe réussie mais transfer prestataire jamais enqueue | Faible | Argent bloqué côté plateforme — prestataire pas payé |
+| **F-3** | Transfer Stripe réussi mais row DB jamais transitionnée `SENT` | Faible | Mission n'évolue pas → impossible de produire un litige propre |
+| **F-4** | Refund Stripe Dashboard manuel (admin) jamais répercuté DB | Moyen | Client remboursé sans trace côté DB → impossible audit |
+| **F-5** | Bug calcul commission → `Transfer.amount != Payment.providerPayoutCents` | Faible | Trou comptable cumulatif (perte plateforme ou sur-paiement prestataire) |
+| **F-6** | `Payment.AUTHORIZED` > 7 j sans capture → autorisation Visa/MC expirée | Élevé | Fonds perdus, mission impossible à honorer |
+| **F-7** | `Transfer.PENDING` > 2 h sans réconciliation → mismatch silencieux | Moyen | Indicateur P2 pour intervenir avant escalade |
+| **F-8** | Payout anormal (> 2× moyenne 30 j d'un prestataire) → bug ou fraude | Faible | Détection ex-post, mitige avant la prochaine occurrence |
+| **F-9** | Trou comptable J-1 (`SUM(capture) - SUM(transfer) - SUM(refund) - SUM(commission) ≠ 0`) | Très faible | Indicateur santé globale — alerte immédiate si non zéro |
+
+#### 4.15.3 User stories Design (raffinement §2.5)
+
+> Les US-4.5.1 à US-4.5.6 sont déjà figées dans §2.5 (Discover).
+> Cette section ajoute les **AC détaillés Design** (raffinement, pas réécriture) et corrige `US-4.5.6.1` (le test "integration" mentionné en Discover devient un test Build B 4.5 — la production des invariants J-1 est portée par `FinanceInvariantsScheduler`).
+
+##### US-4.5.1 — Reconciliation Stripe ↔ DB (raffinement)
+
+- **AC-4.5.1.1 (raffiné Design)** : cron `FinanceReconcileScheduler` `@Cron('30 3 * * *')` Europe/Paris ; fenêtre `Payment/Transfer/Refund` `updatedAt ≥ now - 7 j` ; ressources ignorées si `Mission.status = DISPUTE_OPEN`.
+- **AC-4.5.1.2 (raffiné Design)** : page `/admin/finance/mismatches` (UI portée Ticket 4.3 — TODO debt) liste les rows `FinanceMismatch.status = OPEN`, filtres `severity` + `type` + `resourceKind` + période. Drill-down `/admin/finance/mismatches/:id`.
+- **AC-4.5.1.3 (raffiné Design)** : alerte P1 `finance_mismatch` (cooldown 15 min/`kind`) à chaque `FinanceMismatch.create({ status: OPEN })`. Cooldown porté par `AlertingService` (ADR-017).
+- **AC-4.5.1.4 (nouveau Design)** : run idempotent — un même `FinanceReconciliationRun.id` ne peut pas écrire deux fois la même `FinanceMismatch` (clé naturelle `(runId, resourceKind, resourceId)`).
+- **AC-4.5.1.5 (nouveau Design)** : reconcile read-only Stripe (aucun `update`, aucun `create` côté Stripe). Toute action correctrice passe par les endpoints admin (Ticket 4.3 — TODO debt).
+
+##### US-4.5.2 — Stuck funds detector (raffinement)
+
+- **AC-4.5.2.1 (raffiné Design)** : cron horaire `FinanceStuckFundsScheduler` `@Cron('5 * * * *')` (5 min après l'heure pour ne pas chevaucher d'autres crons).
+- **AC-4.5.2.2 (raffiné Design)** : alerte P1 `finance_stuck_authorization` si `Payment.status = AUTHORIZED ∧ createdAt < now - 5 j` (24 h de marge avant expiration Visa/MC).
+- **AC-4.5.2.3 (nouveau Design)** : alerte P1 `finance_stuck_captured_funds` si `Payment.status = CAPTURED ∧ Transfer.status NOT IN (PENDING, SENT, FAILED) ∧ capturedAt < now - 24 h ∧ Mission.status != DISPUTE_OPEN`.
+- **AC-4.5.2.4 (nouveau Design)** : alerte P2 `finance_transfer_pending` si `Transfer.status = PENDING ∧ updatedAt < now - 2 h` (déjà couvert par 4.2 retry — la P2 est un indicateur de surveillance, pas un déclencheur d'action).
+
+##### US-4.5.3 — Payout anomalies detector (raffinement)
+
+- **AC-4.5.3.1 (raffiné Design)** : cron quotidien `FinancePayoutAnomalyScheduler` `@Cron('45 4 * * *')`. Pour chaque prestataire avec `Transfer.status = SENT` créé J-1, calculer `avgLast30dCents` (30 j roulants exclusifs J-1). Si `J-1.amountCents > 2 × avgLast30dCents ∧ avgLast30dCents > 0` → `FinanceMismatchType = STATUS` avec metadata `{ type: 'payout_anomaly', factor: ratio }` + alerte P2 `finance_payout_anomaly` (cooldown 24 h/prestataire).
+- **AC-4.5.3.2 (raffiné Design)** : page `/admin/finance/payout-anomalies` (UI Ticket 4.3 — TODO debt). MVP : `FinanceMismatch` filtré sur metadata = liste fonctionnelle.
+- **AC-4.5.3.3 (nouveau Design)** : seuil **2× moyenne 30 j** débraillable via env `FINANCE_PAYOUT_ANOMALY_FACTOR` (default 2.0, min 1.5, max 5.0). Ajustement post J+30 prod.
+
+##### US-4.5.4 — Daily finance report (raffinement)
+
+- **AC-4.5.4.1 (raffiné Design)** : cron `FinanceDailyReportScheduler` `@Cron('0 7 * * *')` Europe/Paris. Agrège J-1 (00:00 → 23:59 Europe/Paris). Crée `FinanceDailyReport` row + envoie l'embed Discord `#ops-finance` + email récap CTO + finance (OQ-7 réponse = "dashboard + email récap" → idem ici).
+- **AC-4.5.4.2 (raffiné Design)** : format embed/email — 5 KPIs essentiels (paiements capturés J-1, transferts émis J-1, refunds, commissions, mismatchs open) + lien vers `/admin/finance/daily-report/:date`.
+- **AC-4.5.4.3 (nouveau Design)** : alerte P2 `finance_report_missing` si `FinanceDailyReport` pour J-1 n'existe pas après 08:00 Europe/Paris (cron retry job ou enquête).
+
+##### US-4.5.5 — Consistency checks production (raffinement)
+
+- **AC-4.5.5.1 (raffiné Design)** : cron `FinanceInvariantsScheduler` `@Cron('15 4 * * *')`. Vérifie les 11 invariants (cf. ADR-018 §3) sur fenêtre J-1. Toute divergence > 0,01 € → `FinanceMismatchType.INVARIANT_SUM` + alerte P1 `finance_invariant_break`.
+- **AC-4.5.5.2 (raffiné Design)** : tests intégration **production-like** (avec DB de test) couvrant les 11 invariants — déclenchés en CI sur chaque PR touchant `payments/` / `transfers/` / `refunds/`. Renommé `finance-invariants.integration.spec.ts`.
+
+##### US-4.5.6 — Capture/transfer/refund consistency (Build)
+
+- **AC-4.5.6.1 (figé Design)** : repris dans US-4.5.5. **Fusionné** — un seul scheduler (`FinanceInvariantsScheduler`) pour éviter la duplication AC.
+- **AC-4.5.6.2 (figé Design)** : règle Build = `pnpm --filter @cc/api run test:integration` doit inclure `finance-invariants.integration.spec.ts` vert.
+
+#### 4.15.4 Modèle conceptuel retenu (OQ-11 = DB + logs)
+
+> Décision Design (OQ-11 cf. §4.15.10) : **on persiste** les mismatches en DB.
+
+4 tables Prisma à créer en Build (migration Build Ticket 4.5) — **rappel ADR-018 §2.4 fait foi pour les colonnes finales** :
+
+| Table | Cardinalité estimée MVP | Rétention | Index utiles |
+|---|---|---|---|
+| `FinanceReconciliationRun` | ~4 rows/jour | **90 j** si `COMPLETED` ; **conservés** si `FAILED` (investigation) jusqu'à résolution manuelle + purge ultérieure (Verify) | `(type, status, startedAt)` |
+| `FinanceMismatch` | < 5/jour MVP, < 50/jour cible PRD-005 | **90 j max** : `RESOLVED`/`IGNORED` via `resolvedAt` ; `OPEN`/`INVESTIGATING` via `detectedAt` (**pas de rétention indéfinie**, décision CTO OQ-12) | `(status, severity, detectedAt)` + `(resourceKind, resourceId)` |
+| `FinanceDailyReport` | 1 row/jour exactement | 5 ans (pratique comptable interne) | unique sur `reportDate` |
+| `FinanceAlert` | facultatif (cf. ADR-018 §2.4) | 30 j | `(severity, kind, emittedAt)` |
+
+Enums à figer en Build (Prisma) :
+- `FinanceRunType { RECONCILE STUCK INVARIANTS REPORT PAYOUT_ANOMALY }`
+- `FinanceRunStatus { RUNNING COMPLETED FAILED }`
+- `FinanceMismatchType { STATUS AMOUNT CURRENCY MISSING_DB MISSING_STRIPE INVARIANT_SUM STUCK_PENDING STUCK_AUTHORIZATION STUCK_CAPTURED PAYOUT_ANOMALY }`
+- `FinanceResourceKind { PAYMENT TRANSFER REFUND INVARIANT }`
+- `FinanceMismatchStatus { OPEN INVESTIGATING RESOLVED IGNORED }`
+
+#### 4.15.5 Invariants financiers (11 — référence ADR-018 §3)
+
+| # | Invariant | Test ID Build |
+|---|---|---|
+| I-1 | `Payment.CAPTURED ⇒ amountCapturedCents > 0` | `finance-invariants.integration.spec.ts > I-1` |
+| I-2 | `Transfer.SENT ⇒ Payment.CAPTURED` | `> I-2` |
+| I-3 | `Transfer.amountCents = Payment.providerPayoutCents` | `> I-3` (P1 critique) |
+| I-4 | `Refund.REFUNDED ⇒ Payment.{CAPTURED,REFUNDED}` | `> I-4` |
+| I-5 | `Refund post-Transfer.SENT ⇒ initiatedBy != SYSTEM` | `> I-5` |
+| I-6 | `Stripe.PI.amount_received = DB.Payment.amountCapturedCents` | `> I-6` |
+| I-7 | `Stripe.Transfer.amount = DB.Transfer.amountCents` | `> I-7` |
+| I-8 | `Stripe.Refund.amount = DB.Refund.amountCents` | `> I-8` |
+| I-9 | `Payment.AUTHORIZED ∧ age > 5 j` ⇒ alerte préventive | `> I-9` |
+| I-10 | `Transfer.PENDING ∧ age > 2 h` | `> I-10` |
+| I-11 | `Payment.CAPTURED ∧ no Transfer ∧ age > 24 h` | `> I-11` |
+
+**Invariant J-1 (`invariantBalanceCents`)** : `SUM(capture J-1) - SUM(transfer SENT J-1) - SUM(refund REFUNDED J-1) - SUM(applicationFee J-1) ≈ 0` (tolérance 1 cent).
+
+#### 4.15.6 Métriques figées (Ticket 4.5)
+
+> Préfixe `cleanconnect_finance_*`. Cardinalité bornée. PII interdits (cf. ADR-018 §4 + §4.15.7).
+
+| Métrique | Type | Labels (whitelisted) | Cardinalité max |
+|---|---|---|---|
+| `cleanconnect_finance_reconciliation_runs_total` | counter | `type` ∈ `{RECONCILE,STUCK,INVARIANTS,REPORT,PAYOUT_ANOMALY}`, `status` ∈ `{COMPLETED,FAILED}` | 5 × 2 = 10 |
+| `cleanconnect_finance_reconciliation_duration_seconds` | histogram | `type` | 5 |
+| `cleanconnect_finance_mismatches_total` | counter | `type` ∈ `{STATUS,AMOUNT,CURRENCY,MISSING_DB,MISSING_STRIPE,INVARIANT_SUM,STUCK_PENDING,STUCK_AUTHORIZATION,STUCK_CAPTURED,PAYOUT_ANOMALY}`, `severity` ∈ `{P1,P2}` | 10 × 2 = 20 |
+| `cleanconnect_finance_mismatches_open_count` | gauge | `severity` | 2 |
+| `cleanconnect_finance_stuck_funds_total` | counter | `kind` ∈ `{AUTHORIZATION,CAPTURED,PENDING}` | 3 |
+| `cleanconnect_finance_stuck_funds_amount_cents` | gauge | `kind` | 3 |
+| `cleanconnect_finance_transfer_pending_total` | counter | — | 1 |
+| `cleanconnect_finance_refund_mismatch_total` | counter | `kind` ∈ `{AMOUNT,STATUS,MISSING_STRIPE,MISSING_DB}` | 4 |
+| `cleanconnect_finance_invariant_break_total` | counter | `invariant` ∈ `{I-1..I-11,J-1}` | 12 |
+| `cleanconnect_finance_invariant_balance_cents` | gauge | `report_date_offset` ∈ `{J-1}` (string littéral) | 1 |
+| `cleanconnect_finance_daily_report_generated_total` | counter | `status` ∈ `{success,failed,missing}` | 3 |
+| `cleanconnect_finance_payout_anomaly_factor` | histogram | — (factor numérique) | buckets `[1.5, 2, 3, 5, 10]` |
+
+**Labels strictement interdits** : `userId`, `missionId`, `paymentId`, `transferId`, `refundId`, `stripeId`, `email`, `phone`, `prestataireId`.
+
+Cardinalité totale ajoutée : `10 + 5 + 20 + 2 + 3 + 3 + 1 + 4 + 12 + 1 + 3 + 1 = 65` séries Prometheus — largement borné.
+
+#### 4.15.7 Alerts (Ticket 4.5)
+
+> `AlertKind` enum à étendre (Ticket 4.5 Build) avec : `finance_mismatch`, `finance_stuck_funds`, `finance_stuck_authorization`, `finance_transfer_pending`, `finance_refund_mismatch`, `finance_invariant_break`, `finance_reconcile_failed`, `finance_report_missing`, `finance_payout_anomaly`. Réutilise `AlertingService` ADR-017 (cooldown + `sanitizeForAlert`).
+
+| Alerte | Sévérité | Trigger | Cooldown |
+|---|---|---|---|
+| `finance_mismatch` | **P1** | tout `FinanceMismatch.OPEN` créé | 15 min/`mismatchType` |
+| `finance_stuck_authorization` | **P1** | I-9 rompu | 4 h/ressource |
+| `finance_stuck_captured_funds` | **P1** | I-11 rompu | 1 h/ressource |
+| `finance_transfer_pending` | **P2** | I-10 rompu | 30 min (batch P2) |
+| `finance_refund_mismatch` | **P1** | I-8 rompu | 15 min/`kind` |
+| `finance_invariant_break` | **P1** | J-1 ou I-3 rompu | 1 h/jour |
+| `finance_reconcile_failed` | **P1** | `FinanceReconciliationRun.status = FAILED` | 30 min |
+| `finance_report_missing` | **P2** | `FinanceDailyReport` non généré 08:00 Europe/Paris | 1 day |
+| `finance_payout_anomaly` | **P2** | US-4.5.3 (factor > seuil) | 24 h/prestataire (anonymisé `prestataireIdShort`) |
+
+Contexte payload alert (whitelist `sanitizeForAlert`) : `mismatchId` (UUID interne ok), `runId`, `resourceKind`, `mismatchType`, `severity`, `amountDeltaCents`, `stripeIdTruncated` (24 chars max). **JAMAIS** : email, phone, fullName, full stripeId, full DB id row sensible.
+
+#### 4.15.8 Non-goals (out of scope Ticket 4.5)
+
+- ❌ Correction automatique de la DB ou de Stripe sur mismatch détecté (cf. ADR-018 §2.6, réévaluation T+90 j).
+- ❌ Import automatique des transferts/refunds créés depuis le Stripe Dashboard (route admin `POST /v1/admin/transfers/import-from-stripe` reportée Ticket 4.3 — TODO debt).
+- ❌ Dispute Stripe (chargeback Visa/MC) — relève de PRD-005.
+- ❌ TVA / fiscalité (hors moteur MVP — décision CTO Q14 PRD-003).
+- ❌ Reporting financier multi-devises (EUR-only MVP).
+- ❌ Conciliation des virements bancaires (versement Stripe → compte plateforme) — relève d'audit comptable externe.
+- ❌ Détection de fraude au-delà du seuil 2× moyenne payout — anti-fraude avancé reporté post-MVP.
+- ❌ Stripe Sigma / data warehouse externe.
+
+#### 4.15.9 Documentation associée
+
+| Artefact | Chemin | État Design |
+|---|---|---|
+| **ADR-018** Financial monitoring strategy | `docs/adr/ADR-018-financial-monitoring-reconciliation.md` | ✅ Créé Design |
+| **Pré-revue sécurité** | `docs/security-reviews/2026-05-12-prd-004-financial-monitoring-design-prereview.md` | ✅ Créée Design |
+| **Runbook ops** | `docs/ops/finance-reconciliation-runbook.md` | ✅ Créé Design |
+| **PRD §2.5** Discover Ticket 4.5 | (existant) | ✅ déjà figé |
+| **PRD §4.15** Design Ticket 4.5 | (cette section) | ✅ Créée Design |
+| **Endpoints OpenAPI** `/v1/admin/finance/*` | `docs/api/PRD-004-openapi.yaml` (à créer Build) | ⏳ Build |
+
+#### 4.15.10 Open Questions CTO — Ticket 4.5 spécifiques
+
+> Décisions CTO **tranchées** le 2026-05-12 (Build autorisé). Table d'archive — ne pas rouvrir sans nouvel arbitrage formel.
+
+| # | Question | Owner | Statut | Réponse / Reco |
+|---|---|---|---|---|
+| **OQ-10** | **Daily report** — email + dashboard, dashboard seul, ou email seul ? | CTO + finance | `TRANCHÉ` | **Email + dashboard** (dashboard = source de vérité). |
+| **OQ-11** | **Mismatches** : stocker en DB (tables dédiées) OU se contenter des logs/metrics ? | CTO + ops | `TRANCHÉ` | **DB (tables dédiées)** — décision Design retenue + lock scheduler. |
+| **OQ-12** | **Rétention `FinanceMismatch` + `FinanceDailyReport`** | CTO + DPO | `TRANCHÉ` | **`FinanceMismatch` 90 j** (RESOLVED/IGNORED via `resolvedAt` ; OPEN/INVESTIGATING via `detectedAt`) — **pas de rétention indéfinie**. **`FinanceDailyReport` 5 ans**. |
+| **OQ-13** | **Manual run finance** : `POST /v1/admin/finance/runs/manual` ouvert à `ADMIN` ou réservé `SUPER_ADMIN` ? Rôle `SUPER_ADMIN` n'existe pas encore. | CTO | `TRANCHÉ` | **`ADMIN`** + rate-limit **1/h/utilisateur** + audit. |
+| **OQ-14** | **Export CSV finance MVP** ? `GET /v1/admin/finance/daily-report/:date.csv` | CTO + finance | `TRANCHÉ` | **Reporté Ticket 4.3** (pas MVP). |
+| **OQ-15** | **Seuil exact `finance_stuck_captured_funds`** : 24 h ferme ou 12 h (alerte précoce P2) ? | CTO | `TRANCHÉ` | **> 24 h = P1** (seuil ferme). |
+| **OQ-16** | **Correction automatique conservatrice** au MVP (ex. forcer Transfer.SENT si Stripe dit SENT) ? | CTO + sécurité | `TRANCHÉ` | **Non MVP** — aucune correction automatique destructive ; observation T+90 j via ADR dédiée si besoin. |
+
+#### 4.15.11 Modules Nest à créer Build (préfiguration)
+
+> Aucun code écrit en Design. Boundary listé pour faciliter le découpage Build Ticket 4.5.
+
+```
+apps/api/src/modules/finance/
+├── finance.module.ts                     ← @Module avec @Cron services + repository
+├── finance.constants.ts                  ← cron expressions + thresholds + label whitelists
+├── finance.repository.ts                 ← Prisma reads/writes Finance* (read-only sur Payment/Transfer/Refund)
+├── schedulers/
+│   ├── finance-reconcile.scheduler.ts          (@Cron('30 3 * * *')   — RECONCILE)
+│   ├── finance-stuck-funds.scheduler.ts        (@Cron('5 * * * *')     — STUCK)
+│   ├── finance-invariants.scheduler.ts         (@Cron('15 4 * * *')    — INVARIANTS)
+│   ├── finance-payout-anomaly.scheduler.ts     (@Cron('45 4 * * *')    — PAYOUT_ANOMALY)
+│   └── finance-daily-report.scheduler.ts       (@Cron('0 7 * * *')     — REPORT)
+├── services/
+│   ├── finance-reconcile.service.ts            ← orchestration cron RECONCILE (read-only Stripe)
+│   ├── finance-invariants.service.ts           ← 11 invariants + invariantBalanceCents
+│   ├── finance-mismatch.service.ts             ← création + dedup + transitions FinanceMismatch
+│   ├── finance-stuck-funds.service.ts          ← I-9 + I-11 + I-10
+│   ├── finance-payout-anomaly.service.ts       ← seuil prestataire avgLast30d
+│   └── finance-daily-report.service.ts         ← agrégation J-1 + envoi email récap
+├── controllers/
+│   └── (vide en MVP — endpoints admin réservés Ticket 4.3 UI debt)
+├── metrics/
+│   └── finance-metrics.tracker.ts              ← typed facade `cleanconnect_finance_*`
+└── stripe/
+    └── stripe-retrieve.service.ts              ← p-limit 25 req/s + AbortSignal.timeout
+```
+
+#### 4.15.12 Risk assessment Design Ticket 4.5
+
+| ID | Risque | Sévérité | Mitigation Design |
+|---|---|---|---|
+| `RD-4.5-1` | Cron reconcile dépasse 5 min de runtime sur volume PRD-005 | Medium | `p-limit(25)` + fenêtre 7 j max + monitor `cleanconnect_finance_reconciliation_duration_seconds` |
+| `RD-4.5-2` | Quota Stripe `retrieve` saturé | Low | < 1 % MVP estimé ; alerting + circuit breaker à câbler Build si > 50 % |
+| `RD-4.5-3` | Race condition admin `markResolved` ↔ nouveau cron qui rouvrirait le mismatch | Medium | Dedup clé `(runId, resourceKind, resourceId)` empêche la duplication ; `markResolved` set `status = RESOLVED` + `resolvedAt` → la query `findOpenMismatches` filtre |
+| `RD-4.5-4` | PII fuite dans `FinanceMismatch.dbSnapshot/stripeSnapshot` | High | Whitelist explicite snapshot (ADR-018 §4.1) + `sanitizeForFinanceSnapshot` réutilise `deepSanitize` |
+| `RD-4.5-5` | Alerte P1 spam si cron détecte 100 mismatchs d'un coup (incident systémique) | Medium | `AlertingService` cooldown 15 min/`mismatchType` → max 4 alertes/h par type |
+| `RD-4.5-6` | Faux positif `payout_anomaly` sur nouveau prestataire (1ère mission ≥ moyenne 0) | Low | Garde `avgLast30dCents > 0` (cf. AC-4.5.3.1) |
+| `RD-4.5-7` | Décalage horaire Europe/Paris ↔ UTC sur fenêtre J-1 | Low | Utilisation `date-fns-tz` cohérente PRD-003 + tests unitaires explicites timezone |
+
+Tous mitigations applicables au **Build** — aucun risque ne bloque le passage en Build.
+
+#### 4.15.13 Definition of Done — Design Ticket 4.5
+
+- [x] ADR-018 rédigé + reviewé securité (ce PR)
+- [x] PRD §4.15 (cette section) complète : vision, risques F-1..F-9, US raffinées, modèle conceptuel, invariants, metrics, alerts, non-goals, OQ-10..OQ-16 tranchées (RECO), modules Nest préfigurés, risk assessment Design
+- [x] Pré-revue sécurité dédiée : 0 Critical / 0 Important (5 Conditions Build documentées)
+- [x] Runbook ops `docs/ops/finance-reconciliation-runbook.md`
+- [x] CHANGELOG mis à jour (entrée Design Ticket 4.5)
+- [x] **Aucun code runtime écrit, aucune migration Prisma lancée** (PR doc-only)
+- [x] **Sign-off CTO Design Ticket 4.5** ✅ (2026-05-12 — PR #22 merge autorisé ; OQ-10..OQ-16 tranchées)
+- [x] OQ-10 à OQ-16 confirmées par CTO (réponses figées dans le PRD au sign-off)
+
+#### 4.15.14 Definition of Done — Build Ticket 4.5 (préfiguration)
+
+> Référence Build. Pas atteignable en Design — figée ici pour servir de check Build.
+
+- [x] Migration Prisma : tables `finance_*` + enums + lock `finance_scheduler_locks` (`20260513020000_prd004_ticket_4_5_financial_monitoring`)
+- [x] `FinanceMetricsTracker` typed facade (whitelists strictes + tests unitaires)
+- [x] 6 schedulers `@Cron` (5 PRD + `retention`) + lock anti-overlap DB + feature flag `FF_FINANCE_MONITORING_ENABLED`
+- [ ] 11 invariants + reconcile Stripe↔DB fenêtre 7j — **implémentation métier complète** (commits suivants ; actuellement placeholders `TODO(debt)` dans services)
+- [x] `sanitizeForFinanceSnapshot` unit tests (whitelist + fuzzing 200 itérations)
+- [x] `FinanceAlertingService` cooldown tests (intégration)
+- [x] Endpoints admin `/v1/admin/finance/*` (listing mismatch + transition + manual run + daily report) — RBAC ADMIN + audit `MissionEvent` quand mission résolvable
+- [x] Runbook ops — section **Dépendances critiques** (Stripe/Redis/DB/Prometheus-Grafana/Resend)
+- [ ] Verify (Phase 4) — rapport `reviewer-securite-code` + sign-off CTO
+
+#### 4.15.16 Build Ticket 4.5 — Notes d’implémentation (état courant)
+
+> Branche : `feat/prd-004-ticket-4.5-financial-monitoring-build`.
+
+- **Ajustements CTO intégrés** :
+  - Lock **DB** `finance_scheduler_locks` (anti-overlap schedulers, TTL par cron, `INSERT … ON CONFLICT … WHERE expires_at < …`).
+  - CI / tests : fuzz `sanitizeForFinanceSnapshot`, whitelist labels finance (`FinanceMetricsTracker`), RBAC `/v1/admin/finance/*`, cooldown alertes, purge rétention.
+  - Runbook : section dépendances critiques.
+- **Itération 2 livrée (2026-05-13)** — cœur métier :
+  - Codes invariants versionnés `FIN-I-001`…`FIN-I-011`, `FIN-J-001` ; fichiers atomiques `apps/api/src/modules/finance/invariants/*` + `registry.ts`.
+  - `FinanceReconcileService` : reconcile 7j DB↔Stripe read-only ; `FinanceStuckFundsService` ; `FinanceInvariantsService` (J-1) ; `FinancePayoutAnomalyService` ; `FinanceDailyReportService` (upsert + helper email, pas d’envoi Resend tant que PR #20).
+  - Lifecycle `ACKNOWLEDGED` + machine d’état stricte + filtre `mismatchCode` sur listing admin.
+  - Migration `20260513030000_prd004_ticket_4_5_invariants_lifecycle` (enum + colonnes + unique key).
+  - Readiness Verify : `docs/ops/finance-iteration-2-verify-readiness.md`.
+- **Dette explicite (Build suite / itération 3)** :
+  - `TODO(debt)` : `MISSING_STRIPE` / imports Stripe dashboard ; webhook duplicate idempotence testé E2E ; pagination reconcile si > 600 rows / run.
+  - `TODO(debt)` : brancher `FinanceAlertingService` → `AlertingService` Discord/Resend quand disponible (PR #20).
+  - `TODO(debt)` : `markStaleRunningRunsFailed` sur `STUCK` / `INVARIANTS` / `REPORT` / `PAYOUT_ANOMALY` (actuellement surtout `RECONCILE`).
+
+#### 4.15.17 `FIN-ITER2-DEBTS` — Ticket de dette **bloquant activation production**
+
+> **Décision CTO 2026-05-13** : la Build itération 2 est mergée **uniquement** sous statut `READY WITH DEBT` et **avec `FF_FINANCE_MONITORING_ENABLED=false` par défaut**. L'activation `true` en recette puis prod est **interdite** tant que les dettes critiques listées ci-dessous ne sont pas closes et qu'un Verify final `reviewer-securite-code` n'est pas joint.
+
+| Code | Description | Bloquant `FF=true` ? | Référence |
+|---|---|---|---|
+| **FIN-DAILY-EMAIL** | Brancher le payload daily report sur `AlertingService` (Resend) + alerte P1 si génération du report échoue + tests unitaires & intégration sans PII dans le payload. Actuellement : payload helper construit, **pas d'envoi réseau**. | ✅ **Oui** | `apps/api/src/modules/finance/services/finance-daily-report.service.ts`, `docs/ops/finance-reconciliation-runbook.md` §dépendances |
+| **FIN-RECONCILE-PAGING** | Implémenter pagination / cursor `findMany` (batch fixe ≤ 600) avec borne haute documentée pour le reconcile 7 jours. Garantir absence de boucle non bornée ; conserver `p-limit(25 req/s)` Stripe. | ✅ **Oui** | `apps/api/src/modules/finance/services/finance-reconcile.service.ts` |
+| **FIN-MANUAL-RATELIMIT** | Rendre la limite OQ-13 (1/h/admin) **atomique** (transaction Prisma `SERIALIZABLE` *ou* `@Throttle` `userId`-scoped HTTP). Documenter la sémantique concurrente : `429` si limite dépassée, `409 FINANCE_RECONCILE_BUSY` si lock détenu. Tests intégration des deux cas. | ✅ **Oui** | `apps/api/src/modules/finance/controllers/admin-finance.controller.ts` (F2 Verify itération 1) |
+| **FIN-STALE-RUNS** | Étendre `markStaleRunningRunsFailed` aux `FinanceRunType.STUCK_FUNDS`, `INVARIANTS`, `PAYOUT_ANOMALY`, `DAILY_REPORT` (aujourd'hui appliqué surtout au `RECONCILE`). Test dédié simulant un run `RUNNING` orphelin pour chaque type. | ✅ **Oui** | `apps/api/src/modules/finance/finance.repository.ts` + schedulers concernés (S3 Verify itération 1) |
+| **FIN-WEBHOOK-TESTS** | Couverture intégration : (a) duplicate `stripe_event_id` côté webhook consommé sans créer de doublon, (b) `MISSING_STRIPE` (objet présent côté Stripe absent côté DB). Validation explicite que la reconcile produit le `mismatchCode` attendu sans correction. | ✅ **Oui** | `apps/api/test/integration/*.spec.ts` (à compléter) |
+
+**Conditions de levée du ticket** :
+
+1. Les 5 sous-dettes ci-dessus sont closes (PR + tests verts + relecture sécu spot).
+2. Un **rapport Verify final** est joint en complément de [`2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md`](../security-reviews/2026-05-13-prd-004-ticket-4-5-financial-monitoring-build-verify.md) — verdict `READY` (0 Critical / 0 Important non traité).
+3. Smoke recette `FF_FINANCE_MONITORING_ENABLED=true` exécuté selon [`docs/ops/finance-iteration-2-verify-readiness.md`](../ops/finance-iteration-2-verify-readiness.md).
+4. **DPO sign-off** sur rétention (90 j mismatch / 5 ans daily report).
+5. **CTO sign-off** explicite d'activation production.
+
+**Communication interne autorisée** (formulation figée par décision CTO 2026-05-13) :
+
+> « Les fondations métier du monitoring financier sont mergées sous feature flag OFF. L'activation production est bloquée jusqu'à la résolution complète de `FIN-ITER2-DEBTS`. »
+
+Toute communication mentionnant « monitoring financier opérationnel » ou équivalent est **interdite** tant que ce ticket n'est pas clos.
+
+#### 4.15.15 Definition of Done — Verify Ticket 4.5 (préfiguration)
+
+- [ ] Tests intégration end-to-end : mismatch détecté → alerte émise → admin résout → métriques OK
+- [ ] Test charge reconcile cron sur fixture 1 000 Payment/Transfer/Refund → < 5 min runtime
+- [ ] Audit redaction `dbSnapshot/stripeSnapshot` (sanitizeForFinanceSnapshot fuzz test sur 100 payloads PII)
+- [ ] Audit RBAC `/v1/admin/finance/*` (CLIENT / PRESTATAIRE → 401/403, ADMIN → 200)
+- [ ] DPO confirme rétention **90 j `FinanceMismatch`** (tous statuts, fenêtres `resolvedAt` / `detectedAt`) + **5 ans `FinanceDailyReport`** conforme RGPD + comptable
+- [ ] Sign-off CTO Verify Ticket 4.5
+
+---
+
 ## 5. Phase BUILD
 
-`N/A` — bloquée tant que le Design n'est pas validé.
+**Ticket 4.5 — Monitoring financier** : Build autorisé CTO (2026-05-12). Branche : `feat/prd-004-ticket-4.5-financial-monitoring-build`.
+
+- **Itération 1 livrée** : schéma `finance_*` + lock DB anti-overlap, module Nest, métriques `cleanconnect_finance_*`, endpoints admin, crons câblés, runbook §dépendances critiques.
+- **Itération 2 livrée** : invariants `FIN-*` + reconcile/stuck/invariants/payout/daily report métier + lifecycle `ACKNOWLEDGED` + tests (`invariants.spec.ts`, `finance-iteration-2.integration.spec.ts`) + checklist `docs/ops/finance-iteration-2-verify-readiness.md`.
+- **STOP** : après merge PR Build itération 2 → revue CTO + passage **Verify** (§4.15.15) avant production.
 
 ---
 
 ## 6. Phase VERIFY
 
-`N/A` — bloquée tant que le Build n'est pas validé.
+`N/A` — bloquée tant que le Build Ticket 4.5 n'est pas complété **et** le rapport `reviewer-securite-code` (0 Critical / 0 Important non traité) n'est pas joint.
 
 ---
 
